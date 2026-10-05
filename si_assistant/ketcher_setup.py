@@ -72,11 +72,11 @@ def install(progress: Callable[[int, int], None] | None = None) -> Path:
             base = name.rsplit("/", 1)[-1]
             if name.endswith("/") or any(base.startswith(s) for s in SKIP):
                 continue
-            target = tmp / name
-            if not target.resolve().is_relative_to(tmp.resolve()):
+            out = tmp / name
+            if not out.resolve().is_relative_to(tmp.resolve()):
                 continue  # never write outside the folder
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(name))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(zf.read(name))
     try:
         (tmp / "LICENSE").write_bytes(_download(LICENSE_URL))
     except OSError:
