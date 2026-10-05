@@ -614,8 +614,8 @@ class ProjectDashboard(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
         scroll.setWidget(overview)
+        self.scroll_area = scroll   # (not "scroll": that name is a QWidget method)
         scroll.viewport().installEventFilter(self)
-        self.scroll = scroll
         self.overview = overview
 
         self.grid = ProjectGridView(project)
@@ -647,7 +647,7 @@ class ProjectDashboard(QWidget):
             QTimer.singleShot(0, self._size_splitter)
 
     def _size_splitter(self) -> None:
-        self._arrange(self.scroll.viewport().width())
+        self._arrange(self.scroll_area.viewport().width())
         overview = self.overview.sizeHint().height() + 4
         total = sum(self.splitter.sizes()) or self.height()
         # In a short window the grid gets the larger share (the overview scrolls).
@@ -656,7 +656,14 @@ class ProjectDashboard(QWidget):
         self.splitter.setSizes([top, max(260, total - top)])
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802
-        if obj is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
+        # Events can still arrive while the page is being taken down: then the scroll
+        # area (or this page's Python side) may already be gone.
+        area = self.__dict__.get("scroll_area")
+        try:
+            viewport = area.viewport() if area is not None else None
+        except RuntimeError:
+            viewport = None
+        if viewport is not None and obj is viewport and event.type() == QEvent.Type.Resize:
             self._arrange(event.size().width())
         return super().eventFilter(obj, event)
 
@@ -717,7 +724,7 @@ class ProjectDashboard(QWidget):
                                       "Fields flagged by a person (⚑)"))
         self.problems.set_items(problems, mode)
         self._fill_sections(summary, colours)
-        self._arrange(self.scroll.viewport().width())
+        self._arrange(self.scroll_area.viewport().width())
         self.grid.set_rows(section_rows)
 
     def _fill_sections(self, summary: D.ProjectSummary, colours: dict) -> None:

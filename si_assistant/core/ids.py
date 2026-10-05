@@ -12,8 +12,10 @@ import unicodedata
 
 
 def new_id(prefix: str) -> str:
-    """E.g. new_id("s") -> "s-7f3a2c"."""
-    return f"{prefix}-{secrets.token_hex(3)}"
+    """E.g. new_id("s") -> "s-7f3a2c91". Eight hex digits (4 billion possibilities) make a
+    clash vanishingly unlikely even in very large projects; IDs made by older versions
+    (six digits) keep working unchanged."""
+    return f"{prefix}-{secrets.token_hex(4)}"
 
 
 def slugify(name: str, max_len: int = 40) -> str:

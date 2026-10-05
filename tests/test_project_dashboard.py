@@ -305,7 +305,10 @@ def test_long_section_paths_and_narrow_windows(qapp, project):
     assert "Synthesis" not in link.text() and "…" in link.text()
     assert link.sizeHint().width() <= SECTION_NAME_WIDTH + 20
     assert "Synthesis of the Amide Substrates" in link.toolTip()
-    dash._arrange(500)
+    # Narrower than any pair of boxes, whatever the fonts on this system.
+    narrow = min(left.minimumSizeHint().width() + right.minimumSizeHint().width()
+                 for _row, left, right in dash._rows)
+    dash._arrange(narrow)
     assert all(row.direction() == QBoxLayout.Direction.TopToBottom for row, *_ in dash._rows)
     assert dash.overview.minimumSizeHint().width() <= 500
     dash._arrange(1400)

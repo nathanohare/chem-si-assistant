@@ -97,6 +97,8 @@ class _Router(QObject):
                     return True
             except RuntimeError:   # (its window was deleted)
                 self.windows.discard(keys)
+            except Exception:      # noqa: BLE001 — a shortcut question must never crash
+                continue           # the program; the key then works as usual
         return False
 
 

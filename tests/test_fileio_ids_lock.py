@@ -37,9 +37,9 @@ def test_read_text_normalises_windows_line_endings(tmp_path):
 # ---------------------------------------------------------------------- ids
 
 def test_new_id_format_and_uniqueness():
-    ids = {new_id("c") for _ in range(500)}
-    assert len(ids) == 500
-    assert all(re.fullmatch(r"c-[0-9a-f]{6}", i) for i in ids)
+    ids = {new_id("c") for _ in range(5000)}
+    assert len(ids) == 5000   # (six digits clashed about once in 140 runs of 500)
+    assert all(re.fullmatch(r"c-[0-9a-f]{8}", i) for i in ids)
 
 
 def test_slugify():
