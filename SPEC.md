@@ -818,7 +818,7 @@ You can switch between chart types (bars, pie/donut) and change the status colou
      These files stay in Nathan's local folder; they are only left out of the repository (`.gitignore`).
    - **Test data:** the current sample project (`tests/sample_project.py`, modelled on Example SI 1 with real authors' names and email) is **not uploaded**. Nathan will provide a sample dataset; the tests are switched to it before the first upload.
    - **Commit email:** commits use Nathan's private GitHub "noreply" address (`195338517+nathanohare@users.noreply.github.com`), not his university email. It is set for this repository only when the repository is created. GitHub sign-in was verified on 2026-10-05: account nathanohare, with permission to create repositories and run automated builds.
-   - **Status:** started. The repository is private at first and made public later. The made-up sample project replaces the real-data one until Nathan provides his dataset (item 5).
+   - **Status (2026-10-05):** the private repository `nathanohare/chem-si-assistant` is created. Automatic tests pass on Windows, macOS and Linux. Release **v0.1.0** was built and published by GitHub Actions: Windows installer, macOS dmg (Apple silicon) and Linux AppImage, each installed or started and self-tested on its runner. Making the repository public later turns on the update check and feedback for everyone. The repository is private at first and made public later. The made-up sample project replaces the real-data one until Nathan provides his dataset (item 5).
 2. **Releases.** Installers are built by GitHub Actions whenever a version is tagged (e.g. `v1.0.0`) and attached to the GitHub Release:
    - a Windows installer;
    - a macOS app (`.dmg`);
