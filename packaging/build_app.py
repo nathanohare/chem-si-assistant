@@ -287,7 +287,8 @@ def build(dist: Path, work: Path) -> Path:
         raise SystemExit("Can't build yet, missing: " + ", ".join(missing)
                          + ("\n(Ketcher: run  python -m si_assistant.ketcher_setup)"
                             if any("ketcher" in m for m in missing) else ""))
-    work = Path(work)
+    # Absolute: PyInstaller reads relative paths in the spec from the spec's own folder.
+    work, dist = Path(work).resolve(), Path(dist).resolve()
     icons = make_icons(work / "icons")
     version = read_version()
     version_file = work / "version_info.txt"
