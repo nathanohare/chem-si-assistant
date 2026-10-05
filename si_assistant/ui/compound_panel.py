@@ -1,0 +1,446 @@
+"""The Compound Page (SPEC §7): header with ID and completion, then one box per field."""
+
+from __future__ import annotations
+
+from typing import Callable
+
+from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDialog, QHBoxLayout, QLabel,
+                               QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
+                               QScrollArea, QTextEdit, QToolButton, QVBoxLayout, QWidget)
+
+from ..core import checks
+from ..core import fields as F
+from ..core.project import Compound, Project, ProjectError
+from .dialogs import CustomFieldDialog
+from .field_widgets import AttachmentsEditor, FieldBox
+from .structure_widgets import (HrmsEditor, StructureEditor, drawing_settings, formula_html,
+                                mol_pixmap, picture_pixmap)
+
+AUTOSAVE_DELAY_MS = 800
+
+
+def make_read_only(root: QWidget) -> None:
+    """Make every input under `root` read-only, keeping text selectable/readable."""
+    for w in root.findChildren(QWidget):
+        if w.property("keep_enabled"):
+            continue
+        if isinstance(w, (QLineEdit, QTextEdit, QPlainTextEdit)):
+            w.setReadOnly(True)
+        elif isinstance(w, (QComboBox, QAbstractButton)):
+            w.setEnabled(False)
+    root.setAcceptDrops(False)
+    for w in root.findChildren(QWidget):
+        w.setAcceptDrops(False)
+
+
+class CompoundPanel(QWidget):
+    THUMB_SIZE = QSize(110, 80)
+
+    labels_changed = Signal(str)     # compound id: its name or ID changed (refresh the tree)
+    saved = Signal(str)              # status-bar message
+    structure_updated = Signal(str)  # compound id: its structure (or picture) changed
+    convert_requested = Signal(str)  # compound id: "Change to reaction scheme" was clicked
+    view_spectra = Signal(str)       # compound id: "View spectra page" was clicked
+
+    def __init__(self, project: Project, compound: Compound, user_name: Callable[[], str],
+                 parent: QWidget | None = None):
+        super().__init__(parent)
+        self.project = project
+        self.compound = compound
+        self.user_name = user_name
+        self.boxes: list[FieldBox] = []
+        # Fields edited since the last save: they name the undo step ("Edit 3a ▸ Yield").
+        self._changed_keys: set[str] = set()
+
+        # ---- header
+        self.id_label = QLabel()
+        f = self.id_label.font()
+        f.setPointSizeF(f.pointSizeF() * 1.8)
+        f.setBold(True)
+        self.id_label.setFont(f)
+        self.name_label = QLabel()
+        self.name_label.setWordWrap(True)
+        f2 = self.name_label.font()
+        f2.setPointSizeF(f2.pointSizeF() * 1.2)
+        self.name_label.setFont(f2)
+
+        self.override_edit = QLineEdit(compound.id_override)
+        self.override_edit.setMaximumWidth(120)
+        self.override_edit.setToolTip(
+            "Type an ID here to override the ID table for this compound.\n"
+            "Leave empty to use the automatic ID. The compound still uses up its row "
+            "in the table, so the compounds after it keep their IDs.")
+        self.override_edit.textEdited.connect(self._schedule_save)
+        self.override_edit.textEdited.connect(lambda _t: self._changed_keys.add("id_override"))
+
+        self.warning_label = QLabel()
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setStyleSheet("color: #d35400;")
+        self.completion_label = QLabel()
+        self.completion_label.setWordWrap(True)
+        self.thumb = QLabel()
+        self.thumb.setFixedSize(self.THUMB_SIZE)
+        self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.thumb.setStyleSheet("QLabel { background: white; color: #666; border-radius: 3px; }")
+        self.formula_label = QLabel()
+
+        name_col = QVBoxLayout()
+        name_col.addWidget(self.name_label)
+        name_col.addWidget(self.formula_label)
+        id_row = QHBoxLayout()
+        id_row.addWidget(self.thumb)
+        id_row.addWidget(self.id_label)
+        id_row.addLayout(name_col, 1)
+        id_col = QVBoxLayout()
+        id_line = QHBoxLayout()
+        id_line.addWidget(QLabel("Manual ID:"))
+        id_line.addWidget(self.override_edit)
+        id_col.addLayout(id_line)
+        if compound.scheme_id:
+            scheme = project.scheme(compound.scheme_id)
+            note = QLabel(f"Part of scheme page “{scheme.name}”.\nIts structure is not "
+                          "printed (the scheme is).")
+            note.setStyleSheet("color: palette(placeholder-text);")
+            note.setWordWrap(True)          # (a long scheme name must not widen the page)
+            note.setMinimumWidth(160)
+            note.setMaximumWidth(260)
+            note.setToolTip(note.text())
+            id_col.addWidget(note, 0, Qt.AlignmentFlag.AlignRight)
+        else:
+            convert = QPushButton("Change to reaction scheme…")
+            convert.setToolTip("Make a scheme page with this compound as its first sub-page. "
+                               "You can then paste the scheme and add the other compounds "
+                               "(starting materials, intermediates) as more sub-pages.")
+            convert.setEnabled(not project.read_only)
+            convert.clicked.connect(lambda: self.convert_requested.emit(self.compound.id))
+            id_col.addWidget(convert, 0, Qt.AlignmentFlag.AlignRight)
+        id_row.addLayout(id_col)
+
+        # ---- fields
+        self.fields_holder = QWidget()
+        self.fields_layout = QVBoxLayout(self.fields_holder)
+        self.fields_layout.setContentsMargins(0, 0, 4, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setWidget(self.fields_holder)
+        self.scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+
+        self.add_btn = QToolButton()
+        self.add_btn.setText("+ Add field")
+        self.add_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.add_menu = QMenu(self.add_btn)
+        self.add_menu.aboutToShow.connect(self._fill_add_menu)
+        self.add_btn.setMenu(self.add_menu)
+
+        collapse_all = QToolButton()
+        collapse_all.setText("▸ Collapse all")
+        collapse_all.setAutoRaise(True)
+        collapse_all.setProperty("keep_enabled", True)
+        collapse_all.clicked.connect(lambda: self.set_all_collapsed(True))
+        expand_all = QToolButton()
+        expand_all.setText("▾ Expand all")
+        expand_all.setAutoRaise(True)
+        expand_all.setProperty("keep_enabled", True)
+        expand_all.clicked.connect(lambda: self.set_all_collapsed(False))
+        status_row = QHBoxLayout()
+        status_row.addWidget(self.completion_label, 1)
+        status_row.addWidget(collapse_all)
+        status_row.addWidget(expand_all)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(id_row)
+        layout.addWidget(self.warning_label)
+        layout.addLayout(status_row)
+        layout.addWidget(self.scroll, 1)
+
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(AUTOSAVE_DELAY_MS)
+        self._timer.timeout.connect(self.save)
+
+        self._build_fields()
+        self._refresh_header()
+
+    # ------------------------------------------------------------------ building
+
+    def _build_fields(self) -> None:
+        while self.fields_layout.count():
+            item = self.fields_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.boxes = []
+        required = self.project.section(self.compound.section_id).required_keys()
+        for defn in self.project.field_defs(self.compound):
+            if defn.key == "notes":
+                continue  # always last, after the Add-field button
+            self._add_box(defn, defn.key in required)
+        add_row = QHBoxLayout()
+        add_row.addWidget(self.add_btn)
+        add_row.addStretch()
+        holder = QWidget()
+        holder.setLayout(add_row)
+        self.fields_layout.addWidget(holder)
+        self._add_box(F.ALL_FIELDS["notes"], False)
+        self.fields_layout.addStretch()
+        if self.project.read_only:
+            make_read_only(self.fields_holder)
+            self.override_edit.setReadOnly(True)
+
+    def _add_box(self, defn: F.FieldDef, required: bool) -> None:
+        box = FieldBox(self.project, self.compound, defn, required, self.save_pending)
+        box.changed.connect(self._schedule_save)
+        box.changed.connect(lambda *_a, k=defn.key: self._changed_keys.add(k))
+        box.dismiss_requested.connect(self._dismiss_warning)
+        if isinstance(box.editor, StructureEditor):
+            box.editor.structure_changed.connect(self._on_structure_changed)
+        if isinstance(box.editor, AttachmentsEditor):
+            # "add it now" link in the Additional files note. The page is rebuilt, so wait
+            # until the click on the link has finished.
+            box.editor.add_field_requested.connect(
+                lambda key: QTimer.singleShot(0, lambda: self._add_field({"key": key})))
+            # Files are saved at once; the tree's spectra pages may change with them.
+            box.editor.files_changed.connect(lambda: self.labels_changed.emit(self.compound.id))
+            # (e.g. "a ¹H report but no ¹H spectrum" goes once one is added or pasted)
+            box.editor.files_changed.connect(self._refresh_header)
+            box.editor.view_spectra_requested.connect(self._view_spectra)
+            if hasattr(box.editor, "pasted"):   # the Spectra field (SPEC §13l.1)
+                box.editor.pasted.connect(self.saved.emit)
+        box.remove_requested.connect(self._remove_field)
+        self.boxes.append(box)
+        self.fields_layout.addWidget(box)
+
+    def _view_spectra(self) -> None:
+        self.flush()   # (a header or caption typed in the Spectra field)
+        self.view_spectra.emit(self.compound.id)
+
+    def focus_field(self, key: str) -> None:
+        for box in self.boxes:
+            if box.defn.key == key:
+                box.set_collapsed(False)  # opening a field from the dashboard shows it
+                self.scroll.ensureWidgetVisible(box, 0, 40)
+                box.editor.setFocus()
+                return
+
+    def _dismiss_warning(self, warning) -> None:
+        from .warnings_panel import ask_reason
+        reason = ask_reason(self, warning.message)
+        if reason is None:
+            return
+        self.flush()
+        with self.project.undo_step("Dismiss a warning", where=[("compound", self.compound.id)]):
+            self.project.dismiss_warning(self.compound, warning, reason)
+        self._refresh_header()
+        self.labels_changed.emit(self.compound.id)
+        self.saved.emit("Warning dismissed")
+
+    def set_all_collapsed(self, collapsed: bool) -> None:
+        self.save_pending()  # summaries should reflect what's on screen
+        for box in self.boxes:
+            box.set_collapsed(collapsed)
+
+    # ------------------------------------------------------------------ header
+
+    def _refresh_header(self) -> None:
+        report = self.project.id_report()
+        cid = self.compound.id
+        shown = report.display_id(cid)
+        lock = " 🔒" if self.compound.id_override else ""
+        self.id_label.setText(shown + lock)
+        self.id_label.setToolTip("Manual ID (overrides the ID table)" if lock else
+                                 "Automatic ID from the section's ID table")
+        self.name_label.setText(self.compound.name or "<i>unnamed compound</i>")
+        mol = self.project.read_structure(self.compound)
+        if mol is not None:
+            info = self.project.structure_info(self.compound)
+            picture = self.project.structure_image_path(self.compound)
+            pixmap = (picture_pixmap(picture, self.THUMB_SIZE - QSize(6, 6))
+                      if picture is not None and picture.exists() else None)
+            if pixmap is not None and not pixmap.isNull():
+                self.thumb.setPixmap(pixmap)
+            else:
+                self.thumb.setPixmap(mol_pixmap(mol, self.THUMB_SIZE,
+                                                drawing_settings(self.project)))
+            self.formula_label.setText(f"{formula_html(info.formula)} &nbsp; MW {info.mw:.2f}")
+        else:
+            self.thumb.setPixmap(QPixmap())
+            self.thumb.setText("no structure")
+            self.formula_label.setText("")
+        table_id = self._table_id()
+        self.override_edit.setPlaceholderText(f"auto: {table_id or 'none'}")
+        # Automatic checks (SPEC §8.2): ID problems at the top, the rest on their fields.
+        active = checks.active_warnings(self.project, self.compound, report)
+        id_warnings = [w.message for w in active if w.field == checks.ID_KEY]
+        self.warning_label.setText("\n".join(f"⚠ {w}" for w in id_warnings))
+        self.warning_label.setVisible(bool(id_warnings))
+        by_field: dict[str, list] = {}
+        for w in active:
+            by_field.setdefault(w.field, []).append(w)
+        for box in self.boxes:
+            box.set_warnings(by_field.get(box.defn.key, []))
+
+        filled, total, missing = self.project.completion(self.compound)
+        if total == 0:
+            text = "No required fields set for this section."
+        elif not missing:
+            text = f"✔ Complete — all {total} required fields filled."
+        else:
+            text = f"◐ {filled} / {total} required fields filled. Missing: {', '.join(missing)}."
+        flags = len(self.compound.flags)
+        if flags:
+            text += f"   ⚑ {flags} flag{'s' if flags != 1 else ''}."
+        if active:
+            text += f"   ⚠ {len(active)} warning{'s' if len(active) != 1 else ''}."
+        self.completion_label.setText(text)
+
+    def _table_id(self) -> str:
+        section = self.project.section(self.compound.section_id)
+        pos = section.compounds.index(self.compound)
+        return section.id_table[pos] if pos < len(section.id_table) else ""
+
+    # ------------------------------------------------------------------ saving
+
+    def _schedule_save(self, *_args) -> None:
+        if not self.project.read_only:
+            self._timer.start()
+
+    def save_pending(self) -> None:
+        """Before a separate action on this page (a structure drawn, a file added, a field
+        added…): typing not saved yet is saved first, as its own undo step, so undoing the
+        action does not undo the typing too."""
+        self.flush()
+        if not self.project.read_only:
+            with self.project.autosave():
+                self.store_all()
+
+    def _shown_id(self) -> str:
+        return self.project.id_report().display_id(self.compound.id)
+
+    def store_all(self) -> None:
+        """Copy everything on screen into the compound (writes .txt files, not compound.json)."""
+        user = self.user_name()
+        for box in self.boxes:
+            box.store(user)
+        self.compound.data["id_override"] = self.override_edit.text().strip()
+
+    def save(self) -> None:
+        self._timer.stop()
+        if self.project.read_only:
+            return
+        with self.project.autosave():   # (typing: merged into one undo step per field)
+            self.store_all()
+            self.project.save_compound(self.compound)
+        self._refresh_header()
+        for box in self.boxes:
+            if box.collapsed:
+                box.refresh_summary()
+            if isinstance(box.editor, AttachmentsEditor):
+                # (an Additional file set to "Spectra section" gives a spectra page)
+                box.editor.refresh_view_button()
+        self._changed_keys.clear()
+        # Name, manual ID or flags may have changed; the tree shows all three.
+        self.labels_changed.emit(self.compound.id)
+        self.saved.emit("Saved")
+
+    def undo_context(self) -> tuple:
+        """(merge key, label) of the undo step for this page's saves (SPEC §13k.11):
+        saves of the same field merge into one step, "Edit 3a ▸ Yield"."""
+        keys = tuple(sorted(self._changed_keys))
+        cid = self.compound.id
+        names = {b.defn.key: b.defn.label for b in self.boxes}
+        names["id_override"] = "Manual ID"
+
+        def label() -> str:
+            shown = self.project.id_report().display_id(cid)
+            return f"Edit {shown}" + (f" ▸ {names.get(keys[0], keys[0])}"
+                                      if len(keys) == 1 else "")
+        return ("compound", cid, keys), label
+
+    def flush(self) -> None:
+        if self._timer.isActive():
+            self.save()
+
+    def _on_structure_changed(self, added: list) -> None:
+        if added:
+            # New NMR report boxes are needed. Rebuild once this click has finished.
+            labels = ", ".join(f"{F.nucleus_label(n)} NMR" for n in added)
+            self.saved.emit(f"Added {labels} report(s) — the structure contains "
+                            f"{', '.join(n.lstrip('0123456789') for n in added)}")
+            QTimer.singleShot(0, self._rebuild_keep_scroll)
+        else:
+            self.saved.emit("Structure saved")
+        for box in self.boxes:
+            if isinstance(box.editor, HrmsEditor):
+                box.editor.refresh_calculation()
+            elif isinstance(box.editor, StructureEditor):
+                box.editor.refresh()
+        self._refresh_header()
+        self.labels_changed.emit(self.compound.id)
+        self.structure_updated.emit(self.compound.id)
+
+    def refresh_structure(self) -> None:
+        """The structure was changed from outside this page (e.g. by the scheme page)."""
+        self._on_structure_changed([])
+
+    def _rebuild_keep_scroll(self) -> None:
+        pos = self.scroll.verticalScrollBar().value()
+        self._build_fields()
+        QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(pos))
+
+    # ------------------------------------------------------------------ adding/removing fields
+
+    def _fill_add_menu(self) -> None:
+        self.add_menu.clear()
+        present = set(self.compound.field_keys)
+        section = self.project.section(self.compound.section_id)
+        core = [d for d in F.CORE_FIELDS if d.removable and d.key not in present]
+        library = [d for d in F.LIBRARY_FIELDS if d.key not in present]
+        custom = [e for e in section.default_fields
+                  if e.get("custom") and e["key"] not in present]
+        for group in (core, library):
+            for d in group:
+                self.add_menu.addAction(d.label, lambda d=d: self._add_field({"key": d.key}))
+            if group:
+                self.add_menu.addSeparator()
+        for e in custom:
+            self.add_menu.addAction(e["custom"]["label"], lambda e=e: self._add_field(e))
+        if custom:
+            self.add_menu.addSeparator()
+        self.add_menu.addAction("Custom field…", self._add_custom_field)
+
+    def _add_custom_field(self) -> None:
+        dlg = CustomFieldDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._add_field(dlg.entry())
+
+    def _field_name(self, entry: dict) -> str:
+        key = entry.get("key", "")
+        if entry.get("custom"):
+            return entry["custom"].get("label") or key
+        defn = F.ALL_FIELDS.get(key)
+        return defn.label if defn is not None else key
+
+    def _add_field(self, entry: dict) -> None:
+        self.save_pending()
+        try:
+            with self.project.undo_step(f"Add field “{self._field_name(entry)}” to "
+                                        f"{self._shown_id()}"):
+                self.project.add_field(self.compound, entry)
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not add field", str(e))
+        self._build_fields()
+        self._refresh_header()
+        self.focus_field(entry["key"])
+
+    def _remove_field(self, key: str) -> None:
+        self.save_pending()
+        name = next((b.defn.label for b in self.boxes if b.defn.key == key), key)
+        try:
+            with self.project.undo_step(f"Remove field “{name}” from {self._shown_id()}"):
+                self.project.remove_field(self.compound, key)
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not remove field", str(e))
+        self._build_fields()
+        self._refresh_header()
+        self.saved.emit("Field removed (its data is kept if you add it back)")

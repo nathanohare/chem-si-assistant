@@ -1,0 +1,159 @@
+Open Source Chemistry Dictionary (a chemistry spell-check dictionary for word processors)
+Version 3.0
+Created by Adam M. Azman
+
+Bundled with Chem SI Assistant as azman_chemistry_dictionary.txt and used by its
+spelling check.
+
+Source:   https://www.sciencebase.com/chem-dic.zip (file chemistry.dic)
+Article:  A. M. Azman, "A Chemistry Spell-Check Dictionary for Word Processors",
+          J. Chem. Educ. 2012, 89, 412-413. https://doi.org/10.1021/ed2002994
+Licence:  Creative Commons Attribution 3.0 United States (CC BY 3.0 US)
+          https://creativecommons.org/licenses/by/3.0/us/
+
+Changes:  none to the words. The file was converted from UTF-16 to UTF-8 text, and its
+          lines were sorted alphabetically (ignoring capitals) with repeated lines removed
+          (104,658 words). Made by tools/get_chem_dictionary.py.
+
+The credits and licence as distributed (install.txt):
+
+//Open Source Chemistry Dictionary//
+//Created by Adam M. Azman//
+//8 February 2008//
+//Technical help from Brian J. Azman//
+//Special thanks to David Bradley//
+
+//The Chemical Dictionary was developed with the assistance of ChemSpider,//
+//a free access structure centric community for chemists.//
+//Visit www.chemspider.com.//
+
+
+
+***
+//This work is licensed under the Creative Commons Attribution 3.0 United States License.//
+//To view a copy of this license,//
+//visit http://creativecommons.org/licenses/by/3.0/us/ or//
+//send a letter to Creative Commons,//
+//171 Second Street, Suite 300,//
+//San Francisco, California, 94105, USA.//
+***
+
+
+
+
+//Have a question? comment? suggestion for improvement? notice a misspelled word? want me to add your own custom dictionary to our master list?//
+//Email me at chemdictionary@gmail.com//
+//Thank you for helping me make this dictionary as complete and accurate as possible!//
+
+
+
+
+Chemistry Dictionary for Word Processing
+
+version 3.0 
+104,662 words
+
+**To update an older version of the dictionary:
+1) Download the chem-dict.zip file
+2) Extract all of the files to the folder into which the previous version of the dictionary was extracted
+3) When a warning message tells you the files already exist, click the appropriate button to overwrite the previous files
+4) If any documents are currently open, they need to be completely closed and reopened.  Updated dictionary should begin working immediately.
+
+
+
+**First time installation:
+
+Microsoft Office Insallation (Windows Operating System)
+
+1) Download the chem-dic.zip file
+2) Open the zipped folder and select "Extract All" from the File menu
+3) Select "Next" to begin the Extraction Wizard
+4) Click "Browse..."
+5) Select "My Documents" and click "Make New Folder"
+6) Rename the "New Folder" to "dictionary" and click "OK"
+7) Click "Next" to begin the extraction
+8) Click "Finish" to exit the Extraction Wizard
+9) Open Microsoft Word
+
+For Microsoft Office 2007:
+
+10) Click on the Windows Office button at the top left of the menu and select "Word Options"
+11) Click "Custom Dictionaries" under the "Proofing" tab
+
+For other Microsoft Office versions:
+
+10) Select "Options" from the "Tools" menu
+11) Click "Custom Dictionaries" under the "Spelling and Grammar" tab
+
+
+12) Click "Add"
+13) Navigate to "My Documents\dictionary"
+14) Select "chemistry.dic" and click "Open"
+15) Click "OK" to exit the Custom Dictionaries window
+16) click "OK" to exit the Options window
+
+
+
+
+
+Microsoft Office (Macintosh Operating System)
+
+1) Save ChemDictMac to Users:yourusername:Library:Preferences:Microsoft:
+2) Open Word
+3) Select Preferences from the Word menu
+4) Select Custom Dictionary from the Spelling and Grammar tab
+5) Click Add
+6) Browse to Users:yourusername:Library:Preferences:Microsoft:ChemDictMac.dic
+7) Click OK
+
+
+
+
+
+
+OpenOffice.org Writer Installation
+
+1) Browse to http://extensions.services.openoffice.org/en/project/ChemDictOOo
+2) Click the green "Get It!" button and follow prompts to install the extension
+
+
+
+
+
+
+File history
+-------
+
+
+Version 1.0
+8 February 2008
+
+-Combed several online chemistry glossaries for "misspelled" terms
+-Created initial dictionary list (~8,000 entries) and added conjugations
+-Vetted list against Crimmins Group Publications, and JACS, JOC, and OL ASAPs for missed words
+
+-------
+
+Version 1.1
+8 February 2008
+
+-Added computer-generated list of ~ 10,000 systematic derivatives of common chemical backbones
+-Dictionary list now ~18,000 entries
+
+-------
+
+Version 2.0
+4 December 2008
+
+-Expanded list dramatically with addition of all valid entries from ChemSpider's identifier database.  Special thanks to ChemSpider.com
+-Added small list of American and European chemists names.
+-Dictionary list now ~104,000 entries
+
+-------
+
+Version 3.0
+7 January 2011
+
+-Added user-generated words
+-Created OpenOffice.org extension
+-Dictionary list now ~105,000 entries

@@ -1,0 +1,24 @@
+name: Other feedback
+description: Anything else you'd like to say about Chem SI Assistant (questions, praise, confusing wording...).
+title: "Feedback: "
+body:
+  - type: textarea
+    id: feedback
+    attributes:
+      label: Your feedback
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Program version
+      description: Filled in when you use Help ▸ Send feedback.
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Filled in when you use Help ▸ Send feedback.
+    validations:
+      required: false

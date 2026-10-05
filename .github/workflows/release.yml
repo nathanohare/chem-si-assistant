@@ -1,0 +1,288 @@
+# Builds the installers and publishes a GitHub Release (SPEC §13m.2).
+#
+# Runs when a version tag is pushed (v1.2.3, or v1.2.0-beta.1 for a pre-release), or by
+# hand (Actions ▸ Release ▸ Run workflow; with a tag it publishes that release, without
+# one it only builds, to try the installers). Nothing runs on ordinary pushes, to keep
+# build minutes low while the repository is private.
+#
+#  1. version  — the tag must equal si_assistant.__version__, and CHANGELOG.md must have a
+#                section for it (its text becomes the release notes): checked first.
+#  2. build    — on Windows, macOS (Apple silicon) and Linux (Ubuntu 22.04, so the
+#                AppImage runs on older systems too): PyInstaller, then a start-up test
+#                and a self-test (compiling a made-up sample project) of the built
+#                program, then the installer:
+#                  Chem-SI-Assistant-<version>-Windows-Setup.exe  (Inno Setup; also
+#                    installed and started once silently, then uninstalled)
+#                  Chem-SI-Assistant-<version>-macOS.dmg          (hdiutil)
+#                  Chem-SI-Assistant-<version>-x86_64.AppImage    (appimagetool)
+#                These names are what the program's update check looks for
+#                (si_assistant/updates.py).
+#  3. release  — creates the GitHub Release with the three files.
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Version tag to publish (e.g. v0.1.0). Leave empty to only build."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONUTF8: "1"
+  PYTHONFAULTHANDLER: "1"
+
+jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tag, version and release notes
+        id: v
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          version="$(python packaging/build_app.py version)"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            tag="${GITHUB_REF_NAME}"; publish=true
+          elif [ -n "${INPUT_TAG:-}" ]; then
+            tag="${INPUT_TAG}"; publish=true
+          else
+            tag="v${version}"; publish=false
+          fi
+          python packaging/build_app.py check-version --tag "$tag"
+          python packaging/build_app.py notes --version "$version" --out release-notes.md
+          case "$tag" in *-*) prerelease=true ;; *) prerelease=false ;; esac
+          {
+            echo "version=$version"; echo "tag=$tag"
+            echo "prerelease=$prerelease"; echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "Version $version, tag $tag, pre-release $prerelease, publish $publish"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: release-notes.md
+
+  build:
+    name: Build (${{ matrix.key }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            key: windows
+          - os: macos-latest
+            key: macos
+          - os: ubuntu-22.04
+            key: linux
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Qt system libraries and tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libopengl0 libxkbcommon0 libxkbcommon-x11-0 libxcb-cursor0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xinerama0 libxcb-xfixes0 libxcb-xkb1 libdbus-1-3 \
+            libfontconfig1 libfreetype6 fonts-dejavu-core fonts-liberation \
+            libnss3 libxcomposite1 libxdamage1 libxrandr2 libxtst6 libxkbfile1 libasound2 \
+            xvfb xauth file
+
+      - name: Install the program's packages and PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt "pyinstaller>=6.10,<7"
+
+      - name: Fetch Ketcher (the drawing editor)
+        run: python -m si_assistant.ketcher_setup
+
+      - name: Build the program (PyInstaller)
+        run: python packaging/build_app.py build --dist dist --work build
+
+      - name: Where the built program is
+        id: app
+        shell: bash
+        run: |
+          case "${{ matrix.key }}" in
+            windows) app="dist/Chem SI Assistant"; exe="$app/Chem SI Assistant.exe" ;;
+            macos)   app="dist/Chem SI Assistant.app"; exe="$app/Contents/MacOS/Chem SI Assistant" ;;
+            linux)   app="dist/chem-si-assistant"; exe="$app/chem-si-assistant" ;;
+          esac
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "exe=$exe" >> "$GITHUB_OUTPUT"
+          echo "asset=$(python packaging/build_app.py asset-name --platform ${{ matrix.key }})" >> "$GITHUB_OUTPUT"
+          du -sh "$app" || true
+
+      - name: Check the built program is complete
+        run: python packaging/build_app.py verify --app "${{ steps.app.outputs.app }}"
+
+      - name: Make a made-up sample project for the self-test
+        shell: bash
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          mkdir -p "$RUNNER_TEMP/sample"
+          python -c "import sys; from pathlib import Path; from PySide6.QtWidgets import QApplication; app = QApplication([]); from tests.sample_project import build_sample; p, _ = build_sample(Path(sys.argv[1])); p.close()" "$RUNNER_TEMP/sample"
+
+      - name: Start-up test and self-test (Windows, macOS)
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          python packaging/build_app.py smoke --exe "${{ steps.app.outputs.exe }}"
+          python packaging/build_app.py self-test --exe "${{ steps.app.outputs.exe }}" \
+            --report "$RUNNER_TEMP/self-test.json" --project "$RUNNER_TEMP/sample/Demo SI"
+
+      - name: Start-up test and self-test (Linux, on a virtual screen)
+        if: runner.os == 'Linux'
+        run: |
+          xvfb-run -a python packaging/build_app.py smoke --exe "${{ steps.app.outputs.exe }}"
+          xvfb-run -a python packaging/build_app.py self-test --exe "${{ steps.app.outputs.exe }}" \
+            --report "$RUNNER_TEMP/self-test.json" --project "$RUNNER_TEMP/sample/Demo SI"
+
+      # ------------------------------------------------------------------ Windows installer
+      - name: Make the installer (Inno Setup)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          $parts = ($env:VERSION -split '-')[0].Split('.')
+          $numeric = "$($parts[0]).$($parts[1]).$($parts[2]).0"
+          New-Item -ItemType Directory -Force out | Out-Null
+          & $iscc "/DAppVersion=$env:VERSION" "/DAppNumericVersion=$numeric" `
+            "/DSourceDir=$PWD\dist\Chem SI Assistant" "/DOutputDir=$PWD\out" `
+            packaging\windows\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          if (-not (Test-Path "out\${{ steps.app.outputs.asset }}")) { throw "installer missing" }
+
+      - name: Install, start and uninstall it once (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $dir = "$env:RUNNER_TEMP\installed"
+          $p = Start-Process "out\${{ steps.app.outputs.asset }}" -Wait -PassThru -ArgumentList `
+            '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$dir"
+          if ($p.ExitCode -ne 0) { throw "the installer failed ($($p.ExitCode))" }
+          python packaging/build_app.py smoke --exe "$dir\Chem SI Assistant.exe"
+          if ($LASTEXITCODE -ne 0) { throw "the installed program did not start" }
+          $u = Start-Process "$dir\unins000.exe" -Wait -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
+          if ($u.ExitCode -ne 0) { throw "the uninstaller failed ($($u.ExitCode))" }
+
+      # ------------------------------------------------------------------ macOS disk image
+      - name: Make the disk image (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          app="${{ steps.app.outputs.app }}"
+          # PyInstaller signs the app "ad hoc" (no developer certificate yet, SPEC §13m.2);
+          # Apple-silicon Macs need at least that. Re-sign if the check fails.
+          codesign --verify --deep --strict "$app" || codesign --force --deep --sign - "$app"
+          codesign --verify --deep --strict "$app"
+          mkdir -p dmg out
+          cp -R "$app" dmg/
+          ln -s /Applications dmg/Applications
+          hdiutil create -volname "Chem SI Assistant" -srcfolder dmg -ov -format UDZO \
+            "out/${{ steps.app.outputs.asset }}"
+
+      # ------------------------------------------------------------------ Linux AppImage
+      - name: Make the AppImage (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          python packaging/build_app.py appdir --app "${{ steps.app.outputs.app }}" \
+            --out AppDir --icon build/icons/app_icon_512.png
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool
+          mkdir -p out
+          ARCH=x86_64 APPIMAGE_EXTRACT_AND_RUN=1 ./appimagetool --no-appstream AppDir \
+            "out/${{ steps.app.outputs.asset }}"
+          chmod +x "out/${{ steps.app.outputs.asset }}"
+          # The AppImage itself starts too.
+          APPIMAGE_EXTRACT_AND_RUN=1 SI_ASSISTANT_SMOKE_TEST=1 timeout 180 \
+            xvfb-run -a "out/${{ steps.app.outputs.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.key }}
+          path: out/${{ steps.app.outputs.asset }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Self-test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: self-test-${{ matrix.key }}
+          path: ${{ runner.temp }}/self-test.json
+          if-no-files-found: ignore
+
+  release:
+    name: Publish the GitHub Release
+    needs: [version, build]
+    if: needs.version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create the release and attach the installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          files=$(find artifacts -path 'artifacts/installer-*' -type f)
+          echo "$files"
+          flags=()
+          if [ "$PRERELEASE" = "true" ]; then flags+=(--prerelease); fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" $files --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$TAG" $files --repo "$GITHUB_REPOSITORY" \
+              --title "Chem SI Assistant $VERSION" \
+              --notes-file artifacts/release-notes/release-notes.md \
+              --target "$GITHUB_SHA" "${flags[@]}"
+          fi

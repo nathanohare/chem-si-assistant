@@ -1,0 +1,66 @@
+name: Bug report
+description: Something in Chem SI Assistant doesn't work as it should.
+title: "Bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a problem. Please don't attach unpublished
+        data unless you are happy for it to be public: anything posted here can be read by
+        anyone.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What went wrong?
+      description: A short description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to make it happen
+      description: What did you click or type, in order? (If you're not sure, describe what you were doing.)
+      placeholder: |
+        1. Open a project
+        2. Add a compound and paste a ¹H NMR report
+        3. ...
+    validations:
+      required: false
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: false
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead?
+      description: Error messages, or what looked wrong. Screenshots help; you can paste them here.
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Program version
+      description: Shown in Help ▸ About (filled in when you use Help ▸ Send feedback).
+      placeholder: e.g. 1.0.0
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Filled in when you use Help ▸ Send feedback.
+      placeholder: e.g. Windows 11, macOS 15, Ubuntu 24.04
+    validations:
+      required: false
+  - type: textarea
+    id: details
+    attributes:
+      label: Technical details
+      description: Filled in by "Report this problem" after an unexpected error. You can leave it empty otherwise.
+      render: text
+    validations:
+      required: false

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Download the latest version
+    url: https://github.com/nathanohare/chem-si-assistant/releases
+    about: Installers for Windows, macOS and Linux.

@@ -1,0 +1,12 @@
+# Runtime (all install from PyPI as ready-made "wheels" on Windows, macOS and Linux with
+# Python 3.12). Upper limits keep the automatic tests and installers on versions known to
+# work: tested with PySide6 6.11, RDKit 2026.03, typst 0.15, pypdf 6, pyspellchecker 0.9,
+# NumPy 2.5.
+PySide6>=6.6,<7       # Qt user interface — LGPL-3.0
+rdkit>=2024.3         # chemistry: structures, formulas, masses, drawings — BSD-3-Clause
+typst>=0.13,<0.16     # typesetting the SI PDF (bundles the Typst compiler) — Apache-2.0
+pypdf>=4,<7           # counting pages of spectra PDFs — BSD-3-Clause
+pyspellchecker>=0.8   # spelling check, English dictionary included (works offline) — MIT
+numpy>=1.26           # (also installed with RDKit) scheme labels, trimming pictures — BSD-3-Clause
+# Development
+pytest>=8             # unit tests — MIT

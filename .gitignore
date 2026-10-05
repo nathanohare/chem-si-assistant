@@ -1,0 +1,43 @@
+# --- Kept on Nathan's computer only, never uploaded (SPEC §13m.1) ---
+# Reference material (published ACS PDFs) and example output
+/Example SIs/
+/Example Author Guidelines/
+/Example output/
+# Personal notes
+/Comments.md
+/Overview of Functions.md
+# Real-data test set (tests/local/, e.g. real_sample.py); the tests use the made-up
+# project in tests/sample_project.py instead
+/tests/local/
+
+# --- Downloaded at build/run time ---
+# The Ketcher drawing editor (python -m si_assistant.ketcher_setup; the installers fetch it)
+/si_assistant/vendor/ketcher/
+
+# --- Build output and caches ---
+build/
+dist/
+*.spec.bak
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+venv/
+
+# --- Stray scratch files ---
+*.out
+*.prof
+*.log
+*.tmp
+*.part
+
+# --- Operating-system and editor clutter ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+.claude/

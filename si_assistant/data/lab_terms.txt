@@ -1,0 +1,74 @@
+# Words for the spelling check that the other lists lack (SPEC §13l.6), hand-made.
+# One word per line; lines starting with "#" are comments. Capitals don't matter (they are
+# written here as the words are usually written).
+#
+# NMR multiplicities (single letters such as s, d, t, q, m are never checked)
+app
+br
+brs
+bs
+dd
+ddd
+dddd
+ddq
+ddt
+dq
+dqd
+dt
+dtd
+dtt
+qd
+qq
+qt
+quin
+quint
+sept
+sext
+td
+tdd
+tdt
+tq
+tt
+ttd
+ABq
+#
+# Reagents and abbreviations with a capital inside
+CuTC
+DiPEA
+HOAt
+HOBt
+HOSu
+OxymaPure
+cataCXium
+QuinoxP
+Acr
+#
+# Suppliers, instruments and chromatography
+AcroSeal
+Aesar
+AmBeed
+Amberlyst
+BioRad
+Biotage
+ChiralCel
+ChiralPak
+Combi
+CombiFlash
+Daicel
+Enamine
+Exactive
+Infinity
+Isolera
+MilliporeSigma
+Oakwood
+Phenomenex
+RediSep
+SiliaFlash
+SiliaPlate
+Strem
+Teledyne
+#
+# Everyday words of experimental sections
+concd
+preprint
+rotovap

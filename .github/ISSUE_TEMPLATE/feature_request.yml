@@ -1,0 +1,39 @@
+name: Feature request
+description: An idea for something new in Chem SI Assistant, or for doing something better.
+title: "Idea: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like the program to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why would it help?
+      description: What are you trying to do, and what makes it hard at the moment? (e.g. a journal's requirement, a kind of data you report)
+    validations:
+      required: false
+  - type: textarea
+    id: example
+    attributes:
+      label: An example (optional)
+      description: How it should look in the SI, or how it is done elsewhere. Screenshots help.
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: Program version
+      description: Filled in when you use Help ▸ Send feedback.
+    validations:
+      required: false
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      description: Filled in when you use Help ▸ Send feedback.
+    validations:
+      required: false

@@ -1,0 +1,1 @@
+"""Compiling the project into the SI PDF (SPEC §9) with Typst."""
