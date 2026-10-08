@@ -235,8 +235,9 @@ def test_read_docx(tmp_path):
         assert fig["3b"]["footnotes"] == ["b"] and fig["3b"]["conditions"]["b"] == S.FOOTNOTE_B
         assert fig["3h"]["yield"] == "64" and fig["3h"]["footnotes"] == ["c"]
         assert src.figure_text
-    else:
-        assert not src.figure_text or not src.records
+    else:   # (no figure in the file: nothing from figures, and no note about them)
+        assert not [r for r in src.records if r["source"] == "figure"]
+        assert src.figure_text and not any("figures" in n for n in src.notes)
 
 
 @pytest.mark.skipif(not WINDOWS, reason="EMF samples are drawn with Windows GDI")
