@@ -46,6 +46,13 @@ TLC_VISUALIZATION = ("UV (254 nm)", "KMnO₄", "CAM", "p-anisaldehyde", "vanilli
                      "phosphomolybdic acid (PMA)", "ninhydrin", "I₂", "UV + KMnO₄", "UV + CAM",
                      "UV + p-anisaldehyde")
 
+# The Purification field (SPEC §13q.2): built-in choices; both lists also learn.
+PURIFICATION_METHODS = ("flash column chromatography", "column chromatography",
+                        "preparative TLC", "preparative HPLC", "recrystallization",
+                        "trituration", "distillation", "Kugelrohr distillation")
+STATIONARY_PHASES = ("SiO₂", "Et₃N-deactivated SiO₂", "Al₂O₃", "basic Al₂O₃",
+                     "C18 (reversed phase)", "Florisil")
+
 _SUPERSCRIPT_DIGITS = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
 
 
@@ -88,6 +95,9 @@ class Part:
     # lists every other value of this part used by a compound of the project (see
     # Project.used_part_values), so a value typed once can be picked on other pages.
     learn: bool = False
+    # Other fields' parts whose values this one also offers, as "field.part" (the
+    # Purification eluent offers the Rf eluents: the same solvent systems).
+    learn_also: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -188,6 +198,21 @@ LIBRARY_FIELDS: tuple[FieldDef, ...] = (
               Part("visualization", "Visualization", "combo", TLC_VISUALIZATION,
                    placeholder="e.g. UV, KMnO₄", learn=True)),
              filled_parts=("value", "eluent")),
+    FieldDef("purification", "Purification", "parts",
+             (Part("method", "Method", "combo", PURIFICATION_METHODS,
+                   placeholder="flash column chromatography", learn=True),
+              Part("phase", "Stationary phase", "combo", STATIONARY_PHASES,
+                   placeholder="SiO₂", learn=True),
+              Part("eluent", "Eluent", "combo", placeholder="10% EtOAc/hexanes", learn=True,
+                   learn_also=("rf.eluent",)),
+              Part("sentence", "Printed as", placeholder="automatic")),
+             filled_parts=("method",),
+             description="Printed as a sentence at the end of the experimental procedure, "
+                         "e.g. “The crude product was purified by flash column chromatography "
+                         "(SiO₂, 10% EtOAc/hexanes).” Type in “Printed as” to print your own "
+                         "sentence instead. A general procedure can place it itself with "
+                         "{purification} in its compound sentence; then nothing is added at "
+                         "the end."),
     FieldDef("ir", "IR", "parts",
              (Part("method", "Method", "combo", IR_METHODS, default="ATR"),
               Part("bands", "Bands (cm⁻¹)", placeholder="2925, 1715, 1250")),

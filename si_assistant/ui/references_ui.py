@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QComboBox, QDialog,
                                QDialogButtonBox, QFileDialog, QFormLayout, QHBoxLayout,
                                QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
@@ -105,13 +105,15 @@ class ReferenceEditDialog(QDialog):
         return refs.clean(out)
 
 
-class ReferencesDialog(QDialog):
-    """The project's reference list: add (DOI, by hand, BibTeX/RIS), edit, delete."""
+class ReferencesWidget(QWidget):
+    """The project's reference list: add (DOI, by hand, BibTeX/RIS), edit, delete. Shown
+    on the References page of the tree (SPEC §13n.10) and in the References window opened
+    from a text box's Cite list. Each change is one step of Edit ▸ Undo."""
+
+    changed = Signal(str)   # something was saved: a status-bar message
 
     def __init__(self, project: Project, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("References")
-        self.resize(900, 520)
         self.project = project
         ro = project.read_only
         self.table = QTableWidget(0, 4)
@@ -139,18 +141,25 @@ class ReferencesDialog(QDialog):
             b.setEnabled(not ro)
             buttons.addWidget(b)
         buttons.addStretch()
-        close = QPushButton("Close")
-        close.clicked.connect(self.accept)
-        buttons.addWidget(close)
+        self.buttons = buttons
         intro = QLabel("Cite references with “Cite” in any text, or in a compound's References "
                        "field. Only cited references are printed, numbered in order of first "
                        "citation, in the journal style's format. Stored in references.json.")
         intro.setWordWrap(True)
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(intro)
         layout.addWidget(self.table, 1)
         layout.addLayout(buttons)
         self._fill()
+
+    def refresh(self) -> None:
+        """Fill the list again (e.g. the "Cited in" column after texts were edited)."""
+        ref = self._current()
+        self._fill(ref["id"] if ref else None)
+
+    def _step(self, label: str):
+        return self.project.undo_step(label)
 
     def _fill(self, select: str | None = None) -> None:
         uses = links.citation_uses(self.project)
@@ -190,9 +199,11 @@ class ReferencesDialog(QDialog):
                                     f"({refs.short_label(existing)}).")
             self._fill(existing["id"])
             return
-        added = self._save(self.project.add_reference, ref)
+        with self._step(f"Add reference {refs.short_label(ref)}"):
+            added = self._save(self.project.add_reference, ref)
         if added:
             self._fill(added["id"])
+            self.changed.emit("Reference added")
 
     def _add_doi(self) -> None:
         doi, ok = QInputDialog.getText(self, "Add by DOI", "DOI (e.g. 10.1021/om100106e, or a "
@@ -230,12 +241,15 @@ class ReferencesDialog(QDialog):
             return
         found = refs.parse_file_text(text)
         added = skipped = 0
-        for ref in found:
-            if refs.find_duplicate(self.project.references, ref) is not None:
-                skipped += 1
-            elif self._save(self.project.add_reference, ref):
-                added += 1
+        with self._step(f"Import references from {Path(path).name}"):
+            for ref in found:
+                if refs.find_duplicate(self.project.references, ref) is not None:
+                    skipped += 1
+                elif self._save(self.project.add_reference, ref):
+                    added += 1
         self._fill()
+        if added:
+            self.changed.emit(f"Imported {added} reference(s)")
         QMessageBox.information(self, "Import", f"Added {added} reference(s)."
                                 + (f" {skipped} were already in the list." if skipped else "")
                                 + ("" if found else " No references were found in that file."))
@@ -246,8 +260,10 @@ class ReferencesDialog(QDialog):
             return
         dlg = ReferenceEditDialog(ref, self, "Edit reference")
         if dlg.exec():
-            self._save(self.project.update_reference, dlg.value())
+            with self._step(f"Edit reference {refs.short_label(ref)}"):
+                self._save(self.project.update_reference, dlg.value())
             self._fill(ref["id"])
+            self.changed.emit("Reference saved")
 
     def _delete(self) -> None:
         ref = self._current()
@@ -261,8 +277,53 @@ class ReferencesDialog(QDialog):
         if QMessageBox.question(self, "Delete reference",
                                 f"Delete {refs.short_label(ref)}?{extra}"
                                 ) == QMessageBox.StandardButton.Yes:
-            self._save(self.project.delete_reference, ref["id"])
+            with self._step(f"Delete reference {refs.short_label(ref)}"):
+                self._save(self.project.delete_reference, ref["id"])
             self._fill()
+            self.changed.emit("Reference deleted")
+
+
+class ReferencesDialog(QDialog):
+    """The reference list in a window of its own: opened from a text box's Cite list
+    ("Add or edit references…"), so the page being typed on stays as it is."""
+
+    def __init__(self, project: Project, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("References")
+        self.resize(900, 520)
+        self.project = project
+        self.widget = ReferencesWidget(project, self)
+        self.table = self.widget.table
+        close = QPushButton("Close")
+        close.clicked.connect(self.accept)
+        self.widget.buttons.addWidget(close)
+        layout = QVBoxLayout(self)
+        layout.addWidget(self.widget)
+
+
+class ReferencesPage(QWidget):
+    """The References item at the bottom of the tree (SPEC §13n.10): the reference list on
+    a page of its own. It is always there and can't be moved or deleted."""
+
+    saved = Signal(str)   # status-bar message (as the other pages)
+
+    def __init__(self, project: Project, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.project = project
+        title = QLabel("<h2>References</h2>")
+        self.widget = ReferencesWidget(project, self)
+        self.widget.changed.connect(self.saved)
+        self.table = self.widget.table
+        layout = QVBoxLayout(self)
+        layout.addWidget(title)
+        layout.addWidget(self.widget, 1)
+
+    def flush(self) -> None:
+        """Nothing waits to be saved here: every change is saved when it is made."""
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        self.widget.refresh()   # (citations may have been added since)
+        super().showEvent(event)
 
 
 class CitationsEditor(FieldEditor):

@@ -161,7 +161,7 @@ class PartsEditor(FieldEditor):
     # Fields whose parts are wide (labels and drop-downs) have fewer per row, so the page
     # fits beside the live preview at 1200 × 800 (ee: value and method, column and
     # eluent, flow and λ, the two retention times).
-    PER_ROW_BY_FIELD = {"ee": 2}
+    PER_ROW_BY_FIELD = {"ee": 2, "purification": 3}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -178,8 +178,11 @@ class PartsEditor(FieldEditor):
             if part.learn and part.kind == "combo":
                 # A drop-down that learns (SPEC §13l.13): worked out each time the page
                 # opens, so a value nothing uses any more is no longer offered.
-                choices = F.learned_choices(
-                    part, self.project.used_part_values(self.defn.key, part.key))
+                used = self.project.used_part_values(self.defn.key, part.key)
+                for other in part.learn_also:   # e.g. the Rf eluents (SPEC §13q.2)
+                    field_key, _dot, part_key = other.partition(".")
+                    used += self.project.used_part_values(field_key, part_key)
+                choices = F.learned_choices(part, used)
             w = make_part_widget(part, choices)
             if part.learn and part.kind == "combo":
                 w.setToolTip("Pick from the list or type your own. The list also offers what "
@@ -193,6 +196,14 @@ class PartsEditor(FieldEditor):
             if part.suffix:
                 cell.addWidget(QLabel(part.suffix))
             self.widgets[part.key] = w
+            if self.defn.key == "purification" and part.key == "sentence":
+                # Its own line, the whole width: the sentence printed at the end of the
+                # procedure, shown greyed while automatic (SPEC §13q.2).
+                w.setToolTip("Printed at the end of the experimental procedure. Leave empty "
+                             "for the sentence shown in grey (made from the boxes above), or "
+                             "type your own.")
+                grid.addLayout(cell, i // self.per_row, 0, 1, self.per_row)
+                continue
             grid.addLayout(cell, i // self.per_row, i % self.per_row)
         # Only columns holding free-text inputs grow; numbers and fixed lists stay compact.
         columns = min(len(self.defn.parts), self.per_row)
@@ -202,6 +213,20 @@ class PartsEditor(FieldEditor):
             grid.setColumnStretch(col, 1 if grow else 0)
         if not any(grows):
             grid.setColumnStretch(columns, 1)  # empty spacer column on the right
+        if self.defn.key == "purification":
+            self.changed.connect(self._show_purification)
+            self._show_purification()
+
+    def _show_purification(self) -> None:
+        """The Purification field's "Printed as" box shows the automatic sentence."""
+        from ..core import procedures
+        box = self.widgets.get("sentence")
+        if not isinstance(box, QLineEdit):
+            return
+        text = procedures.purification_text_of(
+            {k: get_part_value(w) for k, w in self.widgets.items()})
+        box.setPlaceholderText(f"{procedures.PURIFICATION_START}{text}." if text
+                               else "automatic (choose a method above)")
 
     def _ee_unit(self, edit: QLineEdit) -> None:
         """Add " ee" to a bare percentage and " er" to a bare ratio. The result is in the
@@ -792,6 +817,9 @@ def editor_type(defn: F.FieldDef) -> type[FieldEditor]:
     from .structure_widgets import HrmsEditor, StructureEditor
     if defn.key == "hrms":
         return HrmsEditor
+    if defn.key == "name" and defn.kind == "parts":
+        from .name_lookup import NameEditor   # (with "Look up name (PubChem)", §13n.5)
+        return NameEditor
     if defn.key == "spectra" and defn.kind == "attachments":
         from .spectrum_paste import SpectraEditor   # (a paste target, SPEC §13l.1)
         return SpectraEditor
@@ -825,6 +853,9 @@ class FieldBox(QFrame):
     changed = Signal()
     remove_requested = Signal(str)
     dismiss_requested = Signal(object)  # a checks.Warning
+
+    MARGINS = (8, 3, 8, 4)   # left, top, right, bottom (pixels)
+    SPACING = 3              # between the title line, warnings and the editor
 
     def __init__(self, project: Project, compound: Compound, defn: F.FieldDef, required: bool,
                  before_write: Callable[[], None], parent: QWidget | None = None):
@@ -885,7 +916,10 @@ class FieldBox(QFrame):
         self.warn_box.hide()
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 6, 8, 6)
+        # Compact (SPEC §13n.7c): little space around and inside each field's box.
+        layout.setContentsMargins(*self.MARGINS)
+        layout.setSpacing(self.SPACING)
+        header.setSpacing(4)
         layout.addLayout(header)
         layout.addWidget(self.warn_box)
         layout.addWidget(self.flag_comment)

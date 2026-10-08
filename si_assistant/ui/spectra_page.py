@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QGridLayout
 from ..compile.document import drawn_structure
 from ..compile.qt_images import content_box, image_info, render_page
 from ..core import chem
+from ..core import drawing_scale
 from ..core import spectra as S
 from ..core.project import Compound, Project, ProjectError
 from .spectra_panel import ColourButton
@@ -93,8 +94,14 @@ def structure_source(project: Project, compound: Compound):
     has_picture = picture is not None and picture.exists()
 
     def as_picture():
+        # A pasted vector picture is shown (and printed) at the project's bond length
+        # (SPEC §13n.2a); the structure size of a spectrum multiplies that.
         info = image_info(picture)
-        return ("picture", picture, (info[0] / info[2], info[1] / info[2]) if info else None)
+        k = drawing_scale.structure_print_factor(project.settings,
+                                                 compound.values.get("structure") or {},
+                                                 picture)
+        return ("picture", picture,
+                (info[0] / info[2] * k, info[1] / info[2] * k) if info else None)
 
     if project.settings.get("compile_structures", "pictures") == "pictures" and has_picture:
         return as_picture()
@@ -187,9 +194,12 @@ class SpectrumCanvas(QWidget):
         f.setBold(bool(self.values.get("id_bold", True)))
         return f
 
+    def caption_pt(self) -> float:
+        return float(self.values.get("caption_size", S.CAPTION_PT))
+
     def _caption_font(self, units: float) -> QFont:
         f = QFont(self.font())
-        f.setPixelSize(max(1, round(S.CAPTION_PT * units)))
+        f.setPixelSize(max(1, round(self.caption_pt() * units)))
         return f
 
     def _lines_pt(self) -> list[tuple[str, float, float]]:
@@ -210,7 +220,7 @@ class SpectrumCanvas(QWidget):
         if self.caption:
             fm = QFontMetricsF(self._caption_font(units))
             out.append(("caption", fm.horizontalAdvance(self.caption) / units * slack,
-                        S.CAPTION_PT * 1.25))
+                        self.caption_pt() * 1.25))
         return out
 
     def box_size_pt(self) -> tuple[float, float]:
@@ -440,7 +450,7 @@ ROWS = (
     ("struct_frame", "Frame around them:", ("struct_frame", "struct_frame_color",
                                             "struct_frame_width")),
     ("struct_bg", "Background:", ("struct_bg",)),
-    ("caption", "Caption under them:", ("caption",)),
+    ("caption", "Caption under them:", ("caption", "caption_size")),
 )
 DRAGGED = "dragged"   # the position choice shown once the box has been dragged
 
@@ -593,9 +603,25 @@ class SpectraPagePanel(QWidget):
         body.setCollapsible(0, False)
         self.splitter = body
 
+        # ---- the compound's HRMS reports (SPEC §13n.3): printed after all the spectra
+        self.hrms_print = QComboBox()
+        self.hrms_print.setToolTip("Whether this compound's HRMS report files are printed "
+                                   "in the Spectra section's sub-section “HRMS reports”")
+        self.hrms_print.activated.connect(self._hrms_print_chosen)
+        self.hrms_print.setEnabled(not self.read_only)
+        self.hrms_row = QWidget()
+        hrms_layout = QHBoxLayout(self.hrms_row)
+        hrms_layout.setContentsMargins(0, 0, 0, 0)
+        self.hrms_label = QLabel()
+        hrms_layout.addWidget(self.hrms_label)
+        hrms_layout.addWidget(self.hrms_print)
+        hrms_layout.addStretch()
+        self._fill_hrms_row()
+
         layout = QVBoxLayout(self)
         layout.addLayout(head)
         layout.addWidget(hint)
+        layout.addWidget(self.hrms_row)
         layout.addWidget(body, 1)
 
         self._timer = QTimer(self)
@@ -613,6 +639,39 @@ class SpectraPagePanel(QWidget):
             self._set_controls(dict(self.defaults), dragged=False)
             self.settings_box.setEnabled(False)
             self.text_box.setEnabled(False)
+
+    # ------------------------------------------------------------------ HRMS reports
+
+    def _fill_hrms_row(self) -> None:
+        from ..core import ms_reports
+        from .hrms_reports_ui import print_choice_text
+        items = ms_reports.report_items(self.compound)
+        self.hrms_row.setVisible(bool(items) and "hrms" in self.compound.field_keys)
+        n = len(items)
+        self.hrms_label.setText(f"HRMS report file{'s' if n != 1 else ''} ({n}): print in "
+                                "the SI?")
+        self.hrms_print.blockSignals(True)
+        self.hrms_print.clear()
+        self.hrms_print.addItem(print_choice_text(self.project), None)
+        self.hrms_print.addItem("Print them", True)
+        self.hrms_print.addItem("Don’t print them", False)
+        own = (self.compound.values.get("hrms") or {}).get(ms_reports.PRINT_KEY)
+        self.hrms_print.setCurrentIndex({True: 1, False: 2}.get(own, 0)
+                                        if isinstance(own, bool) else 0)
+        self.hrms_print.blockSignals(False)
+
+    def _hrms_print_chosen(self, index: int) -> None:
+        if self.read_only:
+            return
+        self.flush()
+        try:
+            with self.project.undo_step(f"Change the printing of {self.display_id}'s HRMS "
+                                        "reports"):
+                self.project.set_hrms_print(self.compound, self.hrms_print.itemData(index))
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not save", str(e))
+            return
+        self.saved.emit("Saved")
 
     # ------------------------------------------------------------------ building
 
@@ -670,6 +729,12 @@ class SpectraPagePanel(QWidget):
         self.background = ColourButton("#ffffff", "Background behind the structure and ID",
                                        compact=True)
         self.caption = QCheckBox("Shown")
+        self.caption_size = QDoubleSpinBox()
+        self.caption_size.setRange(*S.CAPTION_SIZE_RANGE)
+        self.caption_size.setDecimals(1)
+        self.caption_size.setSingleStep(0.5)
+        self.caption_size.setSuffix(" pt")
+        self.caption_size.setToolTip("The caption's text size (9 pt unless changed)")
 
         controls = {
             "per_page": (self.per_page,), "orientation": (self.orientation,),
@@ -679,7 +744,7 @@ class SpectraPagePanel(QWidget):
             "position": (self.corner,),
             "struct_scale": (self.scale,), "id": (self.same_size, self.id_size, self.id_bold),
             "struct_frame": (self.struct_frame, self.struct_colour, self.struct_width),
-            "struct_bg": (self.background,), "caption": (self.caption,)}
+            "struct_bg": (self.background,), "caption": (self.caption, self.caption_size)}
 
         self.settings_box = QGroupBox("Settings for this spectrum")
         grid = QGridLayout(self.settings_box)
@@ -760,7 +825,8 @@ class SpectraPagePanel(QWidget):
         for check in (self.header_line, self.spectrum_frame, self.auto_crop, self.same_size,
                       self.id_bold, self.struct_frame, self.caption, self.struct_box):
             check.toggled.connect(self._changed)
-        for spin in (self.scale, self.id_size, self.spectrum_width, self.struct_width):
+        for spin in (self.scale, self.id_size, self.spectrum_width, self.struct_width,
+                     self.caption_size):
             spin.valueChanged.connect(self._changed)
         for button in (self.spectrum_colour, self.struct_colour, self.background):
             button.changed.connect(self._changed)
@@ -1038,6 +1104,7 @@ class SpectraPagePanel(QWidget):
         self.struct_width.setValue(v["struct_frame_width"])
         self.background.set_colour(v["struct_bg"])
         self.caption.setChecked(v["caption"])
+        self.caption_size.setValue(v["caption_size"])
         self._loading = False
 
     def control_values(self) -> dict:
@@ -1063,6 +1130,7 @@ class SpectraPagePanel(QWidget):
             "spectrum_frame_width": round(self.spectrum_width.value(), 2),
             "auto_crop": self.auto_crop.isChecked(),
             "caption": self.caption.isChecked(),
+            "caption_size": round(self.caption_size.value(), 1),
         }
 
     def _wanted_own(self) -> dict:
@@ -1118,6 +1186,7 @@ class SpectraPagePanel(QWidget):
                   self.background, self.caption):
             w.setEnabled(not ro and shown)
         self.id_size.setEnabled(not ro and shown and not self.same_size.isChecked())
+        self.caption_size.setEnabled(not ro and shown and self.caption.isChecked())
         for w in (self.spectrum_colour, self.spectrum_width):
             w.setEnabled(not ro and self.spectrum_frame.isChecked())
         for w in (self.struct_colour, self.struct_width):

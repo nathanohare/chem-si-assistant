@@ -24,18 +24,49 @@ class CompileResult:
     warnings: list[str] = field(default_factory=list)
 
 
-def run_typst(typ: Path, output: Path, root: Path) -> None:
-    """Typst alone: `typ` → PDF `output`, with `root` as Typst's root folder.
+def run_typst(typ: Path, output: Path, root: Path) -> list[str]:
+    """Typst alone: `typ` → PDF `output`, with `root` as Typst's root folder. Returns
+    warnings only Typst can know (laid-out sizes: scheme_notes).
 
     It touches no Qt objects and no project data, so it can run in a worker thread (the
     live preview, SPEC §13k.8); the typst package releases Python's lock while it works,
     so the window stays responsive. Raises CompileError."""
     try:
-        typst.compile(str(typ), output=str(output), root=str(root))
+        compiler = typst.Compiler(str(typ), root=str(root))
+        compiler.compile(output=str(output))
     except Exception as e:  # noqa: BLE001 — Typst reports problems as plain exceptions
         raise CompileError(
             "The SI could not be compiled. This is usually caused by an unusual file or "
             f"character; details for troubleshooting:\n\n{e}") from e
+    return scheme_notes(compiler)
+
+
+SCHEME_TEXT_LABEL = "si-scheme-text"
+
+
+def scheme_notes(compiler) -> list[str]:
+    """Schemes made with the scheme editor whose conditions print smaller than
+    MIN_TEXT_PT (shrunk to fit the page, or a small scale): one warning each. The size
+    is recorded by the style's si-reaction-scheme after it is laid out (asked of the
+    document just compiled: no second layout)."""
+    from ..core.scheme_editor import MIN_TEXT_PT
+    try:
+        found = compiler.query(f"<{SCHEME_TEXT_LABEL}>", field="value")
+        found = json.loads(found) if isinstance(found, (str, bytes)) else found
+    except Exception:  # noqa: BLE001 — no schemes, or an older style: nothing to say
+        return []
+    out = []
+    for item in found or []:
+        try:
+            size, name = float(item["size"]), str(item.get("key", ""))
+        except (TypeError, KeyError, ValueError):
+            continue
+        if size < MIN_TEXT_PT - 0.05:
+            out.append(f"Scheme “{name}”: its conditions print at only {size:.1f} pt (the "
+                       "scheme was shrunk to fit the page). Use Layout… on the scheme page: "
+                       "“Continue on a new row”, a smaller scheme size or structures, or "
+                       "shorter conditions.")
+    return out
 
 
 def last_page_of(typ: Path, root: Path, label: str) -> int | None:
@@ -215,7 +246,7 @@ def compile_pdf(project: Project, options: CompileOptions, image_info, converter
     """
     result = build(project, options, image_info, converter, name=name, crop=crop)
     tmp = result.typ_path.with_name(f".{name}.partial.pdf")
-    run_typst(result.typ_path, tmp, project.folder)
+    result.warnings += run_typst(result.typ_path, tmp, project.folder)
     mark_producer(tmp)
     final = result.typ_path.with_suffix(".pdf")
     try:

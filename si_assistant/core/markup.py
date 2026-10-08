@@ -1,16 +1,23 @@
 """The small text format used to store formatted text in plain .txt files.
 
-Formatted text (bold, italic, superscript, subscript, headings) is stored
+Formatted text (bold, italic, underline, superscript, subscript, headings) is stored
 human-readably so the Project Folder stays useful without the program:
 
     # Heading 1             (line starting with "# ")
     ## Heading 2            (line starting with "## ")
-    **bold**   *italic*   ^{superscript}   _{subscript}
+    **bold**   *italic*   __underline__   ^{superscript}   _{subscript}
 
 Example:  "**¹H NMR** (400 MHz, CDCl_{3}) δ 7.25 (d, *J* = 2.0 Hz, 1H)"
 
 Characters that would otherwise be read as markers are escaped with a
 backslash: \\*  \\^  \\_  \\}  \\#  \\\\
+
+Underline (SPEC §13n.4) is two underscores on each side: "__text__". Every literal
+underscore in the text is escaped ("a\\_b", "\\_\\_init\\_\\_"), so two underscores in a
+row are always the underline marker, and "_{" (not "__") starts a subscript. Underlined
+subscript text is "___{2}__" (underline on, subscript, underline off). Texts saved before
+underline existed never contain "__" (their underscores are escaped), so they read as
+before.
 
 Links (Phase 7) are stored by permanent internal ID, so they survive renumbering:
 
@@ -18,6 +25,8 @@ Links (Phase 7) are stored by permanent internal ID, so they survive renumbering
                                 a compound (c-…: **3g**), figure (f-…: Figure S2),
                                 table (t-…: Table S1) or scheme page (k-…: Scheme S3)
     @cite{r-1a2b3c,r-4d5e6f}    a citation of entries in references.json
+    @struct{s-1a2b3c}           a small structure in a scheme's conditions (SPEC §13n.4);
+                                its picture is listed in scheme.json ("editor" ▸ "inline")
     !figure{f-1a2b3c} Caption text         a figure paragraph (custom sections, General
                                            Information); its picture is listed in the
                                            owner's JSON ("figures": {id: {"file", "label"}})
@@ -40,7 +49,7 @@ defaults look exactly as before. The alignment of a figure or table is its parag
 text is copied, pasted, moved or undone. Texts that follow the journal style (compound
 procedures and SI texts, general procedures in the editor) never get the prefix.
 
-An "@" is only special before "{" or "cite{", and "!" only at the start of a line
+An "@" is only special before "{", "cite{" or "struct{", and "!" only at the start of a line
 before "image{", "figure{", "table{" or "align{"; there they are escaped as \\@ and \\!.
 
 This module only converts between text and a list of `Paragraph`s; the
@@ -50,10 +59,10 @@ editor (ui/rich_text.py) and the compiler (Phase 5) both work from that list.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 NORMAL, SUPER, SUB = "normal", "super", "sub"
-MENTION, CITE = "c:", "cite:"
+MENTION, CITE, STRUCT = "c:", "cite:", "struct:"
 
 
 @dataclass(frozen=True)
@@ -62,18 +71,30 @@ class Run:
     bold: bool = False
     italic: bool = False
     valign: str = NORMAL  # NORMAL, SUPER or SUB
-    # A link instead of text: "c:<compound id>" (mention) or "cite:<id>,<id>" (citation).
+    # A link instead of text: "c:<compound id>" (mention), "cite:<id>,<id>" (citation) or
+    # "struct:<id>" (a small structure in a scheme's conditions, SPEC §13n.4).
     # `text` is then only what an editor shows; the stored form is the link.
     ref: str = ""
+    underline: bool = False   # (last, so Run(text, bold, italic, valign, ref) still works)
 
     def same_format(self, other: "Run") -> bool:
         return (not self.ref and not other.ref and
-                (self.bold, self.italic, self.valign) == (other.bold, other.italic, other.valign))
+                (self.bold, self.italic, self.valign, self.underline)
+                == (other.bold, other.italic, other.valign, other.underline))
+
+    def but(self, **changes) -> "Run":
+        """A copy with some fields changed, keeping the rest (all its formatting)."""
+        return replace(self, **changes)
 
     @property
     def mention(self) -> str:
         """The mentioned item's internal ID (compound, figure, table or scheme), or ""."""
         return self.ref[len(MENTION):] if self.ref.startswith(MENTION) else ""
+
+    @property
+    def structure(self) -> str:
+        """The ID of a structure shown in the text (scheme conditions), or ""."""
+        return self.ref[len(STRUCT):] if self.ref.startswith(STRUCT) else ""
 
     @property
     def citations(self) -> list[str]:
@@ -166,7 +187,7 @@ def citations(paragraphs: list[Paragraph]) -> list[str]:
     return [c for p in paragraphs for r in p.runs for c in r.citations]
 
 
-_LINK = re.compile(r"@(cite)?\{([^{}]*)\}")
+_LINK = re.compile(r"@(cite|struct)?\{([^{}]*)\}")
 _OBJECT = re.compile(r"^!(image|figure|table)\{([^{}]*)\}\s?")
 # (written as "center"; "centre" and "justified" are read too, e.g. typed by hand)
 _ALIGN = re.compile(r"^!align\{\s*(left|center|centre|right|justify|justified)\s*\}\s?",
@@ -206,12 +227,12 @@ def _parse_line(line: str) -> Paragraph:
 
     runs: list[Run] = []
     buf: list[str] = []
-    bold = italic = False
+    bold = italic = underline = False
     valign = NORMAL
 
     def flush() -> None:
         if buf:
-            _append(runs, Run("".join(buf), bold, italic, valign))
+            _append(runs, Run("".join(buf), bold, italic, valign, underline=underline))
             buf.clear()
 
     i, n = 0, len(line)
@@ -223,12 +244,17 @@ def _parse_line(line: str) -> Paragraph:
             i += 2
         elif ch == "@" and (link := _LINK.match(line, i)):
             flush()
-            if link.group(1):
+            if link.group(1) == "struct":
+                ref = STRUCT + link.group(2).strip()
+            elif link.group(1):
                 ids = [x.strip() for x in link.group(2).split(",") if x.strip()]
-                runs.append(Run("", bold, italic, valign, CITE + ",".join(ids)))
+                ref = CITE + ",".join(ids)
             else:
-                runs.append(Run("", bold, italic, valign, MENTION + link.group(2).strip()))
+                ref = MENTION + link.group(2).strip()
+            runs.append(Run("", bold, italic, valign, ref, underline=underline))
             i = link.end()
+        elif ch == "_" and nxt == "_":
+            flush(); underline = not underline; i += 2
         elif ch == "*" and nxt == "*":
             flush(); bold = not bold; i += 2
         elif ch == "*":
@@ -249,7 +275,7 @@ def _append(runs: list[Run], run: Run) -> None:
     if not run.text and not run.ref:
         return
     if runs and runs[-1].same_format(run):
-        runs[-1] = Run(runs[-1].text + run.text, run.bold, run.italic, run.valign)
+        runs[-1] = run.but(text=runs[-1].text + run.text, ref="")
     else:
         runs.append(run)
 
@@ -264,7 +290,8 @@ def _escape(text: str) -> str:
     out = []
     for i, ch in enumerate(text):
         if ch in "\\*^_}" or (ch == "@" and (text.startswith("{", i + 1)
-                                            or text.startswith("cite{", i + 1))):
+                                            or text.startswith("cite{", i + 1)
+                                            or text.startswith("struct{", i + 1))):
             out.append("\\")
         out.append(ch)
     return "".join(out)
@@ -273,6 +300,8 @@ def _escape(text: str) -> str:
 def _link_text(run: Run) -> str:
     if run.mention:
         return "@{" + run.mention + "}"
+    if run.structure:
+        return "@struct{" + run.structure + "}"
     return "@cite{" + ",".join(run.citations) + "}"
 
 
@@ -295,7 +324,7 @@ def _serialize_paragraph(p: Paragraph) -> str:
     else:
         if p.heading:
             out.append("#" * min(p.heading, MAX_HEADING) + " ")
-    bold = italic = False
+    bold = italic = underline = False
     valign = NORMAL
     for k, run in enumerate(merged):
         text = _link_text(run) if run.ref else _escape(run.text)
@@ -312,12 +341,17 @@ def _serialize_paragraph(p: Paragraph) -> str:
         if italic != run.italic:
             out.append("*")
             italic = run.italic
+        if underline != run.underline:
+            out.append("__")
+            underline = run.underline
         if valign != run.valign:
             out.append("^{" if run.valign == SUPER else "_{")
             valign = run.valign
         out.append(text)
     if valign != NORMAL:
         out.append("}")
+    if underline:
+        out.append("__")
     if italic:
         out.append("*")
     if bold:

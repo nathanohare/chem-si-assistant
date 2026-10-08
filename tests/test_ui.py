@@ -104,9 +104,12 @@ def test_main_window_open_edit_reorder(qapp, tmp_path, monkeypatch):
     assert win.open_project(p.folder)
     assert win.project.current_lock().user == "Tester"
     # The project item (§13k.3), front matter, the two sections and the Spectra section,
-    # added on opening (§13k.12).
-    assert win.tree.topLevelItemCount() == 5
+    # added on opening (§13k.12), then the Manuscript check (§13o) and the References
+    # item, always last (§13n.10).
+    assert win.tree.topLevelItemCount() == 7
     assert win.tree.topLevelItem(4).text(0) == "Spectra"
+    assert win.tree.topLevelItem(5).text(0) == "Manuscript check"
+    assert win.tree.topLevelItem(6).text(0) == "References"
     assert win.tree.topLevelItem(0).text(0) == "UI SI"
     assert win.tree.topLevelItem(1).text(0) == "Front matter"
 

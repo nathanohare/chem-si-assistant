@@ -5,20 +5,33 @@ from __future__ import annotations
 from typing import Callable
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDialog, QHBoxLayout, QLabel,
                                QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QScrollArea, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
-from ..core import checks
+from ..core import checks, procedures
 from ..core import fields as F
 from ..core.project import Compound, Project, ProjectError
 from .dialogs import CustomFieldDialog
-from .field_widgets import AttachmentsEditor, FieldBox
+from .field_widgets import AttachmentsEditor, FieldBox, get_part_value, set_part_value
 from .structure_widgets import (HrmsEditor, StructureEditor, drawing_settings, formula_html,
-                                mol_pixmap, picture_pixmap)
+                                mol_pixmap, paste_key, picture_pixmap)
 
 AUTOSAVE_DELAY_MS = 800
+FIELD_SPACING = 3   # pixels between the field boxes
+
+
+def scheme_note(scheme, compound) -> str:
+    """The note on a scheme page's compound: whether its structure prints with its data
+    or in the scheme (SPEC §13n.4: a compound the scheme editor doesn't draw prints its
+    own)."""
+    from ..core import scheme_editor
+    if compound.id not in scheme_editor.linked_compound_ids(scheme):
+        return (f"Part of scheme page “{scheme.name}”, not drawn in the scheme.\nIts "
+                "structure is printed with its data.")
+    return (f"Part of scheme page “{scheme.name}”.\nIts structure is not printed (the "
+            "scheme is).")
 
 
 def make_read_only(root: QWidget) -> None:
@@ -36,7 +49,7 @@ def make_read_only(root: QWidget) -> None:
 
 
 class CompoundPanel(QWidget):
-    THUMB_SIZE = QSize(110, 80)
+    THUMB_SIZE = QSize(96, 64)   # (the compact header, SPEC §13q.6c)
 
     labels_changed = Signal(str)     # compound id: its name or ID changed (refresh the tree)
     saved = Signal(str)              # status-bar message
@@ -57,17 +70,20 @@ class CompoundPanel(QWidget):
         # ---- header
         self.id_label = QLabel()
         f = self.id_label.font()
-        f.setPointSizeF(f.pointSizeF() * 1.8)
+        f.setPointSizeF(f.pointSizeF() * 1.5)
         f.setBold(True)
         self.id_label.setFont(f)
         self.name_label = QLabel()
         self.name_label.setWordWrap(True)
         f2 = self.name_label.font()
-        f2.setPointSizeF(f2.pointSizeF() * 1.2)
+        f2.setPointSizeF(f2.pointSizeF() * 1.15)
         self.name_label.setFont(f2)
 
         self.override_edit = QLineEdit(compound.id_override)
         self.override_edit.setMaximumWidth(120)
+        # (beside the live preview the name wraps; this box keeps room for "auto: 12ab")
+        self.override_edit.setMinimumWidth(self.override_edit.fontMetrics().horizontalAdvance(
+            "auto: 12ab") + 16)
         self.override_edit.setToolTip(
             "Type an ID here to override the ID table for this compound.\n"
             "Leave empty to use the automatic ID. The compound still uses up its row "
@@ -78,50 +94,79 @@ class CompoundPanel(QWidget):
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
         self.warning_label.setStyleSheet("color: #d35400;")
+        # "◐ 1 / 8 required": the missing fields in its tooltip; clicking it opens the
+        # first missing field (SPEC §13q.6c).
         self.completion_label = QLabel()
-        self.completion_label.setWordWrap(True)
+        self.completion_label.setTextFormat(Qt.TextFormat.RichText)
+        self.completion_label.linkActivated.connect(lambda _l: self.focus_first_missing())
         self.thumb = QLabel()
         self.thumb.setFixedSize(self.THUMB_SIZE)
         self.thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.thumb.setStyleSheet("QLabel { background: white; color: #666; border-radius: 3px; }")
+        self.thumb.setStyleSheet("QLabel { background: white; color: #666; border-radius: 3px; "
+                                 "border: 2px solid transparent; } "
+                                 "QLabel:focus { border: 2px solid #2f80ed; }")
+        # Click it, then Ctrl+V: pastes into the Structure field, as clicking the field
+        # does (also while the field is collapsed). Once there is a structure the field's
+        # Edit or Remove menu replaces it (SPEC §13h.3), so nothing is replaced by accident.
+        self.thumb.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        thumb_paste = QShortcut(QKeySequence(QKeySequence.StandardKey.Paste), self.thumb)
+        thumb_paste.setContext(Qt.ShortcutContext.WidgetShortcut)
+        thumb_paste.activated.connect(self.paste_structure)
         self.formula_label = QLabel()
 
-        name_col = QVBoxLayout()
-        name_col.addWidget(self.name_label)
-        name_col.addWidget(self.formula_label)
-        id_row = QHBoxLayout()
-        id_row.addWidget(self.thumb)
-        id_row.addWidget(self.id_label)
-        id_row.addLayout(name_col, 1)
-        id_col = QVBoxLayout()
-        id_line = QHBoxLayout()
-        id_line.addWidget(QLabel("Manual ID:"))
-        id_line.addWidget(self.override_edit)
-        id_col.addLayout(id_line)
+        # ---- the compact header (SPEC §13q.6c): the structure on the left; beside it two
+        # lines: ID, name … Manual ID, and formula, MW, required fields … collapse/expand.
+        collapse_all = QToolButton()
+        collapse_all.setText("▸ Collapse all")
+        collapse_all.setToolTip("Fold every field to its title line")
+        collapse_all.setAutoRaise(True)
+        collapse_all.setProperty("keep_enabled", True)
+        collapse_all.clicked.connect(lambda: self.set_all_collapsed(True))
+        expand_all = QToolButton()
+        expand_all.setText("▾ Expand all")
+        expand_all.setToolTip("Open every field")
+        expand_all.setAutoRaise(True)
+        expand_all.setProperty("keep_enabled", True)
+        expand_all.clicked.connect(lambda: self.set_all_collapsed(False))
+        line1 = QHBoxLayout()
+        line1.addWidget(self.id_label)
+        line1.addWidget(self.name_label, 1)
+        line1.addWidget(QLabel("Manual ID:"))
+        line1.addWidget(self.override_edit)
         if compound.scheme_id:
+            # The scheme note as a small ⓘ with the explanation in its tooltip.
             scheme = project.scheme(compound.scheme_id)
-            note = QLabel(f"Part of scheme page “{scheme.name}”.\nIts structure is not "
-                          "printed (the scheme is).")
-            note.setStyleSheet("color: palette(placeholder-text);")
-            note.setWordWrap(True)          # (a long scheme name must not widen the page)
-            note.setMinimumWidth(160)
-            note.setMaximumWidth(260)
-            note.setToolTip(note.text())
-            id_col.addWidget(note, 0, Qt.AlignmentFlag.AlignRight)
+            self.scheme_info = QLabel("ⓘ")
+            self.scheme_info.setToolTip(scheme_note(scheme, compound))
+            self.scheme_info.setStyleSheet("color: palette(placeholder-text);")
+            line1.addWidget(self.scheme_info)
         else:
             convert = QPushButton("Change to reaction scheme…")
             convert.setToolTip("Make a scheme page with this compound as its first sub-page. "
-                               "You can then paste the scheme and add the other compounds "
+                               "You can then draw the scheme and add the other compounds "
                                "(starting materials, intermediates) as more sub-pages.")
             convert.setEnabled(not project.read_only)
             convert.clicked.connect(lambda: self.convert_requested.emit(self.compound.id))
-            id_col.addWidget(convert, 0, Qt.AlignmentFlag.AlignRight)
-        id_row.addLayout(id_col)
+            line1.addWidget(convert)
+        line2 = QHBoxLayout()
+        line2.addWidget(self.formula_label)
+        line2.addSpacing(12)
+        line2.addWidget(self.completion_label, 1)
+        line2.addWidget(collapse_all)
+        line2.addWidget(expand_all)
+        lines = QVBoxLayout()
+        lines.setSpacing(2)
+        lines.addLayout(line1)
+        lines.addLayout(line2)
+        id_row = QHBoxLayout()
+        id_row.addWidget(self.thumb)
+        id_row.addLayout(lines, 1)
 
         # ---- fields
         self.fields_holder = QWidget()
         self.fields_layout = QVBoxLayout(self.fields_holder)
         self.fields_layout.setContentsMargins(0, 0, 4, 0)
+        self.fields_layout.setSpacing(FIELD_SPACING)   # (SPEC §13n.7c: fields close together)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setWidget(self.fields_holder)
@@ -134,25 +179,9 @@ class CompoundPanel(QWidget):
         self.add_menu.aboutToShow.connect(self._fill_add_menu)
         self.add_btn.setMenu(self.add_menu)
 
-        collapse_all = QToolButton()
-        collapse_all.setText("▸ Collapse all")
-        collapse_all.setAutoRaise(True)
-        collapse_all.setProperty("keep_enabled", True)
-        collapse_all.clicked.connect(lambda: self.set_all_collapsed(True))
-        expand_all = QToolButton()
-        expand_all.setText("▾ Expand all")
-        expand_all.setAutoRaise(True)
-        expand_all.setProperty("keep_enabled", True)
-        expand_all.clicked.connect(lambda: self.set_all_collapsed(False))
-        status_row = QHBoxLayout()
-        status_row.addWidget(self.completion_label, 1)
-        status_row.addWidget(collapse_all)
-        status_row.addWidget(expand_all)
-
         layout = QVBoxLayout(self)
         layout.addLayout(id_row)
         layout.addWidget(self.warning_label)
-        layout.addLayout(status_row)
         layout.addWidget(self.scroll, 1)
 
         self._timer = QTimer(self)
@@ -207,6 +236,15 @@ class CompoundPanel(QWidget):
             box.editor.view_spectra_requested.connect(self._view_spectra)
             if hasattr(box.editor, "pasted"):   # the Spectra field (SPEC §13l.1)
                 box.editor.pasted.connect(self.saved.emit)
+        if isinstance(box.editor, HrmsEditor):
+            # Report files are saved at once (SPEC §13n.3): warnings and the tree follow.
+            box.editor.files_changed.connect(lambda: self.labels_changed.emit(self.compound.id))
+            box.editor.files_changed.connect(self._refresh_header)
+            box.editor.status.connect(self.saved.emit)
+        if hasattr(box.editor, "refresh_structure") and hasattr(box.editor, "lookup_btn"):
+            box.editor.status.connect(self.saved.emit)   # the Name field (SPEC §13n.5)
+        if getattr(box.editor, "gp", None) is not None:   # the Experimental procedure field
+            box.editor.gp.scale_typed.connect(self._scale_from_gp)
         box.remove_requested.connect(self._remove_field)
         self.boxes.append(box)
         self.fields_layout.addWidget(box)
@@ -222,6 +260,52 @@ class CompoundPanel(QWidget):
                 self.scroll.ensureWidgetVisible(box, 0, 40)
                 box.editor.setFocus()
                 return
+
+    def _scale_from_gp(self, typed: str) -> None:
+        """A scale typed in the general procedure's {scale} box (e.g. "0.20 mmol") fills the
+        Reaction scale field if it is empty or still holds what was filled in this way
+        before (remembered in compound.json as "scale_from_gp"). A value the user typed
+        in the field is left alone; a warning then says they differ (SPEC §13n.9)."""
+        if self.project.read_only:
+            return
+        box = next((b for b in self.boxes if b.defn.key == "scale"), None)
+        widgets = getattr(box.editor, "widgets", {}) if box is not None else {}
+        if "value" not in widgets or "unit" not in widgets:
+            return
+        before = self.compound.data.get("scale_from_gp")
+        before = (str(before.get("value", "")), str(before.get("unit", ""))) \
+            if isinstance(before, dict) else None
+        field = (get_part_value(widgets["value"]), get_part_value(widgets["unit"]))
+        new = procedures.scale_to_fill(typed, field, before)
+        if new is None:
+            return
+        value, unit = new
+        set_part_value(widgets["value"], F.Part("value"), value)
+        set_part_value(widgets["unit"], F.Part("unit", kind="choice"), unit)
+        self.compound.values["scale"] = {**(self.compound.values.get("scale") or {}),
+                                         "value": value, "unit": unit}
+        self.compound.data["scale_from_gp"] = {"value": value, "unit": unit}
+        self._changed_keys.update({"scale", "procedure"})
+        if box.collapsed:
+            box.refresh_summary()
+        self._schedule_save()
+
+    def structure_editor(self) -> StructureEditor | None:
+        return next((b.editor for b in self.boxes if isinstance(b.editor, StructureEditor)),
+                    None)
+
+    def paste_structure(self) -> None:
+        """Ctrl+V on the header's structure picture: the same as Ctrl+V on the Structure
+        field (a structure or a picture). Once there is one, it is replaced only from the
+        field's Edit or Remove menu, so this says where that is instead."""
+        editor = self.structure_editor()
+        if editor is None or self.project.read_only:
+            return
+        if editor.is_compact():
+            self.saved.emit("This compound already has a structure: to replace it, use the "
+                            "Structure field's “Edit or Remove” menu")
+            return
+        editor.paste_from_clipboard()
 
     def _dismiss_warning(self, warning) -> None:
         from .warnings_panel import ask_reason
@@ -252,20 +336,30 @@ class CompoundPanel(QWidget):
                                  "Automatic ID from the section's ID table")
         self.name_label.setText(self.compound.name or "<i>unnamed compound</i>")
         mol = self.project.read_structure(self.compound)
-        if mol is not None:
-            info = self.project.structure_info(self.compound)
-            picture = self.project.structure_image_path(self.compound)
-            pixmap = (picture_pixmap(picture, self.THUMB_SIZE - QSize(6, 6))
-                      if picture is not None and picture.exists() else None)
-            if pixmap is not None and not pixmap.isNull():
-                self.thumb.setPixmap(pixmap)
-            else:
-                self.thumb.setPixmap(mol_pixmap(mol, self.THUMB_SIZE,
-                                                drawing_settings(self.project)))
-            self.formula_label.setText(f"{formula_html(info.formula)} &nbsp; MW {info.mw:.2f}")
+        # The structure (or its picture) shows here, drawn for this screen's resolution so
+        # it is sharp (SPEC §13n.7b); the Structure field itself is one line once it has one.
+        dpr = self.thumb.devicePixelRatioF()
+        picture = self.project.structure_image_path(self.compound)
+        pixmap = (picture_pixmap(picture, self.THUMB_SIZE - QSize(6, 6), dpr)
+                  if picture is not None and picture.exists() else None)
+        if pixmap is not None and not pixmap.isNull():
+            self.thumb.setPixmap(pixmap)
+        elif mol is not None:
+            self.thumb.setPixmap(mol_pixmap(mol, self.THUMB_SIZE,
+                                            drawing_settings(self.project), dpr))
         else:
             self.thumb.setPixmap(QPixmap())
             self.thumb.setText("no structure")
+        has_any = mol is not None or (pixmap is not None and not pixmap.isNull())
+        self.thumb.setToolTip(
+            "" if self.project.read_only else
+            "To replace the structure, use the Structure field's “Edit or Remove” menu."
+            if has_any else f"Click here, then press {paste_key()} to paste the structure "
+                            "(copied in ChemDraw), SMILES or a picture.")
+        if mol is not None:
+            info = self.project.structure_info(self.compound)
+            self.formula_label.setText(f"{formula_html(info.formula)} &nbsp; MW {info.mw:.2f}")
+        else:
             self.formula_label.setText("")
         table_id = self._table_id()
         self.override_edit.setPlaceholderText(f"auto: {table_id or 'none'}")
@@ -282,17 +376,30 @@ class CompoundPanel(QWidget):
 
         filled, total, missing = self.project.completion(self.compound)
         if total == 0:
-            text = "No required fields set for this section."
+            text, tip = "No required fields", "No required fields set for this section."
         elif not missing:
-            text = f"✔ Complete — all {total} required fields filled."
+            text = f"✔ All {total} required"
+            tip = f"Complete — all {total} required fields filled."
         else:
-            text = f"◐ {filled} / {total} required fields filled. Missing: {', '.join(missing)}."
+            text = f'<a href="missing">◐ {filled} / {total} required</a>'
+            tip = ("Missing: " + ", ".join(missing) + ".\nClick to open the first missing "
+                   "field.")
         flags = len(self.compound.flags)
         if flags:
-            text += f"   ⚑ {flags} flag{'s' if flags != 1 else ''}."
+            text += f" &nbsp; ⚑ {flags} flag{'s' if flags != 1 else ''}"
         if active:
-            text += f"   ⚠ {len(active)} warning{'s' if len(active) != 1 else ''}."
+            text += f" &nbsp; ⚠ {len(active)} warning{'s' if len(active) != 1 else ''}"
         self.completion_label.setText(text)
+        self.completion_label.setToolTip(tip)
+        self.missing_labels = missing
+
+    def focus_first_missing(self) -> None:
+        """Open the first required field that is still empty (the header's "◐ … required")."""
+        missing = getattr(self, "missing_labels", [])
+        for box in self.boxes:
+            if box.defn.label in missing:
+                self.focus_field(box.defn.key)
+                return
 
     def _table_id(self) -> str:
         section = self.project.section(self.compound.section_id)
@@ -375,6 +482,8 @@ class CompoundPanel(QWidget):
                 box.editor.refresh_calculation()
             elif isinstance(box.editor, StructureEditor):
                 box.editor.refresh()
+            elif hasattr(box.editor, "lookup_btn"):   # the Name field's PubChem button
+                box.editor.refresh_structure()
         self._refresh_header()
         self.labels_changed.emit(self.compound.id)
         self.structure_updated.emit(self.compound.id)

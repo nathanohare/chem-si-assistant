@@ -1,10 +1,10 @@
 """Rich-text editor for Text sections and long compound fields (SPEC §6.1, §7.5).
 
-Supports bold, italic, superscript, subscript, two heading levels and a palette of
-Greek letters/symbols. The document is stored with the simple markup in
+Supports bold, italic, underline, superscript, subscript, two heading levels and a
+palette of Greek letters/symbols. The document is stored with the simple markup in
 core/markup.py, so anything the markup cannot represent (fonts, colours, sizes) is
-dropped — including from pasted text, which keeps only bold/italic/super/subscript
-(e.g. "CDCl3" pasted from Word keeps its subscript 3).
+dropped — including from pasted text, which keeps only bold/italic/underline/super/
+subscript (e.g. "CDCl3" pasted from Word keeps its subscript 3).
 
 Phase 7 adds links, shown as small coloured "chips" that behave like one character:
 mentions (type @ or use "@ Mention") show a compound's current ID or a figure's, table's
@@ -39,8 +39,8 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 
 from ..compile.qt_images import read_image
 from ..core import markup
-from ..core.markup import (CENTER, CITE, JUSTIFY, LEFT, MENTION, NORMAL, RIGHT, SUB, SUPER,
-                           Paragraph, Run, effective_align, mention_kind, stored_align)
+from ..core.markup import (CENTER, CITE, JUSTIFY, LEFT, MENTION, NORMAL, RIGHT, STRUCT, SUB,
+                           SUPER, Paragraph, Run, effective_align, mention_kind, stored_align)
 from . import text_checks
 
 HEADING_SIZES = {1: 1.45, 2: 1.2}  # relative to the normal font size
@@ -54,6 +54,9 @@ SYMBOLS = [
 _LINE_SEPARATOR = " "   # Shift+Enter inside a paragraph
 _OBJECT_CHAR = "￼"      # embedded object (link chip or picture)
 MARKUP_MIME = "application/x-si-assistant-markup"
+# Structures in copied scheme conditions (@struct{…}): where their files are, so a paste
+# into another scheme can copy them (SPEC §13n.4).
+STRUCTURES_MIME = "application/x-si-assistant-structures"
 
 LINK_OBJECT = int(QTextFormat.ObjectTypes.UserObject) + 1
 FIGURE_OBJECT = int(QTextFormat.ObjectTypes.UserObject) + 2   # a figure (text_objects.py)
@@ -201,6 +204,8 @@ def link_context() -> LinkContext | None:
 
 
 def link_label(ref: str) -> str:
+    if ref.startswith(STRUCT):   # (a structure in a scheme's conditions: drawn, no text)
+        return "structure"
     if _context is not None:
         try:
             return _context.label(ref)
@@ -211,19 +216,42 @@ def link_label(ref: str) -> str:
 
 
 class LinkChip(QPyTextObject):
-    """Draws a link as a rounded chip: mentions bold blue, citations green, broken red."""
+    """Draws a link as a rounded chip: mentions bold blue, citations green, broken red. A
+    structure in a scheme's conditions (@struct{…}) is drawn as its picture by the
+    editor's `inline_structures` (ui/scheme_editor_ui.py)."""
+
+    def _structures(self):
+        return getattr(self.parent(), "inline_structures", None)
 
     def intrinsicSize(self, doc, pos, fmt):  # noqa: N802 (Qt naming)
         cf = QTextCharFormat(fmt)
+        ref = str(cf.property(LINK_REF) or "")
+        provider = self._structures()
+        if ref.startswith(STRUCT) and provider is not None:
+            size = provider.size(ref[len(STRUCT):])
+            if size is not None:
+                return size
         metrics = QFontMetricsF(self._font(cf))
         label = str(cf.property(LINK_LABEL) or "?")
+        if ref.startswith(STRUCT):
+            label = MISSING_STRUCTURE
         return QSizeF(metrics.horizontalAdvance(label) + 6, metrics.height())
 
     def drawObject(self, painter, rect, doc, pos, fmt):  # noqa: N802
         cf = QTextCharFormat(fmt)
         ref = str(cf.property(LINK_REF) or "")
         label = str(cf.property(LINK_LABEL) or "?")
-        broken = _context is not None and _context.broken(ref)
+        provider = self._structures()
+        if ref.startswith(STRUCT) and provider is not None:
+            pixmap = provider.pixmap(ref[len(STRUCT):], QRectF(rect).size(),
+                                     painter.device().devicePixelRatioF()
+                                     if painter.device() is not None else 1.0)
+            if pixmap is not None and not pixmap.isNull():
+                painter.drawPixmap(QRectF(rect).toRect(), pixmap)
+                return
+        if ref.startswith(STRUCT):
+            label = MISSING_STRUCTURE
+        broken = ref.startswith(STRUCT) or (_context is not None and _context.broken(ref))
         if broken:
             fill, ink = QColor("#fde2e1"), QColor("#c0392b")
         elif _context is not None and _context.duplicate(ref):
@@ -250,6 +278,7 @@ class LinkChip(QPyTextObject):
         return font
 
 
+MISSING_STRUCTURE = "structure missing"
 MENTION_TIPS = {"compound": "Compound mention — printed as its current ID",
                 "figure": "Figure mention — printed as the figure's label (e.g. Figure S2)",
                 "table": "Table mention — printed as the table's label (e.g. Table S1)",
@@ -262,8 +291,13 @@ def link_format(ref: str, base: QTextCharFormat | None = None) -> QTextCharForma
     fmt.setProperty(LINK_REF, ref)
     fmt.setProperty(LINK_LABEL, link_label(ref))
     fmt.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignNormal)
-    fmt.setToolTip(MENTION_TIPS[mention_kind(ref[len(MENTION):])] if ref.startswith(MENTION)
-                   else "Citation — numbered in the SI by the journal style")
+    if ref.startswith(STRUCT):
+        fmt.setToolTip("A structure in the conditions — printed at the size set in the "
+                       "scheme's Layout (structure size in conditions)")
+    else:
+        fmt.setToolTip(MENTION_TIPS[mention_kind(ref[len(MENTION):])]
+                       if ref.startswith(MENTION)
+                       else "Citation — numbered in the SI by the journal style")
     return fmt
 
 
@@ -303,7 +337,7 @@ def document_to_paragraphs(doc: QTextDocument, start: int = 0,
     def finish(p: Paragraph) -> None:
         if p.is_object and p.runs and p.runs[0].text.startswith(" "):
             first = p.runs[0]   # (the space typed after the line break under an object)
-            p.runs[0] = Run(first.text.lstrip(), first.bold, first.italic, first.valign)
+            p.runs[0] = first.but(text=first.text.lstrip())
         if block_align_name:
             p.align = stored_align(block_align_name, p.is_object)
         paragraphs.append(p)
@@ -346,6 +380,8 @@ def document_to_paragraphs(doc: QTextDocument, start: int = 0,
                           QTextCharFormat.VerticalAlignment.AlignSubScript: SUB
                           }.get(fmt.verticalAlignment(), NORMAL)
                 bold = fmt.fontWeight() >= QFont.Weight.DemiBold
+                # (a pasted web or Word hyperlink is underlined only because it is a link)
+                underline = fmt.fontUnderline() and not fmt.isAnchor()
                 is_link = fmt.objectType() == LINK_OBJECT and fmt.property(LINK_REF)
                 pieces = text.split(_LINE_SEPARATOR)
                 for k, piece in enumerate(pieces):
@@ -358,11 +394,13 @@ def document_to_paragraphs(doc: QTextDocument, start: int = 0,
                                 current.runs.append(Run(str(fmt.property(LINK_LABEL) or ""),
                                                         ref=str(fmt.property(LINK_REF))))
                             else:  # text typed straight after a chip
-                                current.runs.append(Run(ch, bold, fmt.fontItalic(), valign))
+                                current.runs.append(Run(ch, bold, fmt.fontItalic(), valign,
+                                                        underline=underline))
                         continue
                     piece = piece.replace(_OBJECT_CHAR, "")
                     if piece:
-                        current.runs.append(Run(piece, bold, fmt.fontItalic(), valign))
+                        current.runs.append(Run(piece, bold, fmt.fontItalic(), valign,
+                                                underline=underline))
             it += 1
         finish(current)
         block = block.next()
@@ -385,6 +423,7 @@ def char_format_for(run: Run, base_size: float, heading: int) -> QTextCharFormat
     fmt = QTextCharFormat()
     fmt.setFontWeight(QFont.Weight.Bold if run.bold else QFont.Weight.Normal)
     fmt.setFontItalic(run.italic)
+    fmt.setFontUnderline(run.underline)
     fmt.setVerticalAlignment({SUPER: QTextCharFormat.VerticalAlignment.AlignSuperScript,
                               SUB: QTextCharFormat.VerticalAlignment.AlignSubScript
                               }.get(run.valign, QTextCharFormat.VerticalAlignment.AlignNormal))
@@ -633,6 +672,9 @@ class RichTextEdit(QTextEdit):
         self.objects = None
         self.image_folder: Path | None = None   # where older pictures (!image{…}) are
         self.paste_dpi = 1200                    # pasted ChemDraw pictures (Project settings)
+        # A scheme's conditions above the arrow can hold small structures (@struct{…},
+        # SPEC §13n.4): set by ui/scheme_editor_ui.py; None = not in this text.
+        self.inline_structures = None
         self._chip = LinkChip(self)
         self.document().documentLayout().registerHandler(LINK_OBJECT, self._chip)
         self.currentCharFormatChanged.connect(self._leave_link_format)
@@ -918,6 +960,24 @@ class RichTextEdit(QTextEdit):
                 it += 1
             block = block.next()
 
+    def structure_at(self, pos) -> str:
+        """The structure in a scheme's conditions (@struct{…}) under the mouse (viewport
+        coordinates): its ID, or ""."""
+        cursor = self.cursorForPosition(pos)
+        for p in (cursor.position(), cursor.position() - 1):
+            if p < 0:
+                continue
+            c = QTextCursor(self.document())
+            c.setPosition(p)
+            if c.atBlockEnd():
+                continue
+            c.setPosition(p + 1, QTextCursor.MoveMode.KeepAnchor)
+            fmt = c.charFormat()
+            ref = str(fmt.property(LINK_REF) or "") if fmt.objectType() == LINK_OBJECT else ""
+            if ref.startswith(STRUCT):
+                return ref[len(STRUCT):]
+        return ""
+
     def object_at(self, pos) -> tuple[str, str] | None:
         """The figure or table under the mouse (viewport coordinates), or None."""
         cursor = self.cursorForPosition(pos)
@@ -1034,6 +1094,15 @@ class RichTextEdit(QTextEdit):
             object_menu(self, *found).exec(event.globalPos())
             return
         menu = self.createStandardContextMenu(event.pos())
+        sid = self.structure_at(event.pos()) if self.inline_structures is not None else ""
+        if sid:
+            # A structure in a scheme's conditions: its own printed size (§2.7).
+            first = menu.actions()[0] if menu.actions() else None
+            act = QAction("Printed size of the picture…", menu)
+            act.setEnabled(self.inline_structures.has_picture(sid) and not self.isReadOnly())
+            act.triggered.connect(lambda: self.inline_structures.picture_size(sid, self))
+            menu.insertAction(first, act)
+            menu.insertSeparator(first)
         # Spelling suggestions and formatting fixes for the word clicked (SPEC §13k.1).
         text_checks.add_check_actions(menu, self, self.cursorForPosition(event.pos()).position())
         text_checks.show_menu(menu, event.globalPos())
@@ -1076,6 +1145,13 @@ class RichTextEdit(QTextEdit):
             paragraphs[0].heading = 0  # part of a heading's line pastes as ordinary text
             paragraphs[0].align = ""   # (and of an aligned line: as the line it goes in)
         data.setData(MARKUP_MIME, markup.serialize(paragraphs).encode("utf-8"))
+        structures = [r.structure for p in paragraphs for r in p.runs if r.structure]
+        if structures and self.inline_structures is not None:
+            found = {sid: self.inline_structures.export(sid)
+                     for sid in dict.fromkeys(structures)}
+            found = {sid: info for sid, info in found.items() if info}
+            if found:
+                data.setData(STRUCTURES_MIME, json.dumps(found).encode("utf-8"))
         # Figures and tables: where their picture / cells are, so a copy can be pasted
         # into another text.
         if self.objects is not None:
@@ -1166,6 +1242,31 @@ class RichTextEdit(QTextEdit):
                 "in the project), so only its caption was pasted.")
         return out
 
+    def _pasted_structures(self, paragraphs: list[Paragraph], source) -> list[Paragraph]:
+        """Structures in pasted scheme conditions: this scheme's stay; another scheme's
+        are copied into this one (new IDs); any whose files are gone are left out."""
+        try:
+            info = json.loads(bytes(source.data(STRUCTURES_MIME)).decode("utf-8")) \
+                if source.hasFormat(STRUCTURES_MIME) else {}
+        except ValueError:
+            info = {}
+        info = info if isinstance(info, dict) else {}
+        new_ids: dict[str, str | None] = {}
+        for p in paragraphs:
+            runs = []
+            for r in p.runs:
+                if r.structure:
+                    if r.structure not in new_ids:
+                        new_ids[r.structure] = self.inline_structures.adopt(
+                            r.structure, info.get(r.structure))
+                    sid = new_ids[r.structure]
+                    if not sid:
+                        continue
+                    r = r.but(ref=markup.STRUCT + sid)
+                runs.append(r)
+            p.runs = runs
+        return paragraphs
+
     def _adopt_objects(self, paragraphs: list[Paragraph], info: dict,
                        in_document: set[str]) -> tuple[list[Paragraph], int, int]:
         out = []
@@ -1190,12 +1291,24 @@ class RichTextEdit(QTextEdit):
         return out, left_out, failed
 
     def insertFromMimeData(self, source) -> None:  # noqa: N802
-        """Paste keeping only bold/italic/super/subscript (and headings). Text copied from
-        another SI Assistant editor keeps its mentions and citations (and figures and
-        tables, where this editor can hold them)."""
+        """Paste keeping only bold/italic/underline/super/subscript (and headings). Text
+        copied from another SI Assistant editor keeps its mentions and citations (and
+        figures and tables, where this editor can hold them)."""
         cursor = self.textCursor()
+        if (self.inline_structures is not None and not self.isReadOnly()
+                and self.inline_structures.wants(source)):
+            sid = self.inline_structures.paste(source)
+            if sid:
+                self.insert_link(STRUCT + sid)
+            return
         if source.hasFormat(MARKUP_MIME):
             paragraphs = markup.parse(bytes(source.data(MARKUP_MIME)).decode("utf-8"))
+            if self.inline_structures is None:   # (structures only in scheme conditions)
+                paragraphs = [Paragraph([r for r in p.runs if not r.structure], p.heading,
+                                        image=p.image, figure=p.figure, table=p.table,
+                                        align=p.align) for p in paragraphs]
+            elif any(r.structure for p in paragraphs for r in p.runs):
+                paragraphs = self._pasted_structures(paragraphs, source)
             if not self.links_enabled:
                 paragraphs = [Paragraph([r for r in p.runs if not r.ref], p.heading,
                                         image=p.image, figure=p.figure, table=p.table,
@@ -1231,7 +1344,7 @@ class RichTextEdit(QTextEdit):
             # heading level already says that.
             for p in paragraphs:
                 if p.heading:
-                    p.runs = [Run(r.text, False, r.italic, r.valign) for r in p.runs]
+                    p.runs = [r.but(bold=False) for r in p.runs]
                 p.image = ""
             cursor.beginEditBlock()
             cursor.removeSelectedText()
@@ -1261,6 +1374,11 @@ class RichTextEdit(QTextEdit):
     def toggle_italic(self) -> None:
         fmt = QTextCharFormat()
         fmt.setFontItalic(not self.currentCharFormat().fontItalic())
+        self._merge(fmt)
+
+    def toggle_underline(self) -> None:
+        fmt = QTextCharFormat()
+        fmt.setFontUnderline(not self.currentCharFormat().fontUnderline())
         self._merge(fmt)
 
     def toggle_valign(self, which: QTextCharFormat.VerticalAlignment) -> None:
@@ -1382,6 +1500,8 @@ class RichTextEditor(QWidget):
                              lambda f: f.setBold(True))
         self.italic_act = make("I", "Italic", "Ctrl+I", self.edit.toggle_italic,
                                lambda f: f.setItalic(True))
+        self.underline_act = make("U", "Underline", "Ctrl+U", self.edit.toggle_underline,
+                                  lambda f: f.setUnderline(True))
         self.sup_act = make("x²", "Superscript", "Ctrl+Shift+=",
                             lambda: self.edit.toggle_valign(VA.AlignSuperScript))
         self.sub_act = make("x₂", "Subscript", "Ctrl+=",
@@ -1531,6 +1651,7 @@ class RichTextEditor(QWidget):
         VA = QTextCharFormat.VerticalAlignment
         self.bold_act.setChecked(fmt.fontWeight() >= QFont.Weight.DemiBold)
         self.italic_act.setChecked(fmt.fontItalic())
+        self.underline_act.setChecked(fmt.fontUnderline())
         self.sup_act.setChecked(fmt.verticalAlignment() == VA.AlignSuperScript)
         self.sub_act.setChecked(fmt.verticalAlignment() == VA.AlignSubScript)
         self.heading_box.setCurrentIndex(

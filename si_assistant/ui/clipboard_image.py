@@ -1,17 +1,26 @@
 """Getting a picture from the clipboard, the way PowerPoint's "Paste as Picture" does.
 
 ChemDraw puts drawings on the clipboard as a *vector* picture rather than an
-ordinary image: an Enhanced Metafile (EMF) on Windows, a PDF on macOS. Qt
-cannot read those directly, so they are rendered here into a high-resolution
-PNG (1200 dpi by default; 600 dpi can be chosen in Project settings). The vector
-original is handed back too, so it can be kept next to the PNG and re-rendered
-later (SPEC §13k.6). Ordinary images (screenshots, PNG/JPEG copies) are used as
-they are. White margins are trimmed in every case.
+ordinary image: an Enhanced Metafile (EMF) on Windows, a PDF on macOS.
+
+* An EMF is converted to a vector drawing (SVG) with the converter and Windows
+  self-check used for spectra (core/emf_svg.py, ui/spectrum_paste.checked_svg;
+  SPEC §13n.1). Only a conversion that passes the check is kept as SVG.
+* A PDF (macOS) is kept as it is where the place pasted into prints PDFs at their
+  own size (structures, schemes: `vector=VECTOR_EVERYWHERE`).
+* Otherwise the vector picture is rendered into a high-resolution PNG (1200 dpi by
+  default; 600 dpi can be chosen in Project settings), as before.
+
+The vector original (the EMF) is handed back too, so it can be kept next to the
+picture and converted or re-rendered later (SPEC §13k.6). Ordinary images
+(screenshots, PNG/JPEG copies) are used as they are. White margins are trimmed in
+every case.
 """
 
 from __future__ import annotations
 
 import math
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,17 +49,54 @@ def paste_dpi(settings: dict) -> int:
 
 @dataclass
 class PastedPicture:
-    """A picture taken from the clipboard: the PNG, plus ChemDraw's vector original
-    (EMF or PDF bytes) when the picture was rendered from one."""
-    png: bytes
+    """A picture taken from the clipboard: its file contents (`data`, a PNG unless `ext`
+    says ".svg" or ".pdf"), plus ChemDraw's vector original (EMF or PDF bytes) when the
+    picture was made from one (a PDF kept as the picture itself has none)."""
+    data: bytes
     source: bytes | None = None
     source_ext: str = ""      # ".emf" or ".pdf"
+    ext: str = ".png"         # ".png", ".svg" (converted from the EMF) or ".pdf" (macOS)
+    message: str = ""         # how it was kept, in one plain line
+
+    @property
+    def png(self) -> bytes:
+        """(The older name of `data`, from when every pasted picture was a PNG.)"""
+        return self.data
+
+    @property
+    def vector(self) -> bool:
+        return self.ext in (".svg", ".pdf")
+
+
+SVG_MESSAGE = "Kept as a vector drawing (SVG)."
+PDF_MESSAGE = "Kept ChemDraw's PDF (a vector drawing)."
+VECTOR_EVERYWHERE = (".svg", ".pdf")   # structures and schemes: PDFs print at their size
+SVG_ONLY = (".svg",)                   # figures, Attachment sections: a PDF would fill the
+                                       # text width there, so it is rendered as before
 
 
 # ---------------------------------------------------------------------- public
 
-def clipboard_picture(dpi: int = DEFAULT_DPI) -> PastedPicture | None:
-    """The best picture on the clipboard (with its vector original if it had one), or None."""
+def clipboard_picture(dpi: int = DEFAULT_DPI,
+                      vector: tuple[str, ...] = SVG_ONLY) -> PastedPicture | None:
+    """The best picture on the clipboard (with its vector original if it had one), or None.
+    `vector`: the vector forms the place pasted into can keep (".svg": a metafile becomes
+    an SVG when the conversion passes the self-check; ".pdf": a PDF is kept as it is);
+    anything else is rendered at `dpi` as before."""
+    if ".svg" in vector:
+        try:
+            found = _windows_svg(dpi)
+        except Exception:  # noqa: BLE001 — the picture is then rendered as before
+            found = None
+        if found is not None:
+            return found
+    if ".pdf" in vector:
+        try:
+            found = _pdf_original()
+        except Exception:  # noqa: BLE001
+            found = None
+        if found is not None:
+            return found
     for getter in (_windows_metafile, _pdf_picture):
         try:
             found = getter(dpi)
@@ -65,6 +111,97 @@ def clipboard_picture(dpi: int = DEFAULT_DPI) -> PastedPicture | None:
     if image is not None and not image.isNull():
         return PastedPicture(image_to_png(trim_white(image)))
     return None
+
+
+def picture_from_emf(emf: bytes, dpi: int = DEFAULT_DPI, svg: bool = True
+                     ) -> PastedPicture | None:
+    """A metafile (ChemDraw's copy, or one kept as a picture's original) as the picture to
+    store: an SVG if `svg` and the conversion passes the self-check (Windows), else drawn
+    by Windows at `dpi` (PNG). None if it can't be done here (an EMF needs Windows)."""
+    reason = ""
+    if svg:
+        result = vector_svg(emf)
+        if result is not None and result.svg is not None:
+            return PastedPicture(trim_svg(result.svg), emf, ".emf", ".svg", SVG_MESSAGE)
+        reason = result.reason if result is not None else ""
+    image = render_emf_bytes(emf, dpi)
+    if image is None or image.isNull():
+        return None
+    message = f"Kept as a picture ({dpi} dpi)" + (f": {reason}." if reason else ".")
+    return PastedPicture(image_to_png(trim_white(image)), emf, ".emf", ".png", message)
+
+
+def vector_svg(emf: bytes):
+    """spectrum_paste.checked_svg (the converter and the self-check), or None if it
+    failed unexpectedly."""
+    try:
+        from .spectrum_paste import checked_svg
+        return checked_svg(emf)
+    except Exception:  # noqa: BLE001 — never lose a paste over the vector copy
+        return None
+
+
+SVG_TRIM_DPI = 150        # the resolution at which an SVG's white margins are found
+SVG_MARGIN_MM = 0.5       # white kept around a trimmed SVG (as MARGIN at 600 dpi)
+_SVG_ROOT = re.compile(r"<svg\b[^>]*>", re.S)
+
+
+def trim_svg(svg: str) -> bytes:
+    """An SVG converted from a metafile (core/emf_svg.py: viewBox in 0.01 mm, width and
+    height in pt) with its white margins cut to SVG_MARGIN_MM, as pasted PNGs are
+    trimmed: only its viewBox and size change, never the drawing. Returned as UTF-8."""
+    data = svg.encode("utf-8", "replace")
+    try:
+        trimmed = _trimmed_svg(svg, data)
+    except Exception:  # noqa: BLE001 — an untrimmed drawing is still right
+        trimmed = None
+    return trimmed if trimmed is not None else data
+
+
+def _trimmed_svg(svg: str, data: bytes) -> bytes | None:
+    from ..compile.qt_images import render_svg_bytes
+    root = _SVG_ROOT.search(svg)
+    if root is None:
+        return None
+    tag = root.group(0)
+    box = re.search(r'viewBox="0 0 ([\d.]+) ([\d.]+)"', tag)
+    width = re.search(r'width="([\d.]+)pt"', tag)
+    height = re.search(r'height="([\d.]+)pt"', tag)
+    if not (box and width and height):
+        return None
+    vw, vh = float(box.group(1)), float(box.group(2))
+    w_pt, h_pt = float(width.group(1)), float(height.group(1))
+    if min(vw, vh, w_pt, h_pt) <= 0:
+        return None
+    px_w = max(1, round(w_pt / 72 * SVG_TRIM_DPI))
+    px_h = max(1, round(h_pt / 72 * SVG_TRIM_DPI))
+    if px_w * px_h > 40_000_000:
+        return None
+    image = render_svg_bytes(data, px_w, px_h)
+    if image.isNull():
+        return None
+    rgb = image.convertToFormat(QImage.Format.Format_RGB32)
+    arr = np.frombuffer(rgb.constBits(), np.uint8, count=rgb.sizeInBytes())
+    arr = arr.reshape(px_h, rgb.bytesPerLine())[:, : px_w * 4].reshape(px_h, px_w, 4)
+    ink = (arr[:, :, :3] < 240).any(axis=2)
+    rows, cols = np.where(ink.any(axis=1))[0], np.where(ink.any(axis=0))[0]
+    if rows.size == 0:
+        return None
+    ux, uy = vw / px_w, vh / px_h                  # SVG units per pixel
+    margin = SVG_MARGIN_MM * 100                   # (1 unit = 0.01 mm)
+    # (the ink's pixels: smoothed edges already reach a little beyond the drawing)
+    x0 = round(max(0.0, cols[0] * ux - margin))
+    y0 = round(max(0.0, rows[0] * uy - margin))
+    x1 = round(min(vw, (cols[-1] + 1) * ux + margin))
+    y1 = round(min(vh, (rows[-1] + 1) * uy + margin))
+    if x0 <= 0 and y0 <= 0 and x1 >= vw and y1 >= vh:
+        return None   # nothing to cut
+    k_x, k_y = w_pt / vw, h_pt / vh                # pt per unit
+    new = re.sub(r'viewBox="[^"]*"', f'viewBox="{x0} {y0} {x1 - x0} {y1 - y0}"', tag,
+                 count=1)
+    new = re.sub(r'width="[^"]*"', f'width="{(x1 - x0) * k_x:.3f}pt"', new, count=1)
+    new = re.sub(r'height="[^"]*"', f'height="{(y1 - y0) * k_y:.3f}pt"', new, count=1)
+    return (svg[:root.start()] + new + svg[root.end():]).encode("utf-8", "replace")
 
 
 def clipboard_has_vector() -> bool:
@@ -82,8 +219,8 @@ def clipboard_has_vector() -> bool:
 
 def clipboard_image(dpi: int = DEFAULT_DPI) -> QImage | None:
     """The best picture on the clipboard as a QImage (no vector original), or None."""
-    picture = clipboard_picture(dpi)
-    return QImage.fromData(picture.png, "PNG") if picture is not None else None
+    picture = clipboard_picture(dpi, vector=())
+    return QImage.fromData(picture.data, "PNG") if picture is not None else None
 
 
 def image_to_png(image: QImage) -> bytes:
@@ -96,8 +233,8 @@ def image_to_png(image: QImage) -> bytes:
 
 
 def clipboard_png(dpi: int = DEFAULT_DPI) -> bytes | None:
-    picture = clipboard_picture(dpi)
-    return picture.png if picture is not None else None
+    picture = clipboard_picture(dpi, vector=())
+    return picture.data if picture is not None else None
 
 
 def render_vector(data: bytes, ext: str, dpi: int = DEFAULT_DPI) -> QImage | None:
@@ -123,28 +260,53 @@ def rerender_file(source: Path, dpi: int = DEFAULT_DPI) -> bytes | None:
     return image_to_png(image) if image is not None else None
 
 
+def redraw_original(source: Path, dpi: int = DEFAULT_DPI) -> PastedPicture | None:
+    """A stored original drawn again: an EMF as an SVG where the conversion passes the
+    self-check (else a PNG at `dpi`, SPEC §13n.1); a PDF original as a PNG at `dpi`.
+    None if it can't be done here (an EMF needs Windows)."""
+    source = Path(source)
+    if source.suffix.lower() == ".emf":
+        try:
+            data = source.read_bytes()
+        except OSError:
+            return None
+        return picture_from_emf(data, dpi)
+    png = rerender_file(source, dpi)
+    return PastedPicture(png, None, "", ".png") if png is not None else None
+
+
 def rerender_pasted_pictures(project, dpi: int,
                              progress=None) -> tuple[int, int, int]:
-    """Draw every pasted picture that has a saved vector original again at `dpi`
-    ("Re-render pasted pictures" in Project settings). Returns (re-rendered, pictures
-    without an original, originals that could not be drawn here).
+    """Draw every pasted picture that has a saved vector original again ("Re-render pasted
+    pictures" in Project settings): ChemDraw's metafiles as vector drawings (SVG) where
+    the conversion passes the self-check, else at `dpi` (SPEC §13n.1); PDF originals at
+    `dpi`. A picture may change its extension (structure_image.png → .svg); whatever
+    refers to it follows. Returns (re-rendered, pictures without an original, originals
+    that could not be drawn here). Pictures that are vector drawings themselves (an SVG
+    or a PDF kept without an original) need nothing and are not counted.
 
     `progress(done_so_far, total)` is called before each picture; if it returns False
     the rest are left as they are (each picture is replaced whole, so stopping part-way
     leaves every picture correct, just some still at the old resolution)."""
+    from ..core.project import ProjectError
     done = without = failed = 0
     pictures = project.pasted_pictures()
     for i, (picture, source) in enumerate(pictures):
         if progress is not None and progress(i, len(pictures)) is False:
             break
         if source is None:
-            without += 1
+            if Path(picture).suffix.lower() not in VECTOR_EVERYWHERE:
+                without += 1
             continue
-        png = rerender_file(source, dpi)
-        if png is None:
+        result = redraw_original(source, dpi)
+        if result is None:
             failed += 1
             continue
-        project.replace_picture_png(picture, png)
+        try:
+            project.replace_pasted_picture(picture, result.data, result.ext)
+        except ProjectError:
+            failed += 1
+            continue
         done += 1
     return done, without, failed
 
@@ -219,6 +381,21 @@ def _qt_image() -> QImage | None:
 
 
 # ---------------------------------------------------------------------- macOS: PDF
+
+def _pdf_original() -> PastedPicture | None:
+    """The clipboard's PDF (ChemDraw on macOS) kept as the picture itself (a vector
+    drawing, printed at its own size), if it has a page that can be drawn."""
+    data = QGuiApplication.clipboard().mimeData()
+    if data is None:
+        return None
+    fmt = next((f for f in data.formats() if "pdf" in f.lower()), None)
+    if fmt is None:
+        return None
+    raw = bytes(data.data(fmt))
+    if not raw.startswith(b"%PDF") or render_pdf(raw, 36) is None:
+        return None
+    return PastedPicture(raw, None, "", ".pdf", PDF_MESSAGE)
+
 
 def _pdf_picture(dpi: int) -> tuple[QImage, bytes, str] | None:
     data = QGuiApplication.clipboard().mimeData()
@@ -524,6 +701,19 @@ if sys.platform == "win32":
             return False
         return bool(_IsClipboardFormatAvailable(_CF_ENHMETAFILE))
 
+    def _windows_svg(dpi: int) -> PastedPicture | None:
+        """The clipboard's metafile (ChemDraw's copy) as a checked SVG, or None (no
+        metafile, or the conversion did not pass: it is then rendered as before)."""
+        if not _windows_vector_available():
+            return None
+        emf = clipboard_metafile_bytes()
+        if not emf:
+            return None
+        result = vector_svg(emf)
+        if result is None or result.svg is None:
+            return None
+        return PastedPicture(trim_svg(result.svg), emf, ".emf", ".svg", SVG_MESSAGE)
+
     def _windows_metafile(dpi: int) -> tuple[QImage, bytes | None, str] | None:
         if QGuiApplication.platformName() == "offscreen":
             return None  # tests / no real desktop: Qt's own clipboard is the only one
@@ -551,6 +741,9 @@ if sys.platform == "win32":
 else:
     def _windows_vector_available() -> bool:
         return False
+
+    def _windows_svg(dpi: int) -> None:
+        return None
 
     def _windows_metafile(dpi: int) -> None:
         return None

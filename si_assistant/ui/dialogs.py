@@ -159,10 +159,10 @@ class ProjectSettingsDialog(QDialog):
                                   "smaller files.")
         self.rerender_btn = QPushButton("Re-render pasted pictures…")
         self.rerender_btn.setToolTip(
-            "Draw every pasted ChemDraw picture again from its saved original, at the "
-            "resolution chosen here, and convert every spectrum pasted from Mnova again from "
-            "its saved original (as a vector drawing where possible). Pictures pasted before "
-            "the original was saved (and screenshots or image files) are left as they are.")
+            "Convert every pasted ChemDraw picture again from its saved original (as a "
+            "vector drawing where possible, otherwise at the resolution chosen here), and "
+            "every spectrum pasted from Mnova (likewise). Pictures pasted before the original "
+            "was saved (and screenshots or image files) are left as they are.")
         self.rerender_btn.clicked.connect(self._rerender)
         self.rerender_btn.setEnabled(not project.read_only)
         self.pictures_changed = False
@@ -176,6 +176,11 @@ class ProjectSettingsDialog(QDialog):
         # ---- Structures (how the program draws structures, SPEC §13k.7)
         self.structures = StructureDrawingTab(s)
         tabs.addTab(self.structures, "Structures")
+
+        # ---- Schemes (the scheme editor's layout defaults, SPEC §13n.4)
+        from .scheme_editor_ui import SchemesTab
+        self.schemes_tab = SchemesTab(s)
+        tabs.addTab(self.schemes_tab, "Schemes")
 
         # ---- Page (header, footer and page numbers, SPEC §13k.2a)
         self.page_tab = PageTab(s, self._page_context)
@@ -273,7 +278,8 @@ class ProjectSettingsDialog(QDialog):
         stopped = bar.wasCanceled()
         bar.close()
         self.pictures_changed = self.pictures_changed or bool(done) or bool(spectra[0])
-        lines = [f"Re-rendered {done} pasted picture(s) at {dpi} dpi."]
+        lines = [f"Re-rendered {done} pasted picture(s): ChemDraw's Windows copies as vector "
+                 f"drawings where possible, the rest at {dpi} dpi."]
         if spectra[0] or n_spectra:
             lines.append(f"Converted {spectra[0]} pasted spectrum/spectra again from Mnova's "
                          f"original ({spectra[1]} kept as vector drawings, the rest as "
@@ -303,6 +309,7 @@ class ProjectSettingsDialog(QDialog):
         s["auto_nmr_11B"] = self.auto_11b.isChecked()
         s["paste_dpi"] = self.paste_dpi.currentData()
         self.structures.apply(s)
+        self.schemes_tab.apply(s)
         self.page_tab.apply(s)   # after journal_style: the footer is compared with its default
         self.labels_tab.apply(s)   # (likewise the figure word, "Fig." for RSC)
         self.impurities.apply(s)
@@ -310,6 +317,9 @@ class ProjectSettingsDialog(QDialog):
 
 
 SAMPLE_SMILES = "C[C@H](NC(C)=O)c1ccc(F)cc1"   # stereocentre, F, N–H and methyls
+# The two ways of printing structures (SPEC §13n.2), also in the Compile SI window.
+COMPILE_PICTURES = "ChemDraw pictures where available; program drawings otherwise"
+COMPILE_ACS = "Program drawings for every compound"
 
 
 class StructureDrawingTab(QWidget):
@@ -323,13 +333,27 @@ class StructureDrawingTab(QWidget):
         current = chem.DrawingSettings.from_settings(settings)
 
         self.compile_choice = QComboBox()
-        self.compile_choice.addItem("Pasted ChemDraw (or your own) pictures where available",
-                                    "pictures")
-        self.compile_choice.addItem("The program's drawings for every compound", "acs")
+        self.compile_choice.addItem(COMPILE_PICTURES, "pictures")
+        self.compile_choice.addItem(COMPILE_ACS, "acs")
         self.compile_choice.setCurrentIndex(
             max(0, self.compile_choice.findData(settings.get("compile_structures", "pictures"))))
-        self.compile_choice.setToolTip("Also chosen in the Compile SI window. Compounds without "
-                                       "a picture always get the program's drawing.")
+        self.compile_choice.setToolTip("Also chosen in the Compile SI window. A compound with a "
+                                       "pasted ChemDraw picture (or your own) prints it; one "
+                                       "with only a structure (SMILES, MOL) gets the program's "
+                                       "drawing.")
+        # SPEC §13n.2a: pasted vector pictures printed at the bond length set below.
+        from ..core import drawing_scale
+        self._scale = drawing_scale
+        self.same_bond = QCheckBox("Print all pasted structures at the same bond length "
+                                   "(the one below)")
+        self.same_bond.setChecked(drawing_scale.same_scale(settings))
+        self.same_bond.setToolTip(
+            "Pasted ChemDraw pictures (vector drawings) are measured and enlarged or shrunk "
+            "so their bonds print at the bond length below, whatever zoom they were copied "
+            "at. Line widths and text scale with them, so copy every structure from the same "
+            "ChemDraw style (e.g. ACS Document 1996). Off: every picture prints at its own "
+            "size. Pictures without measurable bonds (screenshots) always print at their own "
+            "size.")
 
         self.bond = QDoubleSpinBox()
         self.bond.setRange(0.2, 2.0)
@@ -362,6 +386,7 @@ class StructureDrawingTab(QWidget):
         font_row.addWidget(self.font_size)
         form = QFormLayout()
         form.addRow("When compiling, use:", self.compile_choice)
+        form.addRow(self.same_bond)
         form.addRow(QLabel("<b>The program's structure drawings</b> (in the SI and on screen)"))
         form.addRow("Bond length:", self.bond)
         form.addRow("Line width:", self.line)
@@ -386,8 +411,8 @@ class StructureDrawingTab(QWidget):
         right.addWidget(self.sample_note)
         note = QLabel("ACS 1996 settings: bond length 0.508 cm, line width 0.6 pt, 10 pt "
                       "labels (Arial or Helvetica in ChemDraw; the built-in font looks the "
-                      "same and works on every computer). Pasted ChemDraw pictures are not "
-                      "affected.")
+                      "same and works on every computer). Pasted ChemDraw pictures keep their "
+                      "own look; with the tick box above they print at this bond length.")
         note.setWordWrap(True)
         note.setStyleSheet("color: palette(placeholder-text);")
 
@@ -464,6 +489,10 @@ class StructureDrawingTab(QWidget):
 
     def apply(self, settings: dict) -> None:
         settings["compile_structures"] = self.compile_choice.currentData()
+        if self.same_bond.isChecked():   # (the default: not saved)
+            settings.pop(self._scale.SETTING_KEY, None)
+        else:
+            settings[self._scale.SETTING_KEY] = False
         values = self.values()
         if values == self._chem.DrawingSettings():
             settings.pop("structure_drawing", None)   # unchanged: follow the ACS defaults
@@ -892,6 +921,7 @@ class TrashDialog(QDialog):
                 "scheme": f"Scheme page (from “{e.info.get('section_name', '?')}”)",
                 "scheme_file": f"Scheme picture (from “{e.info.get('scheme_name', '?')}”)",
                 "gp": f"General procedure (from “{e.info.get('section_name', '?')}”)",
+                "manuscript_file": "Manuscript check file",
                 "incomplete": "Unfinished deletion (no description)",
             }.get(e.kind, e.kind)
             for col, text in enumerate([e.name, kind, e.deleted_at.replace("T", " "), e.deleted_by]):

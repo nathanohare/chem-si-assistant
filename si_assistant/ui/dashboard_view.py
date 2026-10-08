@@ -17,7 +17,7 @@ from ..core import dashboard as D
 from ..core.project import Project, ProjectError, Section
 from .structure_widgets import drawing_settings, mol_pixmap, picture_pixmap
 
-THUMB = QSize(96, 64)
+THUMB = QSize(120, 80)   # (in interface units; drawn with the screen's own pixels)
 KEY_ROLE = Qt.ItemDataRole.UserRole
 CID_ROLE = Qt.ItemDataRole.UserRole + 1
 STRUCT_TIP_ROLE = Qt.ItemDataRole.UserRole + 2   # set: the tooltip shows the structure,
@@ -29,8 +29,10 @@ LEGEND = ("✔ filled · ○ empty · ✖ empty but required · — not used for
 _thumb_cache: dict[tuple, QPixmap] = {}
 
 
-def thumbnail(project: Project, compound) -> QPixmap | None:
-    """Small structure picture, cached until structure.mol (or the own image) changes."""
+def thumbnail(project: Project, compound, dpr: float = 1.0) -> QPixmap | None:
+    """Small structure picture, cached until structure.mol (or the own image) changes.
+    `dpr`: the screen's device pixel ratio (1.5 at 150 % display scaling), so it is drawn
+    with the screen's real pixels and stays sharp (SPEC §13q.5)."""
     image = project.structure_image_path(compound)
     path = image if image is not None and image.exists() else project.structure_path(compound)
     try:
@@ -38,16 +40,16 @@ def thumbnail(project: Project, compound) -> QPixmap | None:
     except FileNotFoundError:
         return None
     drawing = drawing_settings(project)
-    key = (path, st.st_mtime_ns, st.st_size, THUMB.width(),
+    key = (path, st.st_mtime_ns, st.st_size, THUMB.width(), dpr,
            drawing if path.suffix == ".mol" else None)
     if key not in _thumb_cache:
         if path.suffix == ".mol":
             mol = project.read_structure(compound)
             if mol is None:
                 return None
-            _thumb_cache[key] = mol_pixmap(mol, THUMB, drawing)
+            _thumb_cache[key] = mol_pixmap(mol, THUMB, drawing, dpr)
         else:
-            _thumb_cache[key] = picture_pixmap(path, THUMB)
+            _thumb_cache[key] = picture_pixmap(path, THUMB, dpr)
     return _thumb_cache[key]
 
 
@@ -286,7 +288,7 @@ class DashboardView(QWidget):
             id_item.setFont(f)
             # Structure (the thumbnail is also the structure field's cell)
             s_cell = row.cells["structure"]
-            pixmap = thumbnail(self.project, row.compound)
+            pixmap = thumbnail(self.project, row.compound, self.devicePixelRatioF())
             s_item = _item("" if pixmap else f"{s_cell.icons} no structure", s_cell.tooltip)
             if pixmap is not None:
                 s_item.setData(Qt.ItemDataRole.DecorationRole, pixmap)

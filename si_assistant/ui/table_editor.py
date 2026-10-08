@@ -54,6 +54,8 @@ def markup_html(text: str) -> str:
                 piece = f"<i>{piece}</i>"
             if r.bold:
                 piece = f"<b>{piece}</b>"
+            if r.underline:
+                piece = f"<u>{piece}</u>"
             out.append(piece)
         lines.append("".join(out))
     return "<br>".join(lines)

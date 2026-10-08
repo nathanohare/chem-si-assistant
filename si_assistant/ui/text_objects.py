@@ -128,7 +128,7 @@ class ObjectStore:
         """A picture from the clipboard (ui/clipboard_image.PastedPicture): the PNG, and
         ChemDraw's vector original when there is one (kept for re-rendering)."""
         with self.adding("Paste a figure"):
-            figure_id = self.project.add_figure(self.owner, data=picture.png, ext=".png",
+            figure_id = self.project.add_figure(self.owner, data=picture.data, ext=picture.ext,
                                                 vector=picture.source,
                                                 vector_ext=picture.source_ext)
         self._saved()
@@ -147,8 +147,8 @@ class ObjectStore:
             if path is not None:   # (a user's file: no vector original, as for add_file)
                 self.project.replace_figure_picture(self.owner, figure_id, source=Path(path))
             else:
-                self.project.replace_figure_picture(self.owner, figure_id, data=picture.png,
-                                                    ext=".png", vector=picture.source,
+                self.project.replace_figure_picture(self.owner, figure_id, data=picture.data,
+                                                    ext=picture.ext, vector=picture.source,
                                                     vector_ext=picture.source_ext)
         self._saved()
 

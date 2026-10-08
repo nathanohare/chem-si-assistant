@@ -60,36 +60,6 @@ def test_image_info_reads_dpi_without_opening_the_picture(qapp, big_png, tmp_pat
     assert png_dpi(tmp_path / "x.jpg") is None
 
 
-def test_big_scheme_is_shown_and_labels_can_be_placed(qapp, project, big_png):
-    from si_assistant.ui.scheme_panel import SCREEN_SIDE, SchemePanel, ink_mask
-    s = project.add_section("data", "Compounds")
-    scheme = project.add_scheme(s.id)
-    project.set_scheme_picture(scheme, data=big_png.read_bytes())
-    ink = ink_mask(project.scheme_image_path(scheme))
-    assert ink is not None and ink.any() and max(ink.shape) <= SCREEN_SIDE
-    panel = SchemePanel(project, scheme, lambda: "Me")
-    pixmap = panel.canvas.pixmap
-    assert pixmap is not None and not pixmap.isNull()
-    assert max(pixmap.width(), pixmap.height()) <= SCREEN_SIDE
-    panel.refresh_canvas()                 # e.g. after a label drag: not read again
-    assert panel.canvas.pixmap is pixmap
-    panel.deleteLater()
-
-
-def test_unreadable_scheme_picture_is_reported(qapp, project):
-    from si_assistant.ui.scheme_panel import SchemePanel
-    s = project.add_section("data", "Compounds")
-    scheme = project.add_scheme(s.id)
-    project.set_scheme_picture(scheme, data=b"\x89PNG\r\n\x1a\n damaged")
-    panel = SchemePanel(project, scheme, lambda: "Me")
-    assert panel.canvas.pixmap is None
-    assert "could not be shown" in panel.canvas.placeholder
-    assert "No scheme yet" not in panel.canvas.placeholder
-    panel.auto_place(quiet=False)
-    assert "Could not read the scheme picture" in panel.status.text()
-    panel.deleteLater()
-
-
 def test_picture_thumbnails_are_kept_until_the_file_changes(qapp, tmp_path):
     import os
     from si_assistant.ui.structure_widgets import picture_pixmap

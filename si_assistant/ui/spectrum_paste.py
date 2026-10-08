@@ -383,6 +383,35 @@ def _blank(image: QImage) -> bool:
     return not mask.any()
 
 
+@dataclass
+class CheckedSvg:
+    """A metafile converted to SVG and compared with Windows' drawing of it (checked_svg):
+    `svg` is set only when the conversion is complete and passed the self-check."""
+    svg: str | None
+    conversion: emf_svg.Conversion
+    reason: str = ""
+
+
+def checked_svg(emf: bytes) -> CheckedSvg:
+    """The metafile as an SVG that has passed the self-check (Windows only: elsewhere a
+    conversion is never kept unchecked), or the reason why not. Shared by pasted spectra
+    and pasted pictures (ChemDraw structures, schemes, figures; SPEC §13n.1)."""
+    conv = emf_svg.convert(emf, QtTextHelper())
+    if conv.error:
+        return CheckedSvg(None, conv, "the metafile could not be read")
+    if not conv.drawn:
+        return CheckedSvg(None, conv, "the copy draws nothing that can be converted")
+    if not conv.ok:
+        return CheckedSvg(None, conv, "the copy uses drawing commands that can't be converted")
+    if sys.platform != "win32":
+        return CheckedSvg(None, conv, "a metafile can only be checked on Windows")
+    result = self_check(emf, conv.svg)
+    if not result.passed:
+        return CheckedSvg(None, conv, "the vector copy did not match Windows' drawing of it "
+                                      "closely enough: " + result.reason)
+    return CheckedSvg(conv.svg, conv)
+
+
 def convert_emf(emf: bytes, check: bool = True) -> PastedSpectrum | None:
     """A copied metafile as the file to store: SVG when the conversion is complete and
     passes the self-check, else a picture (see the module's description). `check=False`

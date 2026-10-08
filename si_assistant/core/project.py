@@ -30,8 +30,10 @@ from pathlib import Path
 from typing import Any
 
 from . import chem
+from . import drawing_scale
 from . import fields as F
 from . import lock as lockmod
+from . import ms_reports
 from . import references as refs
 from . import spectra as spectra_mod
 from . import undo
@@ -62,7 +64,6 @@ TRASH_ENTRY_FILE = "entry.json"
 COMPOUNDS_DIR = "compounds"
 COMPOUND_FILE = "compound.json"
 SCHEME_FILE = "scheme.json"
-SCHEME_STRUCTURES_FILE = "scheme_structures.mol"
 NOTES_FILE = "notes.txt"
 STRUCTURE_FILE = "structure.mol"
 
@@ -78,6 +79,9 @@ SECTION_SLUG = 20
 ITEM_SLUG = 14
 STRUCTURE_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".tif", ".tiff", ".svg")
 FIGURE_EXTENSIONS = STRUCTURE_IMAGE_EXTENSIONS + (".gif", ".pdf")   # figures in texts
+# Structure and scheme pictures can also be a PDF: ChemDraw's copy on macOS, kept as the
+# vector drawing it is (SPEC §13n.1).
+PICTURE_FILE_EXTENSIONS = STRUCTURE_IMAGE_EXTENSIONS + (".pdf",)
 # ChemDraw's vector original of a pasted picture is kept next to the PNG with the same
 # name, e.g. structure_image.png + structure_image.emf (SPEC §13k.6).
 VECTOR_EXTENSIONS = (".emf", ".pdf")
@@ -272,12 +276,18 @@ class Compound:
 class SchemePage:
     """A reaction scheme with its compounds as sub-pages (SPEC §6.3.5). `data` is scheme.json:
 
-        {"id", "name", "children": [compound ids], "image": "scheme.png",
-         "labels": {compound id: {"x": 0-1, "y": 0-1, "manual": bool}},
-         "label": "Scheme 2"}   (optional: typed over the automatic "Scheme S1", §13k.5a)
+        {"id", "name", "children": [compound ids],
+         "label": "Scheme 2",   (optional: typed over the automatic "Scheme S1", §13k.5a)
+         "mode": "editor",      (made with the scheme editor, SPEC §13n.4)
+         "editor": {…}}         (the scheme editor's boxes and steps: core/scheme_editor.py)
 
-    Folder: sections/<section>/compounds/<id>_<slug>/ with scheme.json, the picture and the
-    copied structures (scheme_structures.mol). Its compounds' folders sit next to it in the
+    Scheme pages made before the editor were one pasted picture with ID labels on it
+    ("image", "labels", no "mode"). That way of making schemes was removed (SPEC §13p.5):
+    such a page opens in the scheme editor (scheme_editor.upgrade_old_scheme), its
+    compounds the products of one step; its picture file is left in its folder, unused.
+
+    Folder: sections/<section>/compounds/<id>_<slug>/ with scheme.json and the editor's
+    files (editor/). Its compounds' folders sit next to it in the
     section's compounds/ folder (kept flat to stay well inside Windows' 260-character path
     limit); scheme.json's "children" says which compounds belong to it.
     The scheme itself has no ID and no data fields.
@@ -292,9 +302,6 @@ class SchemePage:
     def name(self) -> str:
         return str(self.data.get("name") or "Scheme")
 
-    @property
-    def labels(self) -> dict[str, dict[str, Any]]:
-        return self.data.setdefault("labels", {})
 
 
 @dataclass
@@ -311,7 +318,9 @@ class TextOwner:
 class TrashEntry:
     id: str
     kind: str  # "section", "file", "compound", "compound_file", "scheme", "scheme_file",
-    #            "gp", "figure", "table", or "incomplete" (a Trash folder with no description)
+    #            "scheme_box" (a scheme editor's structure), "gp", "figure", "table",
+    #            "manuscript_file" (SPEC §13o) or "incomplete" (a Trash folder with no
+    #            description)
     name: str
     folder: Path
     info: dict[str, Any]
@@ -502,12 +511,14 @@ class Project:
     def _make_scheme(self, section: Section, folder: Path, data: dict,
                      compounds: dict[str, Compound]) -> SchemePage:
         """A scheme page, taking its children out of `compounds`."""
+        from . import scheme_editor
         scheme = SchemePage(data["id"], folder, data, section.id)
         for cid in data.get("children", []):
             child = compounds.pop(cid, None)
             if child is not None:
                 child.scheme_id = scheme.id
                 scheme.children.append(child)
+        scheme_editor.upgrade_old_scheme(scheme)   # (a pasted-picture scheme: SPEC §13p.5)
         return scheme
     # ------------------------------------------------------------------ locking
 
@@ -909,11 +920,11 @@ class Project:
             raise ProjectError(f"File not found:\n{source}")
         if self.is_section_file(section, source):
             return self.section_file_path(section)   # (already attached: nothing to do)
-        if vector is not None and source.suffix.lower() == ".png":
+        if vector is not None and source.suffix.lower() in (".png", ".svg"):
             if section.data.get("file"):
                 self.remove_file(section)
             dest = self._write_picture(section.folder, Path(safe_filename(source.name)).stem,
-                                       source, None, ".png", vector, "")
+                                       source, None, source.suffix.lower(), vector, "")
         else:
             # Copied in under a passing name first; the final name is chosen once the old
             # file has gone to the Trash (so a file of the same name keeps its name).
@@ -933,15 +944,18 @@ class Project:
         return dest
 
     def attach_pasted_picture(self, section: Section, png: bytes, vector: bytes | None = None,
-                              vector_ext: str = "") -> Path:
+                              vector_ext: str = "", ext: str = ".png") -> Path:
         """A picture pasted into an Attachment section (SPEC §13l.8), e.g. a ChemDraw drawing
-        rendered at the project's paste resolution: stored as "pasted picture.png", with
-        ChemDraw's vector original next to it (same name, .emf or .pdf) as for structures.
-        Any current file goes to the Trash."""
+        converted to SVG or rendered at the project's paste resolution: stored as "pasted
+        picture.svg" (or .png), with ChemDraw's vector original next to it (same name, .emf
+        or .pdf) as for structures. Any current file goes to the Trash."""
         self._check_writable()
+        ext = ext.lower()
+        if ext not in FILE_SECTION_EXTENSIONS:
+            raise ProjectError(f"A pasted picture can't be stored as {ext}.")
         if section.data.get("file"):
             self.remove_file(section)
-        dest = self._write_picture(section.folder, PASTED_ATTACHMENT_STEM, None, png, ".png",
+        dest = self._write_picture(section.folder, PASTED_ATTACHMENT_STEM, None, png, ext,
                                    vector, vector_ext)
         section.data["file"] = dest.name
         self.save_section(section)
@@ -950,7 +964,7 @@ class Project:
     def section_file_source(self, section: Section) -> Path | None:
         """The vector original kept next to a picture pasted into an Attachment section."""
         path = self.section_file_path(section)
-        if path is None or path.suffix.lower() != ".png":
+        if path is None or path.suffix.lower() not in (".png", ".svg"):
             return None
         return picture_source_path(path)
 
@@ -1091,10 +1105,16 @@ class Project:
             message = self._restore_scheme(entry, item)
         elif entry.kind == "scheme_file":
             message = self._restore_scheme_file(entry, item)
+        elif entry.kind == "scheme_box":
+            from . import scheme_editor
+            message = scheme_editor.restore_box(self, entry)
         elif entry.kind == "gp":
             message = self._restore_gp(entry, item)
         elif entry.kind in ("figure", "table"):
             message = self._restore_object(entry, item)
+        elif entry.kind == "manuscript_file":   # (the Manuscript check's files, §13o)
+            from . import manuscript
+            message = manuscript.restore_file(self, entry, item)
         elif entry.kind == "incomplete":
             message = self._restore_incomplete(entry)
         else:
@@ -1254,6 +1274,21 @@ class Project:
         self._save_owner(owner)
         return compound
 
+    @staticmethod
+    def ids_without_pages(section: Section) -> list[str]:
+        """The ID table's entries after the last compound's row, up to its last filled-in
+        row ("" for an empty row in between): the IDs no compound has yet (SPEC §13q.4)."""
+        table = [str(v).strip() for v in section.id_table]
+        while table and not table[-1]:
+            table.pop()
+        return table[len(section.compounds):]
+
+    def add_pages_for_ids(self, section_id: str) -> list[Compound]:
+        """A blank compound page, at the end of the section, for each ID of the ID table
+        that no compound has yet (they take those IDs, in the table's order)."""
+        section = self._data_section(section_id)
+        return [self.add_compound(section.id) for _id in self.ids_without_pages(section)]
+
     def save_compound(self, compound: Compound) -> None:
         self._check_writable()
         compound.data["id"] = compound.id
@@ -1265,6 +1300,10 @@ class Project:
         section = self.section(compound.section_id)
         container, _parent, owner = self._container(section, compound.scheme_id)
         index = container.index(compound)
+        if isinstance(owner, SchemePage):
+            # The scheme editor's box that showed it keeps a copy of its structure.
+            from . import scheme_editor
+            scheme_editor.compound_leaving(self, owner, compound.id)
         entry = self._move_to_trash(
             compound.folder, kind="compound", name=compound.name or "unnamed compound",
             extra={"compound_id": compound.id, "section_id": section.id,
@@ -1284,6 +1323,10 @@ class Project:
         src, src_parent, src_owner = self._container(source_section, compound.scheme_id)
         target_section = self._data_section(section_id)
         dst, dst_parent, dst_owner = self._container(target_section, scheme_id)
+        from . import scheme_editor
+        if isinstance(src_owner, SchemePage) and src_owner is not dst_owner:
+            # (leaving a scheme: the box that showed it keeps a copy of its structure)
+            scheme_editor.compound_leaving(self, src_owner, compound.id)
         src.remove(compound)
         if dst_parent != src_parent:
             dest = _unique_path(dst_parent / compound.folder.name)
@@ -1297,11 +1340,11 @@ class Project:
         compound.section_id = target_section.id
         compound.scheme_id = scheme_id or None
         dst.insert(max(0, min(index, len(dst))), compound)
+        if isinstance(dst_owner, SchemePage):
+            # An editor scheme's compounds stay in the order of their boxes.
+            scheme_editor.sync_children(self, dst_owner, save=False)
         if src_owner is not dst_owner:
             self._save_owner(src_owner)
-            if isinstance(src_owner, SchemePage):
-                src_owner.labels.pop(compound.id, None)
-                self.save_scheme(src_owner)
         self._save_owner(dst_owner)
 
     def _restore_compound(self, entry: TrashEntry, item: Path) -> str:
@@ -1325,6 +1368,10 @@ class Project:
                             section.id, scheme_id)
         index = int(entry.info.get("original_index", len(container)))
         container.insert(max(0, min(index, len(container))), compound)
+        if isinstance(owner, SchemePage):
+            # (a scheme made with the editor orders its compounds as its boxes, SPEC §13n.4)
+            from . import scheme_editor
+            scheme_editor.sync_children(self, owner, save=False)
         self._save_owner(owner)
         return f"Restored compound “{entry.name}” to “{section.name}”."
 
@@ -1344,15 +1391,21 @@ class Project:
         scheme.data.update({"id": scheme.id, "children": [c.id for c in scheme.children]})
         atomic_write_json(scheme.folder / SCHEME_FILE, scheme.data)
 
-    def add_scheme(self, section_id: str, index: int | None = None, name: str = "") -> SchemePage:
+    def add_scheme(self, section_id: str, index: int | None = None,
+                   name: str = "") -> SchemePage:
+        """A new scheme page, drawn with the scheme editor (one empty starting material
+        and one step, SPEC §13n.4)."""
+        from . import scheme_editor
         self._check_writable()
         section = self._data_section(section_id)
         kid = new_id("k")
         name = name.strip() or f"Scheme {len(section.schemes) + 1}"
         folder = section.folder / COMPOUNDS_DIR / f"{kid}_{slugify(name, ITEM_SLUG)}"
         fileio.make_dirs(folder, exist_ok=False)
-        scheme = SchemePage(kid, folder, {"id": kid, "name": name, "children": [], "image": "",
-                                          "labels": {}}, section.id)
+        scheme = SchemePage(kid, folder, {"id": kid, "name": name, "children": []},
+                            section.id)
+        scheme.data[scheme_editor.MODE_KEY] = scheme_editor.EDITOR
+        scheme_editor.start_empty(scheme)
         self.save_scheme(scheme)
         items = section.items
         items.insert(len(items) if index is None else max(0, min(index, len(items))), scheme)
@@ -1453,63 +1506,33 @@ class Project:
 
     def convert_to_scheme(self, compound_id: str) -> SchemePage:
         """Turn a compound page into a scheme page with the compound as its first sub-page
-        (SPEC §6.3.5). A scheme picture the compound had (older projects) moves with it."""
+        (SPEC §6.3.5). A scheme picture the compound had (older projects) goes to the
+        Trash: schemes are drawn with the scheme editor (SPEC §13p.5)."""
         self._check_writable()
         compound = self.compound(compound_id)
         if compound.scheme_id:
             raise ProjectError("This compound is already part of a scheme page.")
+        from . import scheme_editor
         section_id, _scheme, index = self.position(compound)
         name = f"Scheme: {compound.name}" if compound.name else ""
         scheme = self.add_scheme(section_id, index, name)
         self.move_compound(compound.id, section_id, 0, scheme.id)
+        # Drawn with the scheme editor: the compound is the product of its first step.
+        scheme_editor.start_with_compound(self, scheme, compound)
         legacy = self._image_path(compound, "scheme_image")
         if legacy is not None and legacy.exists():
-            self.set_scheme_picture(scheme, source=legacy)
             self._remove_image(compound, "scheme_image")
         if "scheme" in compound.field_keys:
             compound.data["fields"] = [e for e in compound.fields if e["key"] != "scheme"]
             self.save_compound(compound)
         return scheme
 
-    # ---- the scheme picture, the structures copied with it, and the ID labels
-
-    def scheme_image_path(self, scheme: SchemePage) -> Path | None:
-        name = scheme.data.get("image")
-        return scheme.folder / name if name else None
-
-    def set_scheme_picture(self, scheme: SchemePage, source: Path | None = None,
-                           data: bytes | None = None, ext: str = ".png",
-                           vector: bytes | Path | None = None, vector_ext: str = "") -> None:
-        """Store the scheme picture from a file or raw bytes. `vector` is ChemDraw's
-        original (EMF/PDF bytes with `vector_ext`, or a file), kept next to the picture."""
-        self._check_writable()
-        source, ext = self._check_picture(source, ext)
-        self.remove_scheme_picture(scheme)
-        dest = self._write_picture(scheme.folder, "scheme", source, data, ext, vector, vector_ext)
-        scheme.data["image"] = dest.name
-        self.save_scheme(scheme)
-
-    def remove_scheme_picture(self, scheme: SchemePage) -> None:
-        self._check_writable()
-        path = self.scheme_image_path(scheme)
-        if path is None:
-            return
-        scheme.data["image"] = ""
-        self.save_scheme(scheme)
-        if path.exists():
-            self._move_to_trash(path, kind="scheme_file", name=path.name,
-                                extra={"scheme_id": scheme.id, "item": path.name,
-                                       "scheme_name": scheme.name},
-                                companions=_present(picture_source_path(path)))
-
     def _restore_scheme_file(self, entry: TrashEntry, item: Path) -> str:
-        try:
-            scheme = self.scheme(entry.info.get("scheme_id", ""))
-        except KeyError:
-            raise ProjectError("The scheme page this picture belonged to no longer exists. "
-                               f"The file is still in the Trash folder:\n{item}") from None
-        self.set_scheme_picture(scheme, source=item, vector=_trash_companion(entry))
-        return f"Restored the picture of “{scheme.name}”."
+        # (a pasted scheme picture, from before schemes were drawn only with the scheme
+        # editor, SPEC §13p.5: there is nowhere to put it back)
+        raise ProjectError("This is a pasted scheme picture. Schemes are now drawn with the "
+                           "scheme editor, so it can't be put back on a scheme page. The file "
+                           f"is still in the Trash folder:\n{item}")
 
     # ---- pictures shared by structures and schemes
 
@@ -1550,28 +1573,73 @@ class Project:
     def pasted_pictures(self) -> list[tuple[Path, Path | None]]:
         """Every structure and scheme picture in the project, each with its ChemDraw
         original (or None), for "Re-render pasted pictures"."""
-        out = []
+        return [(path, source) for path, source, _moved in self._picture_slots()]
+
+    def _picture_slots(self):
+        """(picture, its original or None, moved(new path)) for every structure, scheme,
+        figure and pasted Attachment picture; `moved` makes whatever refers to the picture
+        refer to `new` (a re-rendered picture may change its extension)."""
         for compound in self.all_compounds():
             for slot in self._IMAGE_SLOTS:
                 path = self._image_path(compound, slot)
                 if path is not None and path.exists():
-                    out.append((path, picture_source_path(path)))
+                    yield (path, picture_source_path(path),
+                           lambda new, c=compound, k=slot: self._image_moved(c, k, new))
         for scheme in self.all_schemes():
-            path = self.scheme_image_path(scheme)
-            if path is not None and path.exists():
-                out.append((path, picture_source_path(path)))
+            from . import scheme_editor   # the scheme editor's structures (SPEC §13n.4)
+            yield from scheme_editor.picture_slots(self, scheme)
         for owner in self.text_owners():   # figures in custom sections / General Information
-            for figure_id in self.figures(owner):
+            for figure_id, entry in self.figures(owner).items():
                 path = self.figure_path(owner, figure_id)
                 if path is not None and path.exists():
-                    out.append((path, self.figure_source(owner, figure_id)))
+                    def figure_moved(new, o=owner, f=figure_id, e=entry):
+                        e["file"] = new.relative_to(o.folder).as_posix()
+                        self._set_figure_entry(o, f, e)
+                    yield path, self.figure_source(owner, figure_id), figure_moved
         for section in self.sections:   # pictures pasted into Attachment sections
             source = self.section_file_source(section) if section.type == "file" else None
             if source is not None:     # (attached picture files are the user's own: left out)
-                out.append((self.section_file_path(section), source))
-        return out
+                def file_moved(new, sec=section):
+                    sec.data["file"] = new.name
+                    self.save_section(sec)
+                yield self.section_file_path(section), source, file_moved
+
+    def replace_pasted_picture(self, path: Path, data: bytes, ext: str) -> Path:
+        """Store a pasted picture drawn again from its original ("Re-render pasted
+        pictures"): in place, or under the same name with another extension (e.g. a PNG
+        that is now an SVG, SPEC §13n.1), whatever referred to it following. A structure
+        picture's bond length is measured again. Returns the picture's path."""
+        self._check_writable()
+        path = Path(path)
+        ext = ext.lower()
+        slot = next(((p, s, moved) for p, s, moved in self._picture_slots()
+                     if p == path), None)
+        if slot is None or ext not in PICTURE_FILE_EXTENSIONS:
+            raise ProjectError(f"Not a pasted picture in this project: {path.name}")
+        new = path.with_suffix(ext)
+        if new != path and (new.exists() or new == slot[1]):
+            raise ProjectError(f"{new.name} is already in the project; {path.name} was left "
+                               "as it is.")
+        atomic_write_bytes(new, data)
+        slot[2](new)
+        if new != path and path.exists():
+            fileio.remove_file(path)
+        return new
+
+    def _image_moved(self, compound: Compound, slot: str, new: Path) -> None:
+        value_key, entry, _stem = self._IMAGE_SLOTS[slot]
+        value = compound.values.get(value_key) or {}
+        value[entry] = new.name
+        compound.values[value_key] = value
+        if slot == "structure_image":
+            reference = None
+            if value.get("image_source") == "chemdraw":
+                reference = drawing_scale.reference_from_mol(self.read_structure(compound))
+            self._measure_structure_picture(compound, new, reference, keep_own=True)
+        self.save_compound(compound)
 
     def replace_picture_png(self, path: Path, png: bytes) -> None:
+        # (kept for PNG-only callers; replace_pasted_picture also handles SVG pictures)
         """Overwrite a stored PNG picture in place (e.g. re-rendered at a new resolution)."""
         self._check_writable()
         path = Path(path)
@@ -1580,51 +1648,6 @@ class Project:
             raise ProjectError(f"Not a picture in this project: {path.name}")
         atomic_write_bytes(path, png)
 
-    def set_scheme_structures(self, scheme: SchemePage, text: str) -> int:
-        """Keep the structures copied with the scheme (for matching sub-compounds and placing
-        their ID labels). Returns how many structures there are. Raises chem.ChemError."""
-        self._check_writable()
-        mol = chem.parse_structure(text)
-        atomic_write_text(scheme.folder / SCHEME_STRUCTURES_FILE, chem.mol_to_block(mol))
-        return len(self.scheme_fragments(scheme))
-
-    def scheme_fragments(self, scheme: SchemePage) -> list:
-        """The structures copied with the scheme, left to right (RDKit molecules)."""
-        path = scheme.folder / SCHEME_STRUCTURES_FILE
-        if not path.exists():
-            return []
-        try:
-            return chem.scheme_pieces(read_text(path))
-        except chem.ChemError:
-            return []
-
-    def match_scheme_structures(self, scheme: SchemePage) -> dict[str, int]:
-        """{compound id: index into scheme_fragments} for sub-compounds whose structure
-        appears in the copied scheme."""
-        pieces = [chem.same_structure_key(m) for m in self.scheme_fragments(scheme)]
-        used: set[int] = set()
-        matches: dict[str, int] = {}
-        for child in scheme.children:
-            mol = self.read_structure(child)
-            if mol is None:
-                continue
-            for strict in (True, False):  # exact (with stereo) first, then ignoring stereo
-                key = chem.same_structure_key(mol, stereo=strict)
-                keys = pieces if strict else [chem.same_structure_key(m, stereo=False)
-                                              for m in self.scheme_fragments(scheme)]
-                hit = next((i for i, k in enumerate(keys) if k == key and i not in used), None)
-                if hit is not None:
-                    matches[child.id] = hit
-                    used.add(hit)
-                    break
-        return matches
-
-    def set_label_position(self, scheme: SchemePage, compound_id: str, x: float, y: float,
-                           manual: bool = True) -> None:
-        """Where a sub-compound's ID is printed on the scheme (fractions of the picture)."""
-        scheme.labels[compound_id] = {"x": round(min(max(x, 0.0), 1.0), 4),
-                                      "y": round(min(max(y, 0.0), 1.0), 4), "manual": manual}
-        self.save_scheme(scheme)
     # ---- ID table and default fields
 
     def set_id_table(self, section_id: str, ids: list[str]) -> None:
@@ -1944,11 +1967,99 @@ class Project:
             self._set_image(compound, key, item, vector=_trash_companion(entry))
         elif key == "private_files":
             self.add_private_item(compound, item, entry.info.get("item_values", {}).get("note", ""))
+        elif key == ms_reports.TRASH_FIELD:
+            self.add_hrms_report(compound, item)
         else:
             values = {k: v for k, v in entry.info.get("item_values", {}).items() if k != "file"}
             self.attach_compound_file(compound, key, item, values,
                                       original=_trash_companion(entry))
         return f"Restored {item.name} to “{compound.name or 'unnamed compound'}”."
+
+    # ---- HRMS report files (SPEC §13n.3)
+
+    def hrms_report_dir(self, compound: Compound) -> Path:
+        return compound.folder / ms_reports.HRMS_DIR
+
+    def hrms_reports(self, compound: Compound) -> list[dict[str, Any]]:
+        """The HRMS field's report files: [{"file", "kind"}] in the order added."""
+        return ms_reports.report_items(compound)
+
+    def hrms_report_path(self, compound: Compound, name: str) -> Path:
+        return self.hrms_report_dir(compound) / name
+
+    def _hrms_value(self, compound: Compound) -> dict[str, Any]:
+        value = compound.values.get("hrms")
+        if not isinstance(value, dict):
+            value = F.empty_value(F.ALL_FIELDS["hrms"]) or {}
+            compound.values["hrms"] = value
+        return value
+
+    def add_hrms_report(self, compound: Compound, source: Path) -> dict[str, str]:
+        """Copy an HRMS report file — any type — or a whole folder (e.g. an Agilent .d data
+        folder) into the compound's hrms/ folder and list it in the HRMS field. The Found
+        box is then filled from the reports if it is empty (ms_reports.update_found)."""
+        self._check_writable()
+        source = Path(source)
+        if not source.exists():
+            raise ProjectError(f"Not found:\n{source}")
+        dest = _unique_path(self.hrms_report_dir(compound) / safe_filename(source.name))
+        fileio.make_dirs(dest.parent)
+        if source.is_dir():
+            fileio.copy_tree(source, dest)
+        else:
+            fileio.copy_file(source, dest)
+        item = {"file": dest.name, "kind": "folder" if source.is_dir() else "file"}
+        value = self._hrms_value(compound)
+        value.setdefault(ms_reports.REPORTS_KEY, []).append(item)
+        ms_reports.update_found(self, compound, value)
+        self.save_compound(compound)
+        return item
+
+    def remove_hrms_report(self, compound: Compound, name: str) -> None:
+        """Move a report file (or folder) to the project Trash. A found m/z filled from it
+        is taken out again (or filled from the other reports)."""
+        self._check_writable()
+        value = self._hrms_value(compound)
+        items = value.get(ms_reports.REPORTS_KEY) or []
+        item = next((i for i in items if isinstance(i, dict) and i.get("file") == name), None)
+        if item is None:
+            return
+        path = self.hrms_report_path(compound, name)
+        if path.exists():
+            self._move_to_trash(path, kind="compound_file", name=name,
+                                extra={"compound_id": compound.id,
+                                       "field_key": ms_reports.TRASH_FIELD,
+                                       "item": path.name, "item_values": item,
+                                       "compound_name": compound.name})
+        items.remove(item)
+        if not items:
+            value.pop(ms_reports.REPORTS_KEY, None)
+        ms_reports.update_found(self, compound, value)
+        self.save_compound(compound)
+
+    def set_hrms_print(self, compound: Compound, on: bool | None) -> None:
+        """Print this compound's HRMS reports (True), not (False), or as the Spectra
+        section says (None)."""
+        self._check_writable()
+        value = self._hrms_value(compound)
+        if on is None:
+            value.pop(ms_reports.PRINT_KEY, None)
+        else:
+            value[ms_reports.PRINT_KEY] = bool(on)
+        self.save_compound(compound)
+
+    def refresh_hrms_found(self, compounds: list[Compound] | None = None) -> int:
+        """Fill (or update) the Found box from the reports for each compound where it is
+        empty or was filled from a report (after the tolerance changed, for example).
+        Returns how many compounds changed; nothing is written in a read-only project."""
+        if self.read_only:
+            return 0
+        changed = 0
+        for compound in compounds if compounds is not None else self.all_compounds():
+            if ms_reports.report_items(compound) and ms_reports.update_found(self, compound):
+                self.save_compound(compound)
+                changed += 1
+        return changed
 
     # ---- private files & folders (never printed)
 
@@ -2016,11 +2127,12 @@ class Project:
 
     def set_structure(self, compound: Compound, text: str, from_scheme: bool = False,
                       picture: bytes | None = None, vector: bytes | None = None,
-                      vector_ext: str = "") -> list[str]:
+                      vector_ext: str = "", picture_ext: str = ".png") -> list[str]:
         """Store a structure from SMILES / MOL / SDF text (raises chem.ChemError).
 
-        `picture` is ChemDraw's drawing of it (PNG), pasted together with the structure;
-        `vector` is the EMF/PDF it was rendered from (kept for re-rendering).
+        `picture` is ChemDraw's drawing of it (a PNG, or an SVG/PDF as `picture_ext` says),
+        pasted together with the structure; `vector` is the EMF/PDF it was made from (kept
+        for converting or re-rendering).
         A ChemDraw picture kept from an earlier paste no longer matches a structure set
         any other way, so it is moved to the Trash; pictures the user added are kept.
         Returns the NMR nuclei whose reports were added automatically (e.g. ["19F"]).
@@ -2032,8 +2144,12 @@ class Project:
         self._structure_cache.pop(path, None)
         old = compound.values.get("structure") or {}
         if picture is not None:
-            self._set_image(compound, "structure_image", data=picture, ext=".png",
-                            vector=vector, vector_ext=vector_ext)
+            # ChemDraw's MOL block is drawn like the picture: its bonds cross-check the
+            # picture's measured bond length (SPEC §13n.2a). SMILES has no drawing.
+            reference = (drawing_scale.reference_from_mol(mol)
+                         if chem.looks_like_molblock(text) else None)
+            self._set_image(compound, "structure_image", data=picture, ext=picture_ext,
+                            vector=vector, vector_ext=vector_ext, reference=reference)
             compound.values["structure"]["image_source"] = "chemdraw"
         elif old.get("image_override") and old.get("image_source") == "chemdraw":
             self._remove_image(compound, "structure_image")
@@ -2101,17 +2217,65 @@ class Project:
 
     def _set_image(self, compound: Compound, slot: str, source: Path | None = None,
                    data: bytes | None = None, ext: str = ".png",
-                   vector: bytes | Path | None = None, vector_ext: str = "") -> None:
+                   vector: bytes | Path | None = None, vector_ext: str = "",
+                   reference: "drawing_scale.Reference | None" = None) -> None:
         """Store an image from a file (`source`) or from raw bytes (e.g. pasted), with
-        ChemDraw's vector original (`vector`) next to it if there is one."""
+        ChemDraw's vector original (`vector`) next to it if there is one. A structure
+        picture that is a vector drawing (SVG, PDF) has its bond length measured
+        (`reference`: the structure copied with it, as a cross-check; SPEC §13n.2a)."""
         self._check_writable()
-        source, ext = self._check_picture(source, ext)
+        source, ext = self._check_picture(source, ext, PICTURE_FILE_EXTENSIONS)
         self._remove_image(compound, slot)
         value_key, entry, stem = self._IMAGE_SLOTS[slot]
         dest = self._write_picture(compound.folder, stem, source, data, ext, vector, vector_ext)
         value = compound.values.get(value_key) or {}
         value[entry] = dest.name
         compound.values[value_key] = value
+        if slot == "structure_image":
+            self._measure_structure_picture(compound, dest, reference)
+        self.save_compound(compound)
+
+    def _measure_structure_picture(self, compound: Compound, path: Path,
+                                   reference: "drawing_scale.Reference | None" = None,
+                                   keep_own: bool = False) -> None:
+        """Store the typical bond length of the structure picture (pt; null when none
+        was found) next to it in compound.json, so compiling needn't measure it; a
+        raster picture has none (SPEC §13n.2a). A bond length typed for an earlier
+        picture is forgotten (`keep_own`: the same picture drawn again keeps it)."""
+        value = compound.values.setdefault("structure", {})
+        if not keep_own:
+            value.pop(drawing_scale.OVERRIDE_KEY, None)
+        if Path(path).suffix.lower() in drawing_scale.VECTOR_PICTURES:
+            bond = drawing_scale.measure_file(Path(path), reference)
+            value[drawing_scale.MEASURED_KEY] = round(bond, 3) if bond else None
+        else:
+            value.pop(drawing_scale.MEASURED_KEY, None)
+
+    def structure_picture_bond(self, compound: Compound) -> tuple[float | None, float | None]:
+        """(the measured bond length of the structure picture, the one typed by the user)
+        in pt; the typed one is 0 for "print at the picture's own size" and None when the
+        measurement is used (SPEC §13n.2a, §2.7)."""
+        value = compound.values.get("structure") or {}
+        path = self.structure_image_path(compound)
+        measured = drawing_scale.picture_bond_pt(
+            {k: v for k, v in value.items() if k != drawing_scale.OVERRIDE_KEY}, path)
+        own = None
+        if drawing_scale.OVERRIDE_KEY in value:
+            try:
+                own = max(0.0, float(value[drawing_scale.OVERRIDE_KEY]))
+            except (TypeError, ValueError):
+                own = None
+        return measured, own
+
+    def set_structure_picture_bond(self, compound: Compound, own: float | None) -> None:
+        """The user's own bond length for the structure picture (pt), 0 to print it at its
+        own size, or None to use the measured one."""
+        self._check_writable()
+        value = compound.values.setdefault("structure", {})
+        if own is None:
+            value.pop(drawing_scale.OVERRIDE_KEY, None)
+        else:
+            value[drawing_scale.OVERRIDE_KEY] = round(max(0.0, float(own)), 3)
         self.save_compound(compound)
 
     def _remove_image(self, compound: Compound, slot: str) -> None:
@@ -2121,6 +2285,9 @@ class Project:
             return
         value_key, entry, _stem = self._IMAGE_SLOTS[slot]
         compound.values[value_key][entry] = ""
+        if slot == "structure_image":
+            for key in (drawing_scale.MEASURED_KEY, drawing_scale.OVERRIDE_KEY):
+                compound.values[value_key].pop(key, None)
         self.save_compound(compound)
         if path.exists():
             self._move_to_trash(path, kind="compound_file", name=path.name,

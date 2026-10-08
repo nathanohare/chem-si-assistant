@@ -13,7 +13,7 @@ Assistant starts; the old copies are left untouched. **Current status: Phase 8 (
 
 Ready-to-install versions for Windows, macOS and Linux are on the
 [Releases page](https://github.com/nathanohare/chem-si-assistant/releases). Nothing else
-needs installing (Python, Qt, RDKit, Typst and the Ketcher drawing editor are included).
+needs installing (Python, Qt, RDKit and Typst are included).
 
 | System | File | How to install |
 |---|---|---|
@@ -63,11 +63,7 @@ from your other Python work.
     conda create -n si-assistant python=3.12 -y
     conda activate si-assistant
     pip install -r requirements.txt
-    python -m si_assistant.ketcher_setup     # optional: the drawing editor (~35 MB, once)
     python -m si_assistant
-
-(If you skip the Ketcher step, the program offers to download it the first time you click
-**Draw…**.)
 
 ## Building the installers yourself
 
@@ -75,17 +71,16 @@ The installers are normally made by GitHub (below), but the program can be packa
 any of the three systems by hand. Use the same environment as above, then:
 
     pip install "pyinstaller>=6.10,<7"           # packaging tool (GPL with an exception that allows this use)
-    python -m si_assistant.ketcher_setup         # Ketcher must be there: it is built in
     python packaging/build_app.py build --dist <output folder> --work <scratch folder>
     python packaging/build_app.py verify --app "<output folder>/Chem SI Assistant"
     python packaging/build_app.py smoke --exe "<output folder>/Chem SI Assistant/Chem SI Assistant.exe"
 
-This makes one folder holding the whole program (about 500 MB; on macOS a `.app`). On
+This makes one folder holding the whole program (about 250 MB; on macOS a `.app`). On
 Windows, keep the output and scratch folders on a short path such as `C:\Temp\b` (long
 paths are a problem for Windows). `build_app.py self-test --exe … --report r.json
 --project <a project folder>` runs the built program's own self-test: every bundled
-file, the spelling dictionaries, RDKit, Typst, Ketcher really starting, and compiling that
-project's SI.
+file, the spelling dictionaries, RDKit, Typst, Qt (and that Qt WebEngine, no longer used, was
+left out), and compiling that project's SI.
 
 The installers themselves: on Windows, compile `packaging/windows/installer.iss` with
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) (see the comment at its top); on macOS
@@ -122,7 +117,6 @@ invented authors, title and data. To test with another dataset, replace that one
 | `si_assistant/ui/` | The windows and panels (PySide6 / Qt) |
 | `si_assistant/compile/` | Turning the project into the SI PDF with Typst |
 | `si_assistant/styles/` | Journal styles (plain Typst templates: `acs.typ`, `wiley.typ`, `rsc.typ`) |
-| `si_assistant/vendor/ketcher/` | The Ketcher drawing editor (downloaded, not edited) |
 | `si_assistant/data/` | Built-in data for the spelling check: `azman_chemistry_dictionary.txt` (the chemistry dictionary, with its licence beside it), `chem_words.txt` (more chemistry words), `name_reactions.txt` (names of named reactions) and `lab_terms.txt` (hand-made: NMR multiplicities, reagents such as HOBt, supplier and chromatography brand names) |
 | `si_assistant/updates.py` | The update check and feedback links (GitHub); `ui/update_ui.py` and `ui/feedback_ui.py` are their windows |
 | `si_assistant/resources.py`, `selftest.py` | Where the program's own files are (from the source code or in an installed program); the installed program's self-test |
@@ -153,13 +147,13 @@ The program is built on the free components below, which keep their own licences
 | PySide6 (Qt 6) | User interface, PDF preview | LGPL-3.0 |
 | RDKit | Structures, formulas, masses, structure drawings | BSD-3-Clause |
 | Typst (`typst` Python package) | Typesetting the SI PDF | Apache-2.0 |
-| pypdf | Reading page counts of spectra PDFs | BSD-3-Clause |
+| pypdf | Reading page counts of spectra PDFs; the text of HRMS report PDFs and of manuscript PDFs (Manuscript check) | BSD-3-Clause |
+| chem-vision (Nathan O'Hare; code adapted) | The Manuscript check's reading of labels, yields, ee/er, dr, footnotes, tables and ChemDraw files | MIT |
 | NumPy | Scheme label placement, picture trimming, spectra auto-crop, converting pasted Mnova spectra (metafile pictures, the self-check) | BSD-3-Clause |
 | pyspellchecker | Spelling check in the text boxes (English word list included; works offline) | MIT |
 | Open Source Chemistry Dictionary v3.0 (Adam M. Azman; *J. Chem. Educ.* 2012, 89, 412, doi:10.1021/ed2002994) | Chemistry words for the spelling check (bundled as `si_assistant/data/azman_chemistry_dictionary.txt`, converted to UTF-8; attribution in `azman_chemistry_dictionary_LICENSE.txt`) | CC BY 3.0 US |
-| Qt WebEngine (part of PySide6) | Showing Ketcher | LGPL-3.0 |
-| Ketcher 3.18 (EPAM) | Drawing structures | Apache-2.0 (licence in `vendor/ketcher/LICENSE`) |
 | Crossref REST API (web service) | Filling in references from a DOI | free public API; no account needed |
+| PubChem PUG REST (web service, NIH) | "Look up name (PubChem)": only the structure's InChIKey is sent, only when clicked | free public service; no account needed |
 | GitHub (web service) | Checking for and downloading new versions; feedback pages | free; feedback needs a free GitHub account |
 | Python | Runs the program (bundled in the installers) | PSF License |
 | pytest | Tests (development only) | MIT |

@@ -56,9 +56,9 @@ def test_each_kind_of_page_compiles_on_its_own(sample):
     src, _ = preview_source(p, ("section", files.id))
     assert "X-ray data" in src and "Reaction Optimization" not in src
     src, _ = preview_source(p, ("compound", c2.id))
-    assert "#si-compound-title(" in src and "#si-scheme(" not in src
+    assert "#si-compound-title(" in src and "#si-reaction-scheme(" not in src
     src, _ = preview_source(p, ("scheme", scheme.id))
-    assert "#si-scheme(" in src and "#si-compound-title(" in src
+    assert "#si-reaction-scheme(" in src and "#si-compound-title(" in src
     src, _ = preview_source(p, ("section", data.id))
     assert src.count("#si-compound-title(") == 2
     with pytest.raises(ValueError):
@@ -407,8 +407,8 @@ def test_selecting_pages_sets_what_the_pane_shows(sample, window):
     assert pane.target == ("section", parts["notes"].id)
     win.select("scheme", parts["scheme"].id)
     assert pane.target == ("scheme", parts["scheme"].id)
-    win.select("compound", parts["c4"].id)                    # a compound of that scheme
-    assert pane.target == ("compound", parts["c4"].id)
+    win.select("compound", parts["c4"].id)    # a compound of that scheme: with its scheme
+    assert pane.target == ("scheme", parts["scheme"].id)
     win.close_project()
     assert pane.isHidden() and pane.project is None
 
@@ -456,8 +456,8 @@ def test_read_only_projects_preview_without_writing(sample, window, monkeypatch)
 
 
 def test_deleting_the_previewed_scheme_compound(sample, window, monkeypatch):
-    """Deleting the compound on show (its tab on a scheme page) moves the preview to what
-    the tree now shows, never on to the deleted compound."""
+    """A compound's tab on a scheme page previews the whole scheme page (SPEC §13p.3);
+    deleting the compound on show leaves it there, never on the deleted compound."""
     from PySide6.QtWidgets import QMessageBox
     from si_assistant.ui import scheme_panel
     p, parts = sample
@@ -469,7 +469,7 @@ def test_deleting_the_previewed_scheme_compound(sample, window, monkeypatch):
     assert name.cursorPosition() == 0 and name.toolTip() == scheme.name
     win.select("compound", c4.id)
     pane = win.preview_pane
-    assert pane.target == ("compound", c4.id)
+    assert pane.target == ("scheme", scheme.id)            # (the compound with its scheme)
     monkeypatch.setattr(scheme_panel.QMessageBox, "question",
                         staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
     win.panel._close_tab(win.panel.tabs.currentIndex())

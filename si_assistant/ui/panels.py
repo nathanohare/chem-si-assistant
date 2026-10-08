@@ -178,7 +178,11 @@ class FilePreview(QStackedWidget):
             self._pdf_open = True
             self.setCurrentWidget(self.pdf_view)
             return
-        pixmap = QPixmap(str(path))
+        if path.suffix.lower() == ".svg":   # (drawn by Qt's SVG renderer, as on every page)
+            from ..compile.qt_images import read_image
+            pixmap = QPixmap.fromImage(read_image(path, 3000))
+        else:
+            pixmap = QPixmap(str(path))
         if pixmap.isNull():
             self.image_label.setText(f"Cannot preview {path.name}, but it is attached.")
         else:
@@ -366,8 +370,9 @@ class FileSectionPanel(PasteTargetMixin, SectionPanel):
                 if path is not None:
                     self.project.attach_file(self.section, path)
                 else:
-                    self.project.attach_pasted_picture(self.section, picture.png,
-                                                       picture.source, picture.source_ext)
+                    self.project.attach_pasted_picture(self.section, picture.data,
+                                                       picture.source, picture.source_ext,
+                                                       ext=picture.ext)
             self.saved.emit("Pasted (a copy is stored in the project folder)")
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not paste", str(e))

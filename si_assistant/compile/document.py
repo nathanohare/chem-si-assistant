@@ -25,10 +25,13 @@ from pathlib import Path
 
 from .. import resources
 from ..core import chem
+from ..core import drawing_scale
 from ..core import fields as F
 from ..core import front
 from ..core import labels as label_rules
+from ..core import ms_reports
 from ..core import page as page_setup
+from ..core import scheme_editor
 from ..core import spectra as spectra_mod
 from ..core.markup import Paragraph, Run, mention_kind, parse
 from ..core.project import (BUILD_DIR, GENERAL_OWNER, SPECTRA_SECTION, Compound, Project,
@@ -36,6 +39,7 @@ from ..core.project import (BUILD_DIR, GENERAL_OWNER, SPECTRA_SECTION, Compound,
 from ..core.tables import Table
 from ..core.references import to_hayagriva
 from .blocks import CompoundBlock, compound_block, gp_sentence
+from .reaction_scheme import editor_scheme
 from .text import (aligned_object, format_chemistry, format_nmr, leave_alone,
                    paragraphs_to_typst, resolve_links, runs_to_typst, typst_label, typst_string)
 
@@ -44,7 +48,6 @@ REFERENCES_YML = "references.yml"
 
 TEXT_WIDTH_IN = 6.5           # US letter with 1 in margins
 STRUCTURE_MAX = (3.25, 2.6)   # inches (width, height) for structures under compound titles
-SCHEME_MAX = (6.5, 4.0)
 ATTACHMENT_MAX_HEIGHT_IN = 8.0   # an Attachment section's PDF page or picture, at most
 CM_PER_IN = 2.54
 TYPST_IMAGE_TYPES = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf"}
@@ -52,6 +55,10 @@ CORNERS = {"top-left": "top + left", "top-right": "top + right",
            "bottom-left": "bottom + left", "bottom-right": "bottom + right"}
 SPECTRA_HEADING = "Spectra"   # the heading of the spectra of a preview (or of a project
                               # without a Spectra section)
+HRMS_HEADING = "HRMS reports"   # the Spectra section's sub-section of HRMS reports (§13n.3)
+HRMS_PAGE_IN = 7.4              # a report's PDF page or picture: at most this high (inches)
+HRMS_KEEP_LINES = 70            # a listing this short is kept on one page
+PAGE_BREAK = "#pagebreak(weak: true)"
 
 # Links in the PDF (SPEC §13l.7). `si-link` makes a link only when its target is in the
 # document exactly once (a spectrum not printed, or a preview without it, leaves the text
@@ -71,12 +78,15 @@ def link_definition(style: str) -> str:
 
 @dataclass
 class CompileOptions:
-    structures: str = "pictures"       # "pictures": ChemDraw/own pictures where available;
-                                       # "acs": program drawings (ACS 1996) for every compound
+    structures: str = "pictures"       # "pictures": the pasted ChemDraw (or own) picture
+                                       # where a compound has one, the program's drawing
+                                       # otherwise (SPEC §13n.2); "acs": program drawings
+                                       # (ACS 1996) for every compound
     format_text: bool = True
     # Preview one page (PREVIEW_KINDS): ("front", "cover"|"toc"|"general"), ("section", id)
     # (a section with its sub-sections), ("compound", id), ("scheme", id) or ("spectra",
-    # compound id) (a compound's spectra pages). Exclusions are then ignored.
+    # compound id) (a compound's spectra pages), ("hrms", "") (the Spectra section's HRMS
+    # reports). Exclusions are then ignored.
     only: tuple[str, str] | None = None
     # A preview of a compound, scheme or section also shows its compounds' spectra (the
     # toolbar Preview); the live preview pane leaves them out (SPEC §13k.8).
@@ -96,7 +106,7 @@ class CompileOptions:
 
 
 # CompileOptions.only kinds; ("spectra", compound id) = that compound's spectra pages.
-PREVIEW_KINDS = ("front", "section", "compound", "scheme", "spectra")
+PREVIEW_KINDS = ("front", "section", "compound", "scheme", "spectra", "hrms")
 TOC_END_LABEL = "si-toc-end"   # marks the last page of the table of contents (its preview)
 
 
@@ -142,6 +152,21 @@ def svg_size_in(text: str) -> tuple[float, float] | None:
         if w > 0 and h > 0:
             return w / 72, h / 72
     return None
+
+
+def pdf_size_in(path: Path) -> tuple[float, float] | None:
+    """The size of a PDF's first page in inches, as Typst prints it (its CropBox, turned
+    by /Rotate); None if it can't be read."""
+    try:
+        from pypdf import PdfReader
+        page = PdfReader(str(path)).pages[0]
+        box = page.cropbox
+        w, h = abs(float(box.width)), abs(float(box.height))
+        if (page.rotation or 0) % 180:
+            w, h = h, w
+    except Exception:  # noqa: BLE001 — unknown size: the caller falls back
+        return None
+    return (w / 72, h / 72) if w > 0 and h > 0 else None
 
 
 # Structure drawings kept between builds, so the live preview (which builds the whole SI
@@ -293,6 +318,8 @@ class Builder:
             return self.svg_sizes[path]
         if path.suffix.lower() == ".svg":
             return svg_size_in(path.read_text(encoding="utf-8", errors="replace"))
+        if path.suffix.lower() == ".pdf":   # (a pasted picture: its first page)
+            return pdf_size_in(path)
         info = self.image_info(path)
         if info is None:
             return None
@@ -300,40 +327,55 @@ class Builder:
         return w / dpi, h / dpi
 
     def image(self, path: Path, max_in: tuple[float, float], natural: bool = True,
-              pdf_page: int | None = None, sizing: str | None = None, scale: float = 1.0
+              pdf_page: int | None = None, sizing: str | None = None, scale: float = 1.0,
+              natural_factor: float = 1.0, pdf_natural: bool = False
               ) -> tuple[str, float, float] | None:
-        """Typst image(...) sized to its natural size but no bigger than max_in, then
-        multiplied by `scale` (so 2.0 prints it twice that size, 0.5 half), or with
-        explicit Typst `sizing` (e.g. 'width: 100%, height: 100%, fit: "contain"').
-        Returns (code, width_in, height_in)."""
+        """Typst image(...) sized to its natural size times `natural_factor` (a pasted
+        structure drawn at another bond length, SPEC §13n.2a) but no bigger than max_in,
+        then multiplied by `scale` (so 2.0 prints it twice that size, 0.5 half), or with
+        explicit Typst `sizing` (e.g. 'width: 100%, height: 100%, fit: "contain"'). A PDF
+        has a natural size only with `pdf_natural` (a pasted picture; other PDFs fill
+        `max_in`'s width). Returns (code, width_in, height_in)."""
         usable = self.usable_image(path)
         if usable is None:
             return None
         page = f", page: {pdf_page}" if pdf_page else ""
         if sizing is not None:
             return f"image({typst_string(self.rel(usable))}{page}, {sizing})", max_in[0], max_in[1]
-        size = self.natural_size_in(usable) if natural and usable.suffix.lower() != ".pdf" else None
+        size = (self.natural_size_in(usable)
+                if natural and (pdf_natural or usable.suffix.lower() != ".pdf") else None)
         if size is None:
             w, h = max_in[0] * scale, max_in[1] * scale
             width = f"{max_in[0]}" if scale == 1 else f"{w:.3f}"
             return (f"image({typst_string(self.rel(usable))}, width: {width}in{page})", w, h)
-        w, h = size
+        w, h = size[0] * natural_factor, size[1] * natural_factor
         fit = min(1.0, max_in[0] / w, max_in[1] / h) * scale
         w, h = w * fit, h * fit
         return f"image({typst_string(self.rel(usable))}, width: {w:.3f}in{page})", w, h
 
+    def picture_factor(self, compound: Compound, picture: Path) -> float:
+        """How much the compound's pasted picture is enlarged or shrunk so its bonds print
+        at the project's bond length (SPEC §13n.2a); 1.0 for a raster picture, a drawing
+        without measurable bonds, or with the setting off."""
+        return drawing_scale.structure_print_factor(
+            self.project.settings, compound.values.get("structure") or {}, picture)
+
     def structure_image(self, compound: Compound, max_in, scale: float = 1.0) -> str | None:
         """The compound's structure: its picture (pictures mode) or an ACS drawing, at its
-        natural size but no bigger than `max_in`, then times `scale`."""
+        natural size (a pasted vector picture: at the project's bond length) but no bigger
+        than `max_in`, then times `scale`."""
         picture = self.project.structure_image_path(compound)
+        if picture is not None and picture.exists():
+            sized = {"scale": scale, "pdf_natural": True,
+                     "natural_factor": self.picture_factor(compound, picture)}
         if self.options.structures == "pictures" and picture is not None and picture.exists():
-            img = self.image(picture, max_in, scale=scale)
+            img = self.image(picture, max_in, **sized)
             if img:
                 return img[0]
         mol = self.project.read_structure(compound)
         if mol is None:
             if picture is not None and picture.exists():  # a picture but no structure
-                img = self.image(picture, max_in, scale=scale)
+                img = self.image(picture, max_in, **sized)
                 return img[0] if img else None
             return None
         svg = self.assets / f"{compound.id}.svg"
@@ -657,34 +699,15 @@ class Builder:
         return "\n\n".join(x for x in out if x)
 
     def scheme(self, scheme: SchemePage, level: int = 2) -> str:
-        out = []
-        path = self.project.scheme_image_path(scheme)
-        if path is not None and path.exists():
-            img = self.image(path, SCHEME_MAX)
-            if img:
-                code, w, h = img
-                labels = []
-                for child in scheme.children:
-                    pos = scheme.labels.get(child.id)
-                    if pos is None:
-                        self.warnings.append(f"Scheme “{scheme.name}”: no position for the label "
-                                             f"of {self.report.display_id(child.id)}; not printed.")
-                        continue
-                    text = runs_to_typst([Run(self.report.display_id(child.id))])
-                    labels.append(f"({pos['x']}, {pos['y']}, [{text}])")
-                label_list = "(" + ", ".join(labels) + ("," if len(labels) == 1 else "") + ")"
-                self.kinds["scheme"] += 1
-                label = self.labels.label(scheme.id) or "Scheme"
-                caption = [Run(scheme.name)]
-                if self.options.format_text:
-                    caption = format_chemistry(caption)
-                out.append(f"#si-scheme({code}, {w:.3f}in, {h:.3f}in, {label_list}, "
-                           f"[{runs_to_typst([Run(label)])}], {self.caption_code(caption)})")
-        else:
-            self.warnings.append(f"Scheme page “{scheme.name}” has no scheme picture.")
-        for child in scheme.children:   # the scheme shows their structures
-            out.append(self.compound(child, show_structure=False, level=level))
-        return "\n\n".join(out)
+        # Made with the scheme editor (SPEC §13n.4): laid out by the style.
+        out = [editor_scheme(self, scheme)]
+        # The scheme shows the structures drawn in a box; a compound not linked to any
+        # box prints its own, like any compound.
+        drawn = set(scheme_editor.linked_compound_ids(scheme))
+        for child in scheme.children:
+            out.append(self.compound(child, show_structure=child.id not in drawn,
+                                     level=level))
+        return "\n\n".join(x for x in out if x)
 
     def general_procedures(self, section: Section, level: int = 2) -> list[str]:
         """Each GP once, under its own (unnumbered) heading at `level`, at the start of its
@@ -799,8 +822,128 @@ class Builder:
         sample = preview and self.options.only[0] == "section"
         heading = "\n\n".join(x for x in (lead, self.section_heading(level, [Run(section.name)]))
                               if x)
-        return self.spectra_pages(compounds, heading,
-                                  limit=self.options.spectra_limit if sample else 0) or lead
+        pages = self.spectra_pages(compounds, heading,
+                                   limit=self.options.spectra_limit if sample else 0)
+        # SPEC §13n.3: the HRMS reports, in a sub-section after every compound's spectra.
+        # Without spectra, the section's heading goes on the reports' first page.
+        hrms = "" if front.HRMS_KEY in skip else self.hrms_reports_block(
+            compounds, level + 1, new_page=bool(pages))
+        if not hrms:
+            return pages or lead
+        if not pages:
+            return "\n\n".join(["#pagebreak(weak: true)", heading, hrms])
+        return pages + "\n\n" + hrms
+
+    # ------------------------------------------------------------------ HRMS reports (§13n.3)
+
+    def hrms_reports_block(self, compounds: list[Compound], level: int,
+                           heading: bool = True, new_page: bool = True) -> str:
+        """The sub-section "HRMS reports" of the Spectra section: the report files of the
+        compounds whose reports are printed (the section's "Print HRMS reports", or the
+        compound's own choice), compound by compound in tree order. "" if none."""
+        parts = []
+        for compound in compounds:
+            if not ms_reports.prints_reports(self.project, compound):
+                continue
+            for item in ms_reports.report_items(compound):
+                code = self.hrms_report(compound, str(item.get("file", "")))
+                if code:
+                    parts.append(code)
+        if not parts:
+            return ""
+        # (a first PDF page goes under the heading, not on the next page)
+        parts[0] = parts[0].removeprefix(PAGE_BREAK + "\n\n")
+        top = [PAGE_BREAK] if new_page else []
+        if heading:
+            top.append(self.section_heading(level, [Run(HRMS_HEADING)]))
+        return "\n\n".join(top + parts)
+
+    def hrms_report_title(self, compound: Compound, name: str, more: str = "") -> str:
+        """The line above a printed report: "3a — HRMS report: 3a_HRMS.pdf"."""
+        runs = [Run(self.report.display_id(compound.id), bold=True),
+                Run(f" — HRMS report: {name}{more}")]
+        return f"#block(above: 1.2em, below: 0.6em, sticky: true)[{runs_to_typst(runs)}]"
+
+    def hrms_report(self, compound: Compound, name: str) -> str:
+        """One report file: a PDF page by page, a picture at its own size (no larger than
+        the page), a text or table file as a monospaced listing, a data file (mzML…) as a
+        table of its largest peaks near the expected m/z. Raw data is left out (with a
+        note in the compile warnings)."""
+        path = ms_reports.report_path(compound, name)
+        shown = self.report.display_id(compound.id)
+        if not path.exists():
+            self.warnings.append(f"{shown}: the HRMS report {name} is missing; left out.")
+            return ""
+        kind = ms_reports.print_kind(path)
+        if kind == "none":
+            self.warnings.append(f"{shown}: the HRMS report {name} can't be printed (raw data "
+                                 "or a kind of file that can't be shown); left out.")
+            return ""
+        if kind == "pdf":
+            out = []
+            pages = self.pdf_pages(path)
+            for i, page in enumerate(pages):
+                img = self.image(path, (TEXT_WIDTH_IN, HRMS_PAGE_IN), pdf_page=page,
+                                 sizing=f'width: 100%, height: {HRMS_PAGE_IN:g}in, '
+                                        'fit: "contain"')
+                if img is None:
+                    continue
+                more = f" (page {i + 1} of {len(pages)})" if len(pages) > 1 else ""
+                out += [PAGE_BREAK, self.hrms_report_title(compound, name, more),
+                        f"#align(center, {img[0]})"]
+            return "\n\n".join(out)
+        if kind == "picture":
+            img = self.image(path, (TEXT_WIDTH_IN, HRMS_PAGE_IN))
+            if img is None:
+                return ""
+            return "\n\n".join([self.hrms_report_title(compound, name),
+                                 f"#align(center, {img[0]})"])
+        if kind == "peaks":
+            return self.hrms_peaks_table(compound, name, path)
+        lines, left = ms_reports.listing_lines(path)   # (never raises)
+        if ms_reports.listing_failed(lines):
+            self.warnings.append(f"{shown}: the HRMS report {name} could not be read (it may "
+                                 "be damaged); only a note is printed for it.")
+        listing = typst_string("\n".join(lines))
+        code = [self.hrms_report_title(compound, name),
+                "#block(width: 100%, inset: 6pt, stroke: 0.5pt + luma(170), breakable: "
+                f"{'false' if len(lines) <= HRMS_KEEP_LINES else 'true'})[#set text(size: "
+                f"7pt)\n#raw(block: true, {listing})]"]
+        if left:
+            note = (f"… {left} more line{'s' if left != 1 else ''} not printed (the whole file "
+                    "is kept in the project folder).")
+            code.append(f'#text(size: 8pt, style: "italic")[{runs_to_typst([Run(note)])}]')
+        return "\n\n".join(code)
+
+    def hrms_peaks_table(self, compound: Compound, name: str, path: Path) -> str:
+        """A data file (mzML, mzXML, mzData, netCDF): its largest peaks near the expected
+        m/z (the monoisotopic m/z of the chosen ion), with the one used as found marked."""
+        data = ms_reports.read_report(path)
+        peaks = ms_reports.expected_peaks(self.project, compound)
+        centre = None
+        if peaks:
+            centre = next((p.mz for p in peaks if p.monoisotopic), peaks[0].mz)
+        rows = ms_reports.peaks_near(data, centre)
+        title = self.hrms_report_title(compound, name)
+        if not rows:
+            text = (data.message if not data.readable else
+                    "No peaks were found near the expected m/z in this file.")
+            return "\n\n".join([title, f"#text(size: 9pt)[{runs_to_typst([Run(text)])}]"])
+        value = compound.values.get("hrms") or {}
+        found = str(value.get("found", "") or "").strip()
+        cells = []
+        for mz, rel in rows:
+            mark = "found m/z" if ms_reports.format_mz(mz) == found else ""
+            cells += [f"[{mz:.4f}]", f"[{rel:.1f}]", f"[{mark}]"]
+        near = (f" The largest peaks near m/z {centre:.4f}:" if centre is not None
+                else " The largest peaks:")
+        what = runs_to_typst([Run(ms_reports.summary(data) + near)])
+        table = ("#table(columns: 3, align: (right, right, left), stroke: none, "
+                 "inset: (x: 8pt, y: 2pt), table.hline(), "
+                 "table.header([_m/z_], [Intensity (%)], []), table.hline(), "
+                 + ", ".join(cells) + ", table.hline())")
+        return "\n\n".join([title, f"#text(size: 9pt)[{what}]",
+                             f"#text(size: 9pt)[{table}]"])
 
     def crop_box(self, path: Path, page: int | None):
         # The table of contents preview only needs the page count, which cropping doesn't
@@ -867,6 +1010,8 @@ class Builder:
             args.append(f"id-size: {eff['id_size']:g}pt")
         if not eff["id_bold"]:
             args.append("id-bold: false")
+        if caption != "none" and eff["caption_size"] != spectra_mod.CAPTION_PT:
+            args.append(f"caption-size: {eff['caption_size']:g}pt")
         return args
 
     def spectra_pages(self, compounds: list[Compound], heading: str = "",
@@ -988,8 +1133,14 @@ class Builder:
             return [self.front_preview(item_id)]
         if kind == "spectra":
             # One compound's spectra pages (its page under the Spectra section), laid out
-            # as they will be printed; always shown, whatever preview_spectra says.
-            return [self.spectra_pages([p.compound(item_id)])]
+            # as they will be printed; always shown, whatever preview_spectra says. Its
+            # HRMS reports follow when they are printed (SPEC §13n.3).
+            c = p.compound(item_id)
+            return [self.spectra_pages([c]), self.hrms_reports_block([c], 2)]
+        if kind == "hrms":
+            # The Spectra section's "HRMS reports" (its page in the tree).
+            return [self.hrms_reports_block(self.included_compounds(p.top_sections,
+                                                                    frozenset()), 1)]
         if kind == "section":
             # A section with its sub-sections, shown as if it were at the top level. When
             # the Spectra section is among them it prints the spectra itself.

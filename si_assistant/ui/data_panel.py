@@ -29,6 +29,7 @@ class DataSectionPanel(SectionPanel):
     ids_changed = Signal()             # the tree should refresh compound labels
     open_compound = Signal(str, str)   # compound id, field key
     new_compound_requested = Signal()
+    pages_requested = Signal(str)      # "Make pages for these IDs…": the section's id
 
     def __init__(self, project: Project, section: Section, parent: QWidget | None = None):
         super().__init__(project, section, parent)
@@ -74,6 +75,12 @@ class DataSectionPanel(SectionPanel):
             b.clicked.connect(slot)
             b.setEnabled(not ro)
             buttons.addWidget(b)
+        self.pages_btn = QPushButton("Make pages for unused IDs…")
+        self.pages_btn.setToolTip("A blank compound page, at the end of this section, for each "
+                                  "ID in the table that no compound has yet")
+        self.pages_btn.clicked.connect(lambda: self.pages_requested.emit(self.section.id))
+        self.pages_btn.setEnabled(not ro)
+        buttons.addWidget(self.pages_btn)
         buttons.addStretch()
 
         help_ = QLabel("A compound's ID is the entry in the row matching its position in this "
@@ -87,6 +94,8 @@ class DataSectionPanel(SectionPanel):
         return w
 
     def _fill_id_table(self, report) -> None:
+        if not self.project.read_only:
+            self.pages_btn.setEnabled(bool(self.project.ids_without_pages(self.section)))
         table = self.section.id_table
         compounds = self.section.compounds
         rows = max(len(table), len(compounds))

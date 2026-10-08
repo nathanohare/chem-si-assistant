@@ -120,17 +120,153 @@
   fig(split or measure(fig(false), width: page.width).height > page.height)
 })
 
-// A scheme picture with compound IDs printed on it. `labels` = ((x, y, [3a]), …) with x, y
-// as fractions of the picture; each label is centred on that point.
-#let si-scheme(img, w, h, labels, label, caption) = figure(
-  box(width: w, height: h, {
-    img
-    for l in labels {
-      place(top + left, dx: l.at(0) * w - 2cm, dy: l.at(1) * h - 0.6em,
-        box(width: 4cm, align(center, text(size: 10pt, weight: "bold", l.at(2)))))
+// A scheme made with the scheme editor (SPEC §13n.4). `items`, left to right:
+//   (kind: "mol", body: image(…), label: [3a] or none, dx: 0pt, dy: 0pt, yield: [92%] or none)
+//   (kind: "plus")
+//   (kind: "arrow", top: ([line], …), bottom: ([line], …), top-align: center, bottom-align: center)
+// Each arrow is as long as the wider of its two conditions texts plus `before` and
+// `after`, but at least `min-arrow`. Structures sit centred on the arrow's line; an ID is
+// centred under its structure (moved by dx, dy where it was dragged), with the yield
+// under it. Too wide for the page: `fit: "wrap"` starts a new row at an arrow (the row
+// begins with that arrow, so the continuation is clear), "shrink" makes the whole scheme
+// smaller to fit one line. A row still too wide is shrunk to fit. `factor` (the scheme's
+// Scale) enlarges or shrinks everything.
+#let si-reaction-scheme(items, factor: 100%, fit: "wrap", gap: 2mm, before: 2mm,
+                        after: 3mm, min-arrow: 12mm, size: 9pt, label-size: 10pt,
+                        row-gap: 5mm, label: none, caption: none, align-ids: true,
+                        key: "") = {
+  let stroke-w = 0.6pt
+  let head-len = 5pt
+  let head-half = 1.9pt
+  let lines-block(lines, a) = {
+    if lines.len() == 0 { return none }
+    let w = calc.max(..lines.map(l => measure(text(size: size, l)).width))
+    // (measured from the ascenders to the descenders, so nothing touches the arrow)
+    text(size: size, top-edge: "ascender", bottom-edge: "descender", stack(dir: ttb,
+      spacing: 0.1em,
+      ..lines.map(l => box(width: w, align(a, l)))))
+  }
+  let piece(it) = {
+    if it.kind == "plus" {
+      let p = text(size: size * 1.4, [+])
+      let m = measure(p)
+      return (w: m.width, up: m.height / 2, down: m.height / 2, new-row: false,
+              mol: false,
+              draw: (x, axis, low) => place(top + left, dx: x, dy: axis - m.height / 2, p))
     }
-  }),
-  caption: si-caption(label, caption), kind: "scheme", supplement: none, numbering: none)
+    if it.kind == "arrow" {
+      let ta = it.at("top-align", default: center)
+      let ba = it.at("bottom-align", default: center)
+      let t = lines-block(it.top, ta)
+      let b = lines-block(it.bottom, ba)
+      let tm = if t == none { (width: 0pt, height: 0pt) } else { measure(t) }
+      let bm = if b == none { (width: 0pt, height: 0pt) } else { measure(b) }
+      let room = calc.max(tm.width, bm.width)
+      let len = calc.max(room + before + after, min-arrow)
+      // the conditions sit over the part of the arrow between `before` and `after`
+      let x0 = before + (len - before - after - room) / 2
+      let gap-v = 0.3 * size
+      let up = calc.max(head-half, if t == none { 0pt } else { tm.height + gap-v })
+      let down = calc.max(head-half, if b == none { 0pt } else { bm.height + gap-v })
+      return (w: len, up: up, down: down, new-row: true, mol: false,
+              draw: (x, axis, low) => {
+        place(top + left, dx: x, dy: axis - stroke-w / 2,
+              line(length: len - head-len * 0.6, stroke: stroke-w))
+        place(top + left, dx: x + len - head-len, dy: axis - head-half,
+              polygon(fill: black, stroke: none, (0pt, 0pt), (head-len, head-half),
+                      (0pt, 2 * head-half), (head-len * 0.22, head-half)))
+        if t != none {
+          place(top + left, dx: x + x0, dy: axis - gap-v - tm.height,
+                box(width: room, align(ta, t)))
+        }
+        if b != none {
+          place(top + left, dx: x + x0, dy: axis + gap-v, box(width: room, align(ba, b)))
+        }
+      })
+    }
+    // a structure, with its ID and yield under it
+    let m = measure(it.body)
+    let under = ()
+    if it.label != none { under.push(text(size: label-size, weight: "bold", it.label)) }
+    if it.yield != none { under.push(text(size: size, it.yield)) }
+    let u = if under.len() > 0 {
+      stack(dir: ttb, spacing: 0.3em, ..under.map(x => align(center, x))) } else { none }
+    let um = if u == none { (width: 0pt, height: 0pt) } else { measure(u) }
+    let w = calc.max(m.width, um.width)
+    let label-gap = 2pt
+    let under-h = if u == none { 0pt } else { label-gap + um.height + calc.max(0pt, it.dy) }
+    // `low`: how far under the arrow the IDs start; with align-ids the lowest structure
+    // bottom of the row (all IDs of a row on one line), else this structure's own bottom.
+    return (w: w, up: m.height / 2, down: m.height / 2 + under-h, new-row: false,
+            mol: true, bottom: m.height / 2, under: under-h,
+            draw: (x, axis, low) => {
+      place(top + left, dx: x + (w - m.width) / 2, dy: axis - m.height / 2, it.body)
+      if u != none {
+        let start = if low == none { m.height / 2 } else { low }
+        place(top + left, dx: x + (w - um.width) / 2 + it.dx,
+              dy: axis + start + label-gap + it.dy, box(width: um.width, u))
+      }
+    })
+  }
+  let row-block(ps) = {
+    let mols = ps.filter(p => p.mol)
+    let low = if align-ids and mols.len() > 0 { calc.max(..mols.map(p => p.bottom)) } else {
+      none }
+    let up = calc.max(..ps.map(p => p.up))
+    let down = calc.max(..ps.map(p => if p.mol and low != none { low + p.under } else {
+      p.down }))
+    let total = ps.map(p => p.w).sum() + gap * (ps.len() - 1)
+    (w: total, body: box(width: total, height: up + down, {
+      let x = 0pt
+      for p in ps {
+        (p.draw)(x, up, low)
+        x += p.w + gap
+      }
+    }))
+  }
+  let body = layout(room => {
+    let ps = items.map(piece)
+    let k = factor / 100%
+    let avail = room.width / k
+    let rows = ()
+    if fit == "wrap" {
+      // A step (its arrow and products) is kept together: rows start at an arrow.
+      let chunks = ()
+      for p in ps {
+        if p.new-row or chunks.len() == 0 { chunks.push((p,)) } else {
+          chunks.last().push(p) }
+      }
+      let row = ()
+      let w = 0pt
+      for c in chunks {
+        let cw = c.map(p => p.w).sum() + gap * (c.len() - 1)
+        if row.len() > 0 and w + gap + cw > avail {
+          rows.push(row)
+          row = ()
+          w = 0pt
+        }
+        if row.len() > 0 { w += gap }
+        row += c
+        w += cw
+      }
+      if row.len() > 0 { rows.push(row) }
+    } else {
+      rows = (ps,)
+    }
+    let blocks = rows.map(row-block)
+    let widest = calc.max(..blocks.map(b => b.w))
+    let f = if widest > avail { k * avail / widest } else { k }
+    // (the conditions' printed size, for the compile warning when it gets too small)
+    [#metadata((key: key, size: size * f / 1pt)) <si-scheme-text>]
+    align(center, scale(f * 100%, reflow: true,
+      stack(dir: ttb, spacing: row-gap, ..blocks.map(b => align(center, b.body)))))
+  })
+  // No label (the default for scheme pages, SPEC §13p.1): the scheme alone, not
+  // numbered and not in the List of Schemes.
+  if label == none { block(width: 100%, above: 1.2em, below: 1.2em, body) } else {
+    figure(body, caption: si-caption(label, caption), kind: "scheme", supplement: none,
+      numbering: none) }
+}
 
 // The References section: only cited entries, numbered in order of first citation.
 #let si-citation-style = "angewandte-chemie"
@@ -161,7 +297,8 @@
 //   id-size: auto = the text size; frame: a frame around the spectrum (or none).
 #let si-spectrum(header, img, aspect, crop: none, structure: none, id: none, caption: none,
                  pos: none, corner: top + left, box-stroke: none, box-fill: white,
-                 id-size: auto, id-bold: true, frame: none) = layout(size => {
+                 id-size: auto, id-bold: true, frame: none,
+                 caption-size: 9pt) = layout(size => {
   let head = if header == none { none } else {
     align(center, text(size: 11pt, weight: "bold", header)) }
   let gap = 0.3em.to-absolute()
@@ -184,7 +321,7 @@
       }
       if caption != none {
         if structure != none or id != none { linebreak() }
-        text(size: 9pt, caption)
+        text(size: caption-size, caption)
       }
     }))
   }

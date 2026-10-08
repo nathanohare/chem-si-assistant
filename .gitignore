@@ -10,10 +10,6 @@
 # project in tests/sample_project.py instead
 /tests/local/
 
-# --- Downloaded at build/run time ---
-# The Ketcher drawing editor (python -m si_assistant.ketcher_setup; the installers fetch it)
-/si_assistant/vendor/ketcher/
-
 # --- Build output and caches ---
 build/
 dist/

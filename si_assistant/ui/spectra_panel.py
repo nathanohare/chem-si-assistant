@@ -268,6 +268,14 @@ class SpectraSectionPanel(SectionPanel):
                                 "frequency from the compound's peak report (NMR spectra), or the "
                                 "caption typed for the file on the compound's page")
         self.caption.setChecked(v["caption"])
+        self.caption_size = QDoubleSpinBox()
+        self.caption_size.setRange(*S.CAPTION_SIZE_RANGE)
+        self.caption_size.setDecimals(1)
+        self.caption_size.setSingleStep(0.5)
+        self.caption_size.setSuffix(" pt")
+        self.caption_size.setToolTip("The caption's text size (9 pt unless changed; each "
+                                     "spectrum can have its own on its compound's spectra page)")
+        self.caption_size.setValue(v["caption_size"])
 
         label_box = QGroupBox("Structure and compound ID on each spectrum")
         lform = QFormLayout(label_box)
@@ -277,7 +285,7 @@ class SpectraSectionPanel(SectionPanel):
         lform.addRow("ID text:", self._row(self.same_size, self.id_size, self.id_bold))
         lform.addRow("Frame:", self._row(self.struct_frame, self.struct_colour, self.struct_width))
         lform.addRow("Background:", self._row(self.background))
-        lform.addRow(self.caption)
+        lform.addRow(self._row(self.caption, QLabel("Size:"), self.caption_size))
         lform.addRow(_hint("NMR spectra get a caption such as “¹H NMR (CDCl₃, 500 MHz)” from "
                            "the peak report. To change it, or to give an HPLC trace a caption, "
                            "type it on the compound's spectra page (or in “Caption under the "
@@ -314,6 +322,23 @@ class SpectraSectionPanel(SectionPanel):
                            "spectrum, or when the Spectra section is not printed. Links work in "
                            "PDF readers; on paper they look as chosen above."))
 
+        # ---- HRMS report files (SPEC §13n.3)
+        self.hrms_reports = QCheckBox("Print HRMS reports")
+        self.hrms_reports.setChecked(v["hrms_reports"])
+        self.hrms_reports.setToolTip("Print the report files kept in each compound's HRMS "
+                                     "field, in a sub-section “HRMS reports” after all the "
+                                     "spectra")
+        hrms_box = QGroupBox("HRMS reports")
+        hform = QFormLayout(hrms_box)
+        hform.addRow(self.hrms_reports)
+        hform.addRow(_hint("Off by default. When on, the report files in each compound's HRMS "
+                           "field are printed in a sub-section “HRMS reports” at the end of "
+                           "this section, compound by compound: PDFs page by page, pictures "
+                           "as they are, text and table files as a listing, data files "
+                           "(mzML…) as a table of their largest peaks. Raw data is never "
+                           "printed. Each compound can say otherwise in its HRMS field or "
+                           "on its spectra page."))
+
         # ---- the sketch, and resetting the spectra
         self.sample = SpectraSample()
         self.apply_btn = QPushButton("Apply defaults to all spectra…")
@@ -323,7 +348,7 @@ class SpectraSectionPanel(SectionPanel):
         self.apply_btn.clicked.connect(self.apply_to_all)
         self.overridden = _hint("")
 
-        for form in (pform, lform, kform):
+        for form in (pform, lform, kform, hform):
             form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
             form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         # The sketch sits beside the page settings (one column, so narrow windows work).
@@ -339,6 +364,7 @@ class SpectraSectionPanel(SectionPanel):
         column.addLayout(top)
         column.addWidget(label_box)
         column.addWidget(links_box)
+        column.addWidget(hrms_box)
         apply_row = QHBoxLayout()
         apply_row.addWidget(self.apply_btn)
         apply_row.addWidget(self.overridden, 1)
@@ -363,9 +389,10 @@ class SpectraSectionPanel(SectionPanel):
             box.currentIndexChanged.connect(self._changed)
         for check in (self.header_line, self.spectrum_frame, self.auto_crop, self.same_size,
                       self.id_bold, self.struct_frame, self.caption, self.struct_box,
-                      self.nmr_links, self.link_back):
+                      self.nmr_links, self.link_back, self.hrms_reports):
             check.toggled.connect(self._changed)
-        for spin in (self.scale, self.id_size, self.spectrum_width, self.struct_width):
+        for spin in (self.scale, self.id_size, self.spectrum_width, self.struct_width,
+                     self.caption_size):
             spin.valueChanged.connect(self._changed)
         for button in (self.spectrum_colour, self.struct_colour, self.background):
             button.changed.connect(self._changed)
@@ -374,7 +401,8 @@ class SpectraSectionPanel(SectionPanel):
                   self.spectrum_colour, self.spectrum_width, self.auto_crop, self.corner,
                   self.scale, self.same_size, self.id_size, self.id_bold, self.struct_frame,
                   self.struct_colour, self.struct_width, self.background, self.caption,
-                  self.apply_btn, self.nmr_links, self.link_style, self.link_back):
+                  self.caption_size, self.apply_btn, self.nmr_links, self.link_style, self.link_back,
+                  self.hrms_reports):
             w.setEnabled(not ro)
         self._loading = False
         self._update_enabled()
@@ -423,9 +451,11 @@ class SpectraSectionPanel(SectionPanel):
             "spectrum_frame_width": round(self.spectrum_width.value(), 2),
             "auto_crop": self.auto_crop.isChecked(),
             "caption": self.caption.isChecked(),
+            "caption_size": round(self.caption_size.value(), 1),
             "nmr_links": self.nmr_links.isChecked(),
             "link_style": self.link_style.currentData(),
             "link_back": self.link_back.isChecked(),
+            "hrms_reports": self.hrms_reports.isChecked(),
         }
 
     def _update_enabled(self) -> None:
@@ -438,6 +468,7 @@ class SpectraSectionPanel(SectionPanel):
                   self.background, self.caption):
             w.setEnabled(not ro and shown)
         self.id_size.setEnabled(not ro and shown and not self.same_size.isChecked())
+        self.caption_size.setEnabled(not ro and shown and self.caption.isChecked())
         for w in (self.spectrum_colour, self.spectrum_width):
             w.setEnabled(not ro and self.spectrum_frame.isChecked())
         for w in (self.struct_colour, self.struct_width):

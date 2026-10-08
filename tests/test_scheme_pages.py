@@ -3,7 +3,6 @@
 import pytest
 
 from si_assistant.core.project import Project, ProjectError
-from tests.test_structures import scheme_molblock
 
 
 @pytest.fixture
@@ -93,31 +92,3 @@ def test_move_scheme_between_sections(project, section):
     r = Project.open(project.folder)
     assert [x.name for x in r.section(other.id).compounds] == ["B"]
     assert (r.compound(b.id).folder / "compound.json").is_file()
-
-
-def test_scheme_picture_structures_and_matching(project, section):
-    scheme = project.add_scheme(section.id)
-    project.set_scheme_picture(scheme, data=b"\x89PNG scheme")
-    assert project.scheme_image_path(scheme).read_bytes() == b"\x89PNG scheme"
-    n = project.set_scheme_structures(scheme, scheme_molblock("OC(=O)c1ccccc1", "CCOC(=O)c1ccccc1"))
-    assert n == 2
-    ester = project.add_compound(section.id, name="ester", scheme_id=scheme.id)
-    acid = project.add_compound(section.id, name="acid", scheme_id=scheme.id)
-    other = project.add_compound(section.id, name="other", scheme_id=scheme.id)
-    project.set_structure(ester, "O=C(OCC)c1ccccc1")
-    project.set_structure(acid, "OC(=O)c1ccccc1")
-    project.set_structure(other, "CCCC")
-    assert project.match_scheme_structures(scheme) == {acid.id: 0, ester.id: 1}
-    project.set_label_position(scheme, acid.id, 0.25, 1.4)
-    assert project.scheme(scheme.id).labels[acid.id] == {"x": 0.25, "y": 1.0, "manual": True}
-    project.remove_scheme_picture(scheme)
-    project.restore_from_trash(project.list_trash()[0].id)
-    assert project.scheme_image_path(scheme).exists()
-
-
-def test_moving_child_out_forgets_its_label(project, section):
-    scheme = project.add_scheme(section.id)
-    b = project.add_compound(section.id, scheme_id=scheme.id)
-    project.set_label_position(scheme, b.id, 0.5, 0.9)
-    project.move_compound(b.id, section.id, 0)
-    assert b.id not in project.scheme(scheme.id).labels

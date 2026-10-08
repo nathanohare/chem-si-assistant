@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QCoreApplication, Qt, QTimer
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from . import APP_NAME, resources, selftest
@@ -29,18 +29,9 @@ def restore_safely(window, info) -> bool:
 
 
 def main() -> int:
-    # A packaged program (the installers) may need settings before Qt starts (resources.py).
-    resources.prepare_environment()
     # View ▸ Interface size (SPEC §13l.2): Qt scales the interface only if told before the
     # application object exists (QT_SCALE_FACTOR; one the user set themselves wins).
     restart.apply_saved_size()
-    # The Ketcher drawing editor is a web page shown with Qt WebEngine, which must be
-    # loaded before the application object is created.
-    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
-    try:
-        import PySide6.QtWebEngineWidgets  # noqa: F401
-    except ImportError:
-        pass  # drawing is then unavailable; everything else works
     use_own_taskbar_icon()  # Windows: show our icon on the taskbar, not Python's
     allow_large_images()  # pictures pasted at 1200 dpi can be bigger than Qt's default limit
     app = QApplication(sys.argv)

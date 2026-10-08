@@ -123,12 +123,14 @@ def build_sample(parent: Path) -> tuple[Project, dict]:
     c4.values["hrms"] = {"ionization": "ESI", "adduct": "[M+Na]+", "found": FACTS["c4_hrms"][1],
                          "species": "", "formula": ""}
     p.save_compound(c4)
-    # The scheme picture: the starting ketone -> alcohol 4, drawn side by side.
-    from tests.test_structures import scheme_molblock
-    block = scheme_molblock("CC(=O)c1ccc(OC)cc1", "CC(O)c1ccc(OC)cc1")
-    p.set_scheme_picture(scheme, data=chem.structure_png(chem.parse_structure(block), 1200, 300))
-    p.set_scheme_structures(scheme, block)
-    p.set_label_position(scheme, c4.id, 0.8, 0.95, manual=False)
+    # The scheme, drawn with the scheme editor: the starting ketone -> alcohol 4, printed
+    # with its label and caption (mentioned as Scheme S1; off by default, SPEC §13p.1).
+    from si_assistant.core import scheme_editor as se
+    se.set_box_structure(p, scheme, se.starting(scheme)[0]["id"], "CC(=O)c1ccc(OC)cc1")
+    se.link_compound(p, scheme, se.steps(scheme)[0]["products"][0]["id"], c4.id)
+    se.set_conditions(p, scheme, se.steps(scheme)[0]["id"], "top", "NaBH4")
+    se.set_conditions(p, scheme, se.steps(scheme)[0]["id"], "bottom", "MeOH, 0 °C")
+    se.set_scheme_layout(p, scheme, {**se.scheme_layout(p.settings, scheme), "show_label": True})
 
     # A custom section with a table (merged cells, footnotes, a compound mention) and a
     # figure (SPEC §13k.5); General Information mentions both.

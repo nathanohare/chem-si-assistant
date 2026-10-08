@@ -14,6 +14,7 @@ from ..compile.document import CompileOptions
 from ..compile.qt_images import content_box, convert_to_png, image_info
 from ..compile.run import CompileError, CompileResult, compile_pdf
 from ..core import front
+from ..core import ms_reports
 from ..core.project import SPECTRA_SECTION, Project
 
 
@@ -50,6 +51,12 @@ class ExportTree(QTreeWidget):
                     text, out = f"{s.name}   ({s.type_label} section)", excluded
                 item = self._add(parent, s.id, text, out)
                 add_sections(item, s.children)
+                if s.type == SPECTRA_SECTION and any(
+                        ms_reports.prints_reports(project, c) for c in project.all_compounds()):
+                    # SPEC §13n.3: its sub-section of HRMS report files (when any print).
+                    self._add(item, front.HRMS_KEY, "HRMS reports   (the compounds' HRMS "
+                                                    "report files, after the spectra)",
+                              excluded)
         add_sections(None, project.top_sections)
         if project.spectra_section is None:   # (a project opened read-only, made before it)
             self._add(None, front.SPECTRA_KEY, "Spectra (every compound's spectra, at the end)",
@@ -127,13 +134,17 @@ class CompileDialog(QDialog):
         self.project = project
         options = CompileOptions.from_settings(project.settings)
 
-        self.pictures = QRadioButton("Use pasted ChemDraw (or your own) pictures where available")
-        self.acs = QRadioButton("Use the program's ACS-style drawings for every compound")
+        from .dialogs import COMPILE_ACS, COMPILE_PICTURES
+        self.pictures = QRadioButton(COMPILE_PICTURES)
+        self.acs = QRadioButton(COMPILE_ACS)
         group = QButtonGroup(self)
         group.addButton(self.pictures)
         group.addButton(self.acs)
         (self.acs if options.structures == "acs" else self.pictures).setChecked(True)
-        note = QLabel("Compounds without a picture always get an ACS-style drawing.")
+        note = QLabel("A compound with only a structure (SMILES, MOL) always gets the "
+                      "program's ACS-style drawing. Pasted pictures print at the bond length "
+                      "of Project settings ▸ Structures.")
+        note.setWordWrap(True)
         note.setStyleSheet("color: palette(placeholder-text);")
 
         spectra_note = QLabel("How the spectra are laid out (how many per page, orientation, "

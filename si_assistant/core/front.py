@@ -23,6 +23,8 @@ FRONT_ROOT = "front"   # the "Front matter" item itself (unticking it leaves out
 FRONT_PAGES = {"cover": "Cover page", "toc": "Table of contents",
                "general": "General Information"}
 SPECTRA_KEY = "spectra"   # the spectra section/appendix in the export choice
+# The "HRMS reports" sub-section of the Spectra section (SPEC §13n.3) in the export choice.
+HRMS_KEY = "hrms_reports"
 
 STYLE_COVER_HEADINGS = {"ACS": "Supporting Information", "Wiley": "Supporting Information",
                         "RSC": "Electronic Supplementary Information"}

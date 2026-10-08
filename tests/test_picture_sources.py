@@ -51,23 +51,6 @@ def test_replacing_a_pasted_picture_trashes_its_original(project):
     assert not any(c.folder.glob("structure_image*"))
 
 
-def test_scheme_picture_keeps_its_original(project):
-    s = project.add_section("data", "Compounds")
-    scheme = project.add_scheme(s.id)
-    project.set_scheme_picture(scheme, data=PNG, vector=b"%PDF-1.4 fake", vector_ext=".pdf")
-    picture = project.scheme_image_path(scheme)
-    assert picture_source_path(picture) == scheme.folder / "scheme.pdf"
-    assert [p.name for p, src in project.pasted_pictures() if src is not None] == ["scheme.png"]
-
-    project.remove_scheme_picture(scheme)
-    assert not (scheme.folder / "scheme.png").exists()
-    assert not (scheme.folder / "scheme.pdf").exists()
-    entry = project.list_trash()[0]
-    project.restore_from_trash(entry.id)
-    picture = project.scheme_image_path(scheme)
-    assert picture_source_path(picture).read_bytes() == b"%PDF-1.4 fake"
-
-
 def test_replace_picture_png_stays_in_the_project(project, tmp_path):
     s = project.add_section("data", "Compounds")
     c = project.add_compound(s.id)

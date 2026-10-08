@@ -219,8 +219,8 @@ def about_text() -> str:
             f"<a href='{updates.REPO_URL}'>{updates.REPO_URL.removeprefix('https://')}</a>"
             "<br><br>The spelling check uses the Open Source Chemistry Dictionary v3.0 by "
             "Adam M. Azman (<i>J. Chem. Educ.</i> 2012, 89, 412), under the Creative Commons "
-            "Attribution 3.0 United States licence. The drawing editor is Ketcher (EPAM, "
-            "Apache-2.0); the interface uses Qt (LGPL-3.0) through PySide6. See "
+            "Attribution 3.0 United States licence. Structures are read and drawn with RDKit "
+            "(BSD-3-Clause); the interface uses Qt (LGPL-3.0) through PySide6. See "
             "THIRD_PARTY_NOTICES.md for all components.")
 
 

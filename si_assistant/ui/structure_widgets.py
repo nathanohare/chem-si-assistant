@@ -4,19 +4,23 @@ from __future__ import annotations
 
 import re
 from collections import OrderedDict
+from html import escape as html_escape
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QGuiApplication, QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
-                               QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QToolButton,
-                               QVBoxLayout, QWidget)
+from PySide6.QtGui import QGuiApplication, QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog, QDialogButtonBox,
+                               QDoubleSpinBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout,
+                               QLabel, QLineEdit, QMenu, QMessageBox, QPushButton, QRadioButton,
+                               QToolButton, QVBoxLayout, QWidget)
 
 from ..compile.qt_images import read_image
 from ..core import chem, checks
+from ..core import drawing_scale
+from ..core import ms_reports
 from ..core import fields as F
-from ..core.project import STRUCTURE_IMAGE_EXTENSIONS, ProjectError
-from .clipboard_image import PastedPicture, clipboard_picture, paste_dpi
+from ..core.project import PICTURE_FILE_EXTENSIONS, ProjectError
+from .clipboard_image import VECTOR_EVERYWHERE, PastedPicture, clipboard_picture, paste_dpi
 from .field_widgets import FieldEditor, PartsEditor, get_part_value, set_part_value
 
 STRUCTURE_FILE_EXTENSIONS = (".mol", ".sdf", ".sd", ".mdl")
@@ -41,12 +45,54 @@ def formula_plain(text: str) -> str:
     return body.replace("+", "⁺").replace("−", "⁻")
 
 
-def mol_pixmap(mol, size: QSize, settings: "chem.DrawingSettings | None" = None) -> QPixmap:
+def device_pixels(size: QSize, dpr: float) -> QSize:
+    """`size` (in the interface's units) in screen pixels at device pixel ratio `dpr`."""
+    return QSize(max(1, round(size.width() * dpr)), max(1, round(size.height() * dpr)))
+
+
+def mol_pixmap(mol, size: QSize, settings: "chem.DrawingSettings | None" = None,
+               dpr: float = 1.0) -> QPixmap:
     """The program's drawing of `mol`, filling `size`, in the project's drawing style
-    (`settings`, from Project settings ▸ Structures)."""
+    (`settings`, from Project settings ▸ Structures). With `dpr` (the screen's device
+    pixel ratio, e.g. 1.5 or 2 on a high-resolution screen) it is drawn with that many
+    pixels per unit, so it stays sharp (SPEC §13n.7b)."""
+    pixels = device_pixels(size, dpr)
     pixmap = QPixmap()
-    pixmap.loadFromData(chem.structure_png(mol, size.width(), size.height(), settings), "PNG")
+    pixmap.loadFromData(chem.structure_png(mol, pixels.width(), pixels.height(), settings),
+                        "PNG")
+    pixmap.setDevicePixelRatio(dpr)
     return pixmap
+
+
+def fit_svg_image(path: Path, pixels: QSize) -> QImage:
+    """An SVG picture (or a PDF's first page) drawn straight at the largest size that fits
+    `pixels` (a vector drawing is sharp at any size); a null QImage if it can't be read."""
+    from ..compile.qt_images import pdf_size_in, render_page, render_svg_bytes, svg_file_size_in
+    is_pdf = Path(path).suffix.lower() == ".pdf"
+    size = pdf_size_in(Path(path)) if is_pdf else svg_file_size_in(Path(path))
+    if size is None or size[0] <= 0 or size[1] <= 0:
+        return QImage()
+    fitted = QSize(round(size[0] * 1000), round(size[1] * 1000)).scaled(
+        pixels, Qt.AspectRatioMode.KeepAspectRatio)
+    if is_pdf:
+        image = render_page(Path(path), 1, max(1.0, fitted.width() / size[0]))
+        return image if image.isNull() else image.scaled(
+            fitted, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return QImage()
+    return render_svg_bytes(data, max(1, fitted.width()), max(1, fitted.height()))
+
+
+def vector_picture(path: Path) -> Path | None:
+    """The vector drawing of a structure picture: the picture itself (an SVG, or ChemDraw's
+    PDF on macOS), or an SVG kept beside a PNG (same name), else None."""
+    path = Path(path)
+    if path.suffix.lower() in (".svg", ".pdf"):
+        return path
+    svg = path.with_suffix(".svg")
+    return svg if svg.is_file() else None
 
 
 def drawing_settings(project) -> "chem.DrawingSettings":
@@ -57,24 +103,37 @@ _picture_cache: OrderedDict[tuple, QPixmap] = OrderedDict()
 PICTURE_CACHE_SIZE = 300  # small pictures (thumbnails, previews), a few MB in all
 
 
-def picture_pixmap(path: Path, size: QSize) -> QPixmap:
+def picture_pixmap(path: Path, size: QSize, dpr: float = 1.0) -> QPixmap:
     """A picture file shrunk to fit `size`, for showing on screen (a null QPixmap if it
     can't be read). Pasted pictures are large (1200 dpi), so the shrunk copy is kept
-    until the file changes, instead of reading the whole picture every time."""
+    until the file changes, instead of reading the whole picture every time.
+
+    With `dpr` (the screen's device pixel ratio) it has that many pixels per unit, so it
+    is sharp on a high-resolution screen (SPEC §13n.7b): an SVG (the picture, or one kept
+    beside it) is drawn straight at that size; any other picture is shrunk smoothly from
+    the full-resolution original."""
+    svg = vector_picture(path)
     try:
-        st = Path(path).stat()
+        st = Path(svg or path).stat()
     except OSError:
         return QPixmap()
-    key = (str(path), st.st_mtime_ns, st.st_size, size.width(), size.height())
+    key = (str(svg or path), st.st_mtime_ns, st.st_size, size.width(), size.height(),
+           round(dpr, 3))
     pixmap = _picture_cache.get(key)
     if pixmap is not None:
         _picture_cache.move_to_end(key)
         return pixmap
-    image = read_image(Path(path))
+    pixels = device_pixels(size, dpr)
+    image = fit_svg_image(svg, pixels) if svg is not None else QImage()
+    if image.isNull() and Path(path).exists():
+        image = read_image(Path(path))
+        if not image.isNull():
+            image = image.scaled(pixels, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
     if image.isNull():
         return QPixmap()
-    pixmap = QPixmap.fromImage(image.scaled(size, Qt.AspectRatioMode.KeepAspectRatio,
-                                            Qt.TransformationMode.SmoothTransformation))
+    pixmap = QPixmap.fromImage(image)
+    pixmap.setDevicePixelRatio(dpr)
     del image
     _picture_cache[key] = pixmap
     while len(_picture_cache) > PICTURE_CACHE_SIZE:
@@ -100,10 +159,11 @@ def clipboard_structure_text() -> str:
 
 
 def clipboard_picture_for(project) -> PastedPicture | None:
-    """The clipboard's picture (ChemDraw vector pictures are rendered at the project's
-    "Pasted picture resolution", like PowerPoint's "Paste as Picture", and come with
-    their vector original), or None if there is no picture."""
-    return clipboard_picture(paste_dpi(project.settings))
+    """The clipboard's picture, or None if there is none. ChemDraw's metafile becomes a
+    vector drawing (SVG) when the conversion passes the self-check, its PDF (macOS) is
+    kept as it is (SPEC §13n.1); otherwise it is rendered at the project's "Pasted picture
+    resolution", like PowerPoint's "Paste as Picture". The vector original comes with it."""
+    return clipboard_picture(paste_dpi(project.settings), vector=VECTOR_EVERYWHERE)
 
 # ---------------------------------------------------------------------- paste targets
 
@@ -151,7 +211,8 @@ class PasteTargetMixin:
         self._paste_scope = scope = scope or self
         scope.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         area.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
-        self.paste_hint = QLabel()
+        # (a parent straight away: shown without one, it would flash up as a window)
+        self.paste_hint = QLabel(scope)
         shortcut = QShortcut(QKeySequence.StandardKey.Paste, scope)
         shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         shortcut.activated.connect(self._shortcut_paste)
@@ -243,9 +304,7 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         self.smiles.returnPressed.connect(self._apply_smiles)
 
         buttons = QGridLayout()
-        specs = [("Draw…", "Draw the structure (or edit this one) in the Ketcher editor",
-                  self._draw),
-                 ("Paste structure", "Paste SMILES or a MOL block from the clipboard "
+        specs = [("Paste structure", "Paste SMILES or a MOL block from the clipboard "
                   "(in ChemDraw: select the structure and Copy, or Edit ▸ Copy As ▸ SMILES)",
                   self._paste),
                  ("Open MOL/SDF file…", "Read a .mol or .sdf file", self._open_file),
@@ -296,21 +355,24 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         right = QVBoxLayout()
         right.addWidget(self.smiles)
         right.addWidget(self.controls)
-        top_buttons = QHBoxLayout()
-        top_buttons.addWidget(self.edit_btn)
-        top_buttons.addWidget(self.done_btn)
-        top_buttons.addStretch()
-        right.addLayout(top_buttons)
-        right.addWidget(self.info)
+        # Formula and masses with the Edit or Remove menu: once a structure is in, this one
+        # line is all the field shows (SPEC §13n.7a; the page header shows the structure).
+        info_row = QHBoxLayout()
+        info_row.addWidget(self.info, 1)
+        info_row.addWidget(self.edit_btn, 0, Qt.AlignmentFlag.AlignTop)
+        info_row.addWidget(self.done_btn, 0, Qt.AlignmentFlag.AlignTop)
+        right.addLayout(info_row)
         right.addWidget(self.error)
         right.addStretch()
-        left = QVBoxLayout()
+        self.picture_box = QWidget()   # the picture with its paste hint and note
+        left = QVBoxLayout(self.picture_box)
+        left.setContentsMargins(0, 0, 0, 0)
         left.addWidget(hint)
         left.addWidget(self.image)
         left.addWidget(self.image_note)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(left)
+        layout.addWidget(self.picture_box, 0, Qt.AlignmentFlag.AlignTop)
         layout.addLayout(right, 1)
         self.refresh()
 
@@ -320,19 +382,23 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         mol = self.project.read_structure(self.compound)
         info = chem.mol_info(mol) if mol is not None else None
         override = self.project.structure_image_path(self.compound)
+        dpr = self.image.devicePixelRatioF()
         if override is not None and override.exists():
-            pixmap = picture_pixmap(override, self.IMAGE_SIZE - QSize(10, 10))
+            pixmap = picture_pixmap(override, self.IMAGE_SIZE - QSize(10, 10), dpr)
             if not pixmap.isNull():
                 self.image.setPixmap(pixmap)
             else:
                 self.image.setText(f"(cannot preview {override.name})")
             source = self.project.structure_picture_source(self.compound)
             who = "ChemDraw's picture" if source == "chemdraw" else "your own picture"
-            self.image_note.setText(f"Showing {who}. When compiling the SI you can choose "
-                                    "these pictures or ACS-style drawings.")
+            if override.suffix.lower() in drawing_scale.VECTOR_PICTURES:
+                who += " (a vector drawing)"
+            self.image_note.setText(
+                f"Showing {who}. {picture_scale_text(self.project, self.compound)}")
             self.image_note.setWordWrap(True)
         elif mol is not None:
-            self.image.setPixmap(mol_pixmap(mol, self.IMAGE_SIZE, drawing_settings(self.project)))
+            self.image.setPixmap(mol_pixmap(mol, self.IMAGE_SIZE, drawing_settings(self.project),
+                                            dpr))
             self.image_note.setText("Taken from the reaction scheme."
                                     if self.project.structure_from_scheme(self.compound) else "")
         else:
@@ -347,6 +413,9 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
             self.info.setText(
                 f"<b>Formula</b> {formula_html(info.formula)} &nbsp; "
                 f"<b>MW</b> {info.mw:.2f} &nbsp; <b>Exact mass</b> {info.exact_mass:.4f}{charge}")
+        elif override is not None:
+            self.info.setText("<i>A picture only, no structure: paste or type the structure "
+                              "to get the formula and masses.</i>")
         else:
             self.info.setText("")
         has_override = override is not None
@@ -366,22 +435,39 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         self._editing = editing
         self._apply_mode()
 
+    def is_compact(self) -> bool:
+        """One line (formula, masses, Edit or Remove menu) instead of the whole editor."""
+        return self.has_content() and not self._editing and not self.project.read_only
+
     def _apply_mode(self) -> None:
-        """With a structure: compact (buttons in the Edit or Remove menu). Without one, or
-        while editing: all buttons shown."""
-        compact = self.has_content() and not self._editing and not self.project.read_only
+        """With a structure (or picture): compact, one line — formula, MW and the Edit or
+        Remove menu holding the buttons; the structure itself shows in the page header
+        (SPEC §13n.7a). Without one, or while editing ("Show all editing controls"): the
+        picture, the SMILES box and all buttons."""
+        compact = self.is_compact()
+        self.picture_box.setVisible(not compact)
+        self.smiles.setVisible(not compact)
         self.controls.setVisible(not compact and not self.project.read_only)
         self.edit_btn.setVisible(compact)
         self.done_btn.setVisible(self._editing and self.has_content())
         self.smiles.setReadOnly(compact or self.project.read_only)
         self.set_paste_locked(compact)
 
+    def _expand_field(self) -> None:
+        """The structure is gone: show the whole editor again, even if the field was
+        collapsed (▸), so the next structure can be pasted straight away (a picture kept
+        without a structure stays, with all the editing controls shown)."""
+        self._editing = self.has_content()
+        box = self.parentWidget()
+        if getattr(box, "collapsed", False) and hasattr(box, "set_collapsed"):
+            box.set_collapsed(False)
+        self._apply_mode()
+
     def _fill_edit_menu(self, menu: QMenu) -> None:
         menu.clear()
         self.locked_menu(menu)
 
     def locked_menu(self, menu: QMenu) -> None:
-        menu.addAction("Edit the drawing (Ketcher)…", self._draw)
         menu.addAction("Replace with the copied structure (MOL / SMILES)", self._paste)
         menu.addAction("Use the copied picture (image)", self._paste_image)
         menu.addAction("Open MOL/SDF file…", self._open_file)
@@ -389,6 +475,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         menu.addSeparator()
         menu.addAction("Copy SMILES", self._copy_smiles)
         menu.addSeparator()
+        size = menu.addAction("Printed size of the picture…", self._picture_size)
+        size.setEnabled(self.project.structure_image_path(self.compound) is not None)
         remove_pic = menu.addAction("Remove picture", self._remove_image)
         remove_pic.setEnabled(self.project.structure_image_path(self.compound) is not None)
         menu.addAction("Clear structure…", self._clear)
@@ -412,9 +500,10 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         try:
             with self._undo_step("Change the structure of"):
                 if picture is not None:
-                    added = self.project.set_structure(self.compound, text, picture=picture.png,
+                    added = self.project.set_structure(self.compound, text, picture=picture.data,
                                                        vector=picture.source,
-                                                       vector_ext=picture.source_ext)
+                                                       vector_ext=picture.source_ext,
+                                                       picture_ext=picture.ext)
                 else:
                     added = self.project.set_structure(self.compound, text)
         except chem.ChemError as e:
@@ -451,24 +540,6 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         else:
             self._paste_image()
 
-    def _draw(self) -> None:
-        """Draw in Ketcher, starting from the current structure if there is one."""
-        from .ketcher_dialog import KetcherDialog, ensure_ketcher
-        if self.project.read_only or not ensure_ketcher(self):
-            return
-        path = self.project.structure_path(self.compound)
-        start = path.read_text(encoding="utf-8", errors="replace") if path.is_file() else ""
-        dlg = KetcherDialog(start, self)
-        if not dlg.exec() or not dlg.molfile():
-            return
-        self.set_structure_text(dlg.molfile())
-        if self.project.structure_image_path(self.compound) is not None and QMessageBox.question(
-                self, "Picture",
-                "This compound has its own picture, which may now differ from the drawing. "
-                "Remove the picture so the SI uses the new structure?"
-        ) == QMessageBox.StandardButton.Yes:
-            self._remove_image()
-
     def _open_file(self) -> None:
         patterns = " ".join(f"*{e}" for e in STRUCTURE_FILE_EXTENSIONS)
         path, _ = QFileDialog.getOpenFileName(self, "Open a structure file", "",
@@ -500,6 +571,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not clear structure", str(e))
         self.refresh()
+        if self.project.read_structure(self.compound) is None:
+            self._expand_field()
         self.structure_changed.emit([])
 
     def _paste_image(self) -> None:
@@ -511,7 +584,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         self.before_write()
         try:
             with self._undo_step("Paste a picture of"):
-                self.project.set_structure_image(self.compound, data=picture.png, ext=".png",
+                self.project.set_structure_image(self.compound, data=picture.data,
+                                                 ext=picture.ext,
                                                  vector=picture.source,
                                                  vector_ext=picture.source_ext)
         except (ProjectError, OSError) as e:
@@ -520,8 +594,30 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         self.refresh()
         self.structure_changed.emit([])
 
+    def _picture_size(self) -> None:
+        """The picture's bond length: measured, typed, or "its own size" (SPEC §13n.2a)."""
+        if self.project.structure_image_path(self.compound) is None:
+            return
+        dialog = PictureScaleDialog(self, self.project, self.compound)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self.set_picture_bond(dialog.choice())
+
+    def set_picture_bond(self, own: float | None) -> None:
+        """Store the choice of the Printed size dialog (one Edit ▸ Undo step)."""
+        if own == self.project.structure_picture_bond(self.compound)[1]:
+            return
+        self.before_write()
+        try:
+            with self._undo_step("Change the printed size of the picture of"):
+                self.project.set_structure_picture_bond(self.compound, own)
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not change the printed size", str(e))
+        self.refresh()
+        self.structure_changed.emit([])
+
     def _choose_image(self) -> None:
-        patterns = " ".join(f"*{e}" for e in STRUCTURE_IMAGE_EXTENSIONS)
+        patterns = " ".join(f"*{e}" for e in PICTURE_FILE_EXTENSIONS)
         path, _ = QFileDialog.getOpenFileName(self, "Choose a structure image", "",
                                               f"Images ({patterns})")
         if not path:
@@ -543,6 +639,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not remove image", str(e))
         self.refresh()
+        if not self.has_content():
+            self._expand_field()
         self.structure_changed.emit([])
 
     def store(self) -> None:
@@ -569,6 +667,112 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
             self._read_file(path)
 
 
+def picture_scale_text(project, compound) -> str:
+    """One line on how the structure picture prints (SPEC §13n.2a)."""
+    if project.structure_image_path(compound) is None:
+        return ""
+    settings = project.settings
+    measured, own = project.structure_picture_bond(compound)
+    target = drawing_scale.target_bond_pt(settings)
+    if not drawing_scale.same_scale(settings):
+        return "It prints at its own size (same bond length is off in Project settings)."
+    if own == 0:
+        return "It prints at its own size (Edit or Remove ▸ Printed size of the picture)."
+    bond = own if own else measured
+    if bond is None:
+        return "No bonds could be measured in it, so it prints at its own size."
+    factor = drawing_scale.print_factor(settings, bond, typed=bool(own))
+    if not own and factor == 1.0 and abs(bond - target) > 0.01 * target:
+        return (f"Its bonds measure {bond:.1f} pt, too far from {target:.1f} pt to rescale: "
+                "it prints at its own size.")
+    typed = " (typed)" if own else ""
+    return (f"Its bonds are {bond:.1f} pt{typed}: printed at {factor:.0%} so they are "
+            f"{target:.1f} pt, like every structure.")
+
+
+class PictureScaleDialog(QDialog):
+    """Edit or Remove ▸ Printed size of the picture: use the measured bond length (the
+    default), type the picture's bond length, or print it at its own size (§2.7)."""
+
+    def __init__(self, parent: QWidget | None, project, compound, bond=None):
+        """`bond` = (measured, own) for a picture that is not a compound's own (a scheme
+        editor's box, SPEC §13n.4); else the compound's are used."""
+        super().__init__(parent)
+        self.setWindowTitle("Printed size of the picture")
+        measured, own = bond if bond is not None else project.structure_picture_bond(compound)
+        target = drawing_scale.target_bond_pt(project.settings)
+        layout = QVBoxLayout(self)
+        intro = QLabel(
+            f"Pasted structures are printed so that their bonds are {target:.1f} pt "
+            f"({target / 72 * 2.54:.3f} cm) long, the bond length in Project settings ▸ "
+            "Structures, so every structure in the SI has the same scale.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+        self.auto = QRadioButton(
+            f"Automatic: bonds measured at {measured:.1f} pt" if measured else
+            "Automatic: no bonds could be measured, so it prints at its own size")
+        self.typed = QRadioButton("The bonds in this picture are")
+        self.bond = QDoubleSpinBox()
+        self.bond.setRange(0.5, 200.0)
+        self.bond.setDecimals(2)
+        self.bond.setSuffix(" pt")
+        self.bond.setValue(own if own else (measured or target))
+        self.natural = QRadioButton("Print it at its own size (as copied)")
+        group = QButtonGroup(self)
+        for button in (self.auto, self.typed, self.natural):
+            group.addButton(button)
+        (self.natural if own == 0 else self.typed if own else self.auto).setChecked(True)
+        layout.addWidget(self.auto)
+        row = QHBoxLayout()
+        row.addWidget(self.typed)
+        row.addWidget(self.bond)
+        row.addWidget(QLabel("long"))
+        row.addStretch()
+        layout.addLayout(row)
+        layout.addWidget(self.natural)
+        # A typed length is always used (§2.7), but one far from the drawing's bonds is
+        # probably a typing slip: say how big the picture will print.
+        self.extreme = QLabel()
+        self.extreme.setWordWrap(True)
+        self.extreme.setStyleSheet("color: #b36b00;")
+        layout.addWidget(self.extreme)
+        self._target = target
+        self.bond.valueChanged.connect(lambda _v: self.typed.setChecked(True))
+        self.bond.valueChanged.connect(lambda _v: self._check_extreme())
+        self.typed.toggled.connect(lambda _on: self._check_extreme())
+        self._check_extreme()
+        if not drawing_scale.same_scale(project.settings):
+            off = QLabel("“Print all pasted structures at the same bond length” is off in "
+                         "Project settings ▸ Structures: every picture prints at its own size "
+                         "until it is turned on again.")
+            off.setWordWrap(True)
+            off.setStyleSheet("color: #b36b00;")
+            layout.addWidget(off)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok
+                                   | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _check_extreme(self) -> None:
+        factor = self._target / self.bond.value() if self.bond.value() > 0 else 1.0
+        lo, hi = drawing_scale.FACTOR_RANGE
+        extreme = self.typed.isChecked() and not lo <= factor <= hi
+        self.extreme.setText(
+            f"⚠ With bonds of {self.bond.value():.2f} pt the picture prints at {factor:.0%} "
+            "of its own size. Check the length you typed (it is used as typed)."
+            if extreme else "")
+        self.extreme.setVisible(extreme)
+
+    def choice(self) -> float | None:
+        """None: the measured length; 0: its own size; else the typed length (pt)."""
+        if self.natural.isChecked():
+            return 0.0
+        if self.typed.isChecked():
+            return round(self.bond.value(), 3)
+        return None
+
+
 # ---------------------------------------------------------------------- HRMS field
 
 class HrmsEditor(PartsEditor):
@@ -576,12 +780,24 @@ class HrmsEditor(PartsEditor):
 
     M is normally the structure. For a salt, the user picks which piece (e.g. the
     cation) is M. Typing an M formula overrides both; the adduct is still applied.
+
+    The instrument's report files are listed under it (SPEC §13n.3, ui/hrms_reports_ui).
+    The found m/z is filled from them when the Found box is empty or still holds the value
+    filled from a report before; a value typed by hand is never changed. This is worked
+    out again when the page opens, the structure, adduct, M or the files change.
     """
 
     MANUAL_STYLE = "QLineEdit { background: rgba(47, 128, 237, 45); }"
+    files_changed = Signal()   # a report file was added or removed (saved already)
+    status = Signal(str)       # a line for the status bar
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        stored = self.compound.values.get(self.defn.key) or {}
+        source = stored.get(ms_reports.FOUND_FROM_KEY)
+        self._found_from = dict(source) if isinstance(source, dict) and \
+            ms_reports.found_is_from_report(stored) else None
+        self._last_found = get_part_value(self.widgets["found"])
         adduct_box = self.widgets["adduct"]
         for i in range(adduct_box.count()):
             adduct_box.setItemText(i, chem.adduct_display(adduct_box.itemData(i)))
@@ -617,14 +833,108 @@ class HrmsEditor(PartsEditor):
         self.calc.setWordWrap(True)
         self.calc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         grid.addWidget(self.calc, grid.rowCount(), 0, 1, -1)
+        # "from the report …" under the Found box (SPEC §13n.3a)
+        self.found_note = QLabel()
+        self.found_note.setWordWrap(True)
+        self.found_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        grid.addWidget(self.found_note, grid.rowCount(), 0, 1, -1)
+        from .hrms_reports_ui import HrmsReportsBox
+        self.reports = HrmsReportsBox(self.project, self.compound, self.before_write,
+                                      self.shown_id)
+        self.reports.files_changed.connect(self._files_changed)
+        self.reports.saved.connect(self.status)
+        grid.addWidget(self.reports, grid.rowCount(), 0, 1, -1)
         self.changed.connect(self.refresh_calculation)
-        self.refresh_calculation()
+        self.refresh_calculation(opening=True)
 
     def store(self) -> None:
+        old = self.compound.values.get(self.defn.key) or {}
         super().store()
         value = self.compound.values[self.defn.key]
         value["species"] = self._species_key
         value["formula"] = self.formula_edit.text().strip()
+        # Kept from what is stored: the report files and the printing choice (saved by
+        # their own actions), and where a found m/z filled from a report came from.
+        for key in (ms_reports.REPORTS_KEY, ms_reports.PRINT_KEY):
+            if key in old:
+                value[key] = old[key]
+        if self._found_from is not None:
+            value[ms_reports.FOUND_FROM_KEY] = dict(self._found_from)
+            if not ms_reports.found_is_from_report(value):
+                value.pop(ms_reports.FOUND_FROM_KEY, None)
+
+    # ---- report files (SPEC §13n.3)
+
+    def _files_changed(self) -> None:
+        """A report file was added or removed: the project has saved the field (and filled
+        or cleared the found m/z); show what it holds now."""
+        value = self.compound.values.get(self.defn.key) or {}
+        found = str(value.get("found", "") or "")
+        set_part_value(self.widgets["found"], F.Part("found"), found)
+        self._last_found = get_part_value(self.widgets["found"])
+        source = value.get(ms_reports.FOUND_FROM_KEY)
+        self._found_from = dict(source) if isinstance(source, dict) and \
+            ms_reports.found_is_from_report(value) else None
+        self.refresh_calculation()
+        self.files_changed.emit()
+
+    def _value_on_screen(self) -> dict:
+        stored = self.compound.values.get(self.defn.key) or {}
+        value = {k: v for k, v in stored.items()}
+        value.update({k: get_part_value(w) for k, w in self.widgets.items()})
+        value["species"] = self._species_key
+        value["formula"] = self.formula_edit.text().strip()
+        value.pop(ms_reports.FOUND_FROM_KEY, None)
+        if self._found_from is not None:
+            value[ms_reports.FOUND_FROM_KEY] = dict(self._found_from)
+        return value
+
+    def _auto_fill(self) -> bool:
+        """Fill the Found box from the reports (see the class). True if it changed."""
+        if self.project.read_only or not ms_reports.report_items(self.compound):
+            return False
+        value = self._value_on_screen()
+        if not ms_reports.update_found(self.project, self.compound, value):
+            return False
+        set_part_value(self.widgets["found"], F.Part("found"), str(value.get("found", "")))
+        self._last_found = get_part_value(self.widgets["found"])
+        source = value.get(ms_reports.FOUND_FROM_KEY)
+        self._found_from = dict(source) if isinstance(source, dict) else None
+        return True
+
+    def _show_found_note(self) -> None:
+        if not ms_reports.report_items(self.compound):
+            self.found_note.setText("")
+            self.found_note.setVisible(False)
+            return
+        text = ""
+        if self._found_from is not None:
+            text = (f"<span style='color:#888'>↳ Found m/z from the report "
+                    f"{html_escape(str(self._found_from.get('file', '')))} — type over it to "
+                    f"use your own value.</span>")
+        else:
+            value = self._value_on_screen()
+            match = ms_reports.compound_match(self.project, self.compound, value)
+            found = checks.parse_number(str(value.get("found", "")))
+            tol = ms_reports.tolerance(self.project)
+            if match is None:
+                text = ("<span style='color:#888'>No m/z within the tolerance (±"
+                        f"{tol:g} ppm) of the expected ion was found in the report files."
+                        "</span>")
+            elif found is None:
+                text = (f"<span style='color:#888'>The reports give {match.mz:.4f} "
+                        f"({html_escape(match.file)}).</span>")
+            else:
+                ppm = (found - match.mz) / match.mz * 1e6
+                if abs(ppm) > tol:
+                    # (how far apart they are is said once: in the field's warning)
+                    text = (f"<span style='color:#888'>Your value is kept; the report "
+                            f"{html_escape(match.file)} gives {match.mz:.4f}.</span>")
+                else:
+                    text = (f"<span style='color:#888'>Your value; the report "
+                            f"{html_escape(match.file)} gives {match.mz:.4f}.</span>")
+        self.found_note.setText(text)
+        self.found_note.setVisible(bool(text))
 
     def _species_chosen(self, index: int) -> None:
         self._species_key = self.species_box.itemData(index) or ""
@@ -656,7 +966,23 @@ class HrmsEditor(PartsEditor):
         self.species_box.setCurrentIndex(max(index, 0))
         self.species_box.blockSignals(False)
 
-    def refresh_calculation(self) -> None:
+    def refresh_calculation(self, opening: bool = False) -> None:
+        # The found m/z: typed by hand (it is the user's own from now on), or filled from
+        # the reports when something else changed (SPEC §13n.3a).
+        found_now = get_part_value(self.widgets["found"])
+        if found_now != self._last_found:
+            self._last_found = found_now
+            if self._found_from is not None and \
+                    found_now != ms_reports.format_mz(self._found_from.get("mz", 0)):
+                self._found_from = None
+        elif self._auto_fill() and not self.project.read_only:
+            if opening:   # (saved once the page is ready, as an edit of its own)
+                from PySide6.QtCore import QTimer
+                QTimer.singleShot(0, self.changed.emit)
+            else:
+                self.changed.emit()
+                return   # (refresh_calculation runs again for the new value)
+        self._show_found_note()
         mol = self.project.read_structure(self.compound)
         auto = None
         try:

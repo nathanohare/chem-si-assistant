@@ -228,6 +228,7 @@ def _table_label(path: Path) -> str:
 def compute(project, live: dict[str, str] | None = None) -> Labels:
     """Every figure, table and scheme label in document order. `live` = {owner key: text}
     uses an editor's current (unsaved) text instead of the saved one."""
+    from . import scheme_editor
     from .project import GENERAL_OWNER, SchemePage, TextOwner
     from .project import FRONT_DIR, FRONT_TEXT_FILES, TEXT_CONTENT_FILE
     live = live or {}
@@ -282,9 +283,11 @@ def compute(project, live: dict[str, str] | None = None) -> Labels:
                 report = project.id_report()
             for entry in section.items:
                 compounds = [entry]
-                if isinstance(entry, SchemePage):
+                if isinstance(entry, SchemePage) and scheme_editor.scheme_layout(
+                        project.settings, entry)["show_label"]:
                     add("scheme", entry.id, entry.id, 0, entry.data.get("label", ""),
                         f"{section.name} ▸ {entry.name}", entry.name, ("scheme", entry.id))
+                if isinstance(entry, SchemePage):
                     compounds = entry.children
                 for c in compounds:
                     shown = report.display_id(c.id)

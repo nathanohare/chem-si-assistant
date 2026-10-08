@@ -87,8 +87,26 @@ def all_texts(project, compounds: bool = True) -> Iterator[TextPlace]:
             yield TextPlace("gp_sentence", gp["id"], "",
                             f"{section.name} ▸ {gp.get('name', '')} (compound sentence)",
                             gp.get("sentence", ""))
+        for scheme in section.schemes:   # the scheme editor's conditions (SPEC §13n.4)
+            yield from scheme_texts(scheme, f"{section.name} ▸ {scheme.name}")
         for c in section.compounds if compounds else []:
             yield from compound_texts(project, c, report.display_id(c.id))
+
+
+def scheme_texts(scheme, where: str) -> Iterator[TextPlace]:
+    """The conditions of each step of a scheme made with the scheme editor, and its
+    typed ID labels (kind "scheme": owner_id the scheme's ID, field the step's or box's)."""
+    from . import scheme_editor
+    for i, step in enumerate(scheme_editor.steps(scheme)):
+        for which, word in (("top", "above"), ("bottom", "under")):
+            text = str(step.get(which) or "")
+            if text.strip():
+                yield TextPlace("scheme", scheme.id, step["id"],
+                                f"{where} ▸ step {i + 1}, conditions {word} the arrow", text)
+    for box, _where in scheme_editor.all_boxes(scheme):
+        label = str(box.get("label") or "")
+        if label.strip() and not box.get("compound"):
+            yield TextPlace("scheme", scheme.id, box["id"], f"{where} ▸ ID label", label)
 
 
 def display_runs(project, runs: list[Run], report=None, labels=None) -> list[Run]:
@@ -100,11 +118,10 @@ def display_runs(project, runs: list[Run], report=None, labels=None) -> list[Run
             compound = mention_kind(r.mention) == "compound"
             if compound and report is None:
                 report = project.id_report()   # (only worked out when needed)
-            out.append(Run(mention_label(project, r.mention, report, labels),
-                           compound or r.bold, r.italic, r.valign, r.ref))
+            out.append(r.but(text=mention_label(project, r.mention, report, labels),
+                             bold=compound or r.bold))
         elif r.ref:
-            out.append(Run(citation_label(project, r.citations), r.bold, r.italic, r.valign,
-                           r.ref))
+            out.append(r.but(text=citation_label(project, r.citations)))
         else:
             out.append(r)
     return out

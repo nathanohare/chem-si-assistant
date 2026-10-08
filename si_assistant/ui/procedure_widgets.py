@@ -15,6 +15,7 @@ from .rich_text import RichTextEditor
 
 SAVE_DELAY_MS = 800
 HINT = "color: palette(placeholder-text);"
+WARN = "color: #d35400;"
 
 
 def _runs_html(runs: list[Run]) -> str:
@@ -31,6 +32,8 @@ def _runs_html(runs: list[Run]) -> str:
             text = f"<i>{text}</i>"
         if r.bold:
             text = f"<b>{text}</b>"
+        if r.underline:
+            text = f"<u>{text}</u>"
         out.append(text)
     return "".join(out)
 
@@ -77,10 +80,17 @@ class GeneralProceduresEditor(QWidget):
         self.sentence.setToolTip(
             "Printed in each compound's block. Words in {braces} are filled in on the compound "
             "page. Automatic: {GP} (this procedure's name), {scale}, {yield}, {product} (the "
-            "compound's ID). Anything else, e.g. {starting material} or {temperature}, is "
-            "typed on each compound page.")
+            "compound's ID), {purification} (from the Purification field, e.g. “flash column "
+            "chromatography (SiO₂, 10% EtOAc/hexanes)”; the field then adds nothing at the "
+            "end of the procedure). Anything else, e.g. {starting material} or "
+            "{temperature}, is typed on each compound page.")
         self.users = QLabel()
         self.users.setStyleSheet(HINT)
+        # Two procedures with the same name (SPEC §13n.8): said here and in the Warnings panel.
+        self.duplicate = QLabel()
+        self.duplicate.setWordWrap(True)
+        self.duplicate.setStyleSheet(WARN)
+        self.duplicate.hide()
         self.text = RichTextEditor(self)
         self.text.set_read_only(ro)
         for w in (self.name, self.title, self.sentence):
@@ -90,11 +100,12 @@ class GeneralProceduresEditor(QWidget):
 
         form = QFormLayout()
         form.addRow("Name:", self.name)
+        form.addRow("", self.duplicate)
         form.addRow("Title:", self.title)
         form.addRow("Compound sentence:", self.sentence)
         sentence_hint = QLabel("Printed in each compound that uses this procedure. {GP}, {scale}, "
-                               "{yield} and {product} fill themselves in; other {words} are "
-                               "typed on each compound page.")
+                               "{yield}, {product} and {purification} fill themselves in; "
+                               "other {words} are typed on each compound page.")
         sentence_hint.setWordWrap(True)
         sentence_hint.setStyleSheet(HINT)
         form.addRow("", sentence_hint)
@@ -133,6 +144,7 @@ class GeneralProceduresEditor(QWidget):
             item = QListWidgetItem(gp.get("name") or "(unnamed)")
             item.setData(Qt.ItemDataRole.UserRole, gp["id"])
             self.list.addItem(item)
+        self._mark_duplicates()
         self.list.blockSignals(False)
         ids = [gp["id"] for gp in self.project.general_procedures(self.section)]
         target = select if select in ids else (ids[0] if ids else None)
@@ -157,6 +169,41 @@ class GeneralProceduresEditor(QWidget):
         self.sentence.setText(gp.get("sentence", DEFAULT_GP_SENTENCE) if found else "")
         self.text.set_markup(self.project.read_gp_text(gp_id) if found else "")
         self._update_users()
+        self._mark_duplicates()
+
+    def _names(self) -> list[tuple[str, str, str]]:
+        """(gp id, name, section name) of every GP in the project, with the name being typed
+        for the one on show."""
+        out = []
+        for section, gp in self.project.all_general_procedures():
+            name = gp.get("name", "")
+            if gp["id"] == self.current and not self.project.read_only:
+                name = self.name.text().strip() or "General Procedure"
+            out.append((gp["id"], name, section.name))
+        return out
+
+    def _mark_duplicates(self) -> None:
+        """A warning under the name, and ⚠ in the list, for procedures whose name is also
+        used by another one anywhere in the project (ignoring capitals and spaces)."""
+        names = self._names()
+        keys = [procedures.name_key(n) for _i, n, _s in names]
+        doubled = {i for (i, _n, _s), k in zip(names, keys) if k and keys.count(k) > 1}
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            gp_id = item.data(Qt.ItemDataRole.UserRole)
+            text = item.text().removeprefix("⚠ ")
+            item.setText(("⚠ " + text) if gp_id in doubled else text)
+            item.setToolTip("Another general procedure has the same name" if gp_id in doubled
+                            else "")
+        others = []
+        if self.current in doubled:
+            mine = procedures.name_key(next(n for i, n, _s in names if i == self.current))
+            others = [f"“{n}” in “{s}”" for i, n, s in names
+                      if i != self.current and procedures.name_key(n) == mine]
+        self.duplicate.setText("⚠ Another general procedure has the same name: "
+                               + "; ".join(others) + ". Give each its own name (they are "
+                               "printed as headings and chosen by name on compound pages).")
+        self.duplicate.setVisible(bool(others))
 
     def _update_users(self) -> None:
         if not self.current:
@@ -172,6 +219,7 @@ class GeneralProceduresEditor(QWidget):
             item = self.list.currentItem()
             if item is not None:
                 item.setText(self.name.text().strip() or "(unnamed)")
+            self._mark_duplicates()
 
     def flush(self) -> None:
         """Save the procedure on screen (if edited)."""
@@ -232,6 +280,9 @@ class GpChooser(QWidget):
     compound sentence. Everything automatic can be typed over (SPEC §2.7)."""
 
     changed = Signal()
+    # Text typed in the {scale} box: the page may fill the Reaction scale field with it
+    # (SPEC §13n.9).
+    scale_typed = Signal(str)
 
     def __init__(self, project: Project, compound, parent: QWidget | None = None):
         super().__init__(parent)
@@ -303,6 +354,12 @@ class GpChooser(QWidget):
                 w.setPlaceholderText(f"automatic: {shown}" if shown else
                                      f"automatic ({procedures.AUTO[k]}) — empty")
                 w.setToolTip("Leave empty to use the automatic value, or type your own.")
+                if k == "scale":
+                    w.setToolTip("Type the scale, e.g. 0.20 mmol: it also fills the Reaction "
+                                 "scale field if that is empty. Once the Reaction scale field "
+                                 "is filled, its value is printed (a warning shows if the two "
+                                 "differ).")
+                    w.textEdited.connect(self.scale_typed.emit)
                 w.textEdited.connect(self._value_edited)
             else:
                 w = RichTextEditor(self, headings=False, height=30)

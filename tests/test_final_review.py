@@ -261,7 +261,7 @@ def test_the_spectra_field_fits_beside_the_live_preview(qapp, sample):
 
 def test_cover_and_scheme_pages_fit_the_middle_column(window, sample):
     """At 1200x800 with the live preview the tree shrank on these pages: the cover's long
-    notes now wrap and the scheme buttons wrap onto a second line when narrow."""
+    notes now wrap and the scheme editor's buttons wrap onto a second line when narrow."""
     from si_assistant.ui.flow_layout import FlowLayout
     p, s = sample
     win = window(p)
@@ -270,10 +270,9 @@ def test_cover_and_scheme_pages_fit_the_middle_column(window, sample):
         if len(label.text()) > 60:
             assert label.wordWrap(), label.text()
     win.select("scheme", s["scheme"].id)
-    layout = win.panel.buttons["Paste scheme"].parentWidget().layout()
-    flows = [lay for lay in layout.children() if isinstance(lay, FlowLayout)]
-    assert flows and flows[0].indexOf(win.panel.buttons["Paste scheme"]) >= 0
-    flow = flows[0]
+    editor = win.panel.editor               # (its buttons: in the page's top row, §13q.6b)
+    flow = editor.bar
+    assert isinstance(flow, FlowLayout) and flow.indexOf(editor.layout_btn) >= 0
     one_line = flow.sizeHint().height()
     assert flow.heightForWidth(150) > one_line   # narrow: two lines or more
 

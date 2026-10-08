@@ -73,11 +73,11 @@ def _bold_prefix(runs: list[Run], n: int) -> list[Run]:
         if left <= 0:
             out.append(r)
         elif len(r.text) <= left:
-            out.append(Run(r.text, True, r.italic, r.valign))
+            out.append(r.but(bold=True))
             left -= len(r.text)
         else:
-            out.append(Run(r.text[:left], True, r.italic, r.valign))
-            out.append(Run(r.text[left:], r.bold, r.italic, r.valign))
+            out.append(r.but(text=r.text[:left], bold=True))
+            out.append(r.but(text=r.text[left:]))
             left = 0
     return out
 
@@ -87,8 +87,7 @@ def _insert(runs: list[Run], index: int, text: str) -> list[Run]:
     for r in runs:
         if not done and pos <= index <= pos + len(r.text):
             cut = index - pos
-            out += [Run(r.text[:cut], r.bold, r.italic, r.valign), R(text),
-                    Run(r.text[cut:], r.bold, r.italic, r.valign)]
+            out += [r.but(text=r.text[:cut]), R(text), r.but(text=r.text[cut:])]
             done = True
         else:
             out.append(r)
@@ -155,8 +154,7 @@ def _split_at(runs: list[Run], index: int) -> list[Run]:
     for r in runs:
         if pos < index < pos + len(r.text) and not r.ref:
             cut = index - pos
-            out += [Run(r.text[:cut], r.bold, r.italic, r.valign),
-                    Run(r.text[cut:], r.bold, r.italic, r.valign)]
+            out += [r.but(text=r.text[:cut]), r.but(text=r.text[cut:])]
         else:
             out.append(r)
         pos += len(r.text)
@@ -341,8 +339,20 @@ def generated_paragraphs(project, compound, use_helpers: bool = True,
     paragraphs: list[Paragraph] = []
     data: list[Run] = []
     did_state = False
+    # The Purification field's sentence (SPEC §13q.2): at the end of the experimental
+    # procedure, unless its general procedure's sentence places {purification} itself;
+    # without a procedure field, where the Purification field is.
+    purification = procedures.purification_sentence(compound)
+    if purification and procedures.uses_purification(project.compound_gp(compound)):
+        purification = ""
+    with_procedure = "procedure" in compound.field_keys
     for defn in project.field_defs(compound):
         if defn.key in SKIP:
+            continue
+        if defn.key == "purification":
+            if purification and not with_procedure:
+                runs = [R(purification)]
+                paragraphs.append(Paragraph(format_chemistry(runs) if use_helpers else runs))
             continue
         if defn.kind == "richtext":
             text = project.read_compound_text(compound, defn.key)
@@ -352,6 +362,9 @@ def generated_paragraphs(project, compound, use_helpers: bool = True,
                 if sentence:  # "Prepared according to General Procedure A from 1a (0.20 mmol)."
                     first = own.pop(0).runs if own else []
                     own.insert(0, Paragraph(sentence + ([R(" ")] + first if first else [])))
+                if purification:   # "… The crude product was purified by …"
+                    last = own.pop().runs if own else []
+                    own.append(Paragraph((last + [R(" ")] if last else []) + [R(purification)]))
             for p in own:
                 paragraphs.append(Paragraph(format_chemistry(p.runs) if use_helpers else p.runs))
             continue

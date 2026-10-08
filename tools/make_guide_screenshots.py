@@ -46,10 +46,83 @@ def save(widget, name: str, width: int = 960) -> Path:
     return path
 
 
+def add_editor_scheme(project, data) -> str:
+    """A made-up two-step scheme drawn with the scheme editor (SPEC §13n.4)."""
+    from si_assistant.core import scheme_editor as se
+    project.set_id_table(data.id, list(data.id_table) + ["5", "6"])
+    k = project.add_scheme(data.id, name="Synthesis of amine 6")
+    sm = se.starting(k)[0]
+    se.set_box_structure(project, k, sm["id"], "CC(=O)c1ccc(Cl)cc1")
+    se.set_box_label(project, k, sm["id"], "S1")
+    step = se.steps(k)[0]
+    se.set_box_structure(project, k, step["products"][0]["id"], "CC(O)c1ccc(Cl)cc1")
+    c5 = se.link_new_compound(project, k, step["products"][0]["id"], name="alcohol 5")
+    c5.values["yield"] = {"percent": "91"}
+    project.save_compound(c5)
+    se.set_conditions(project, k, step["id"], "top", "NaBH_{4} (1.5 equiv)")
+    se.set_conditions(project, k, step["id"], "bottom", "MeOH, 0 °C, 1 h")
+    step2 = se.add_step(project, k)
+    se.set_box_structure(project, k, step2["products"][0]["id"], "CC(N)c1ccc(Cl)cc1")
+    c6 = se.link_new_compound(project, k, step2["products"][0]["id"], name="amine 6")
+    c6.values["yield"] = {"percent": "64"}
+    project.save_compound(c6)
+    sid = se.add_inline_structure(project, k, "O=C1c2ccccc2C(=O)N1", None)
+    se.set_conditions(project, k, step2["id"], "top", f"1. @struct{{{sid}}}, DIAD, PPh_{{3}}")
+    se.set_conditions(project, k, step2["id"], "bottom", "2. N_{2}H_{4}, EtOH")
+    return k.id
+
+
+def save_compiled_scheme(project, scheme_id: str) -> None:
+    """The editor scheme as it prints (docs/images/scheme-editor-printed.png)."""
+    from PySide6.QtCore import QRect
+    from si_assistant.compile.document import CompileOptions
+    from si_assistant.compile.qt_images import convert_to_png, image_info, render_page
+    from si_assistant.compile.run import compile_pdf
+    options = CompileOptions.from_settings(project.settings)
+    options.only = ("scheme", scheme_id)
+    options.preview_spectra = False
+    result = compile_pdf(project, options, image_info, convert_to_png, name="guide")
+    image = render_page(result.pdf, 1, 150)
+    # (the top of the page: the scheme)
+    image = image.copy(QRect(0, 0, image.width(), int(image.height() * 0.32)))
+    path = OUT / "scheme-editor-printed.png"
+    image.save(str(path), "PNG", 9)
+    print(f"{path.name}: {image.width()}×{image.height()}, {path.stat().st_size / 1000:.0f} KB")
+
+
+def save_manuscript_check(app, tmp: Path) -> None:
+    """The Manuscript check page (SPEC §13o), with the made-up manuscript of the tests."""
+    from PySide6.QtCore import Qt
+    from si_assistant.core import manuscript
+    from si_assistant.ui import main_window as mw
+    sys.path.insert(0, str(ROOT / "tests"))
+    import manuscript_samples as samples
+    base = tmp / "ms"
+    base.mkdir()
+    project, _compounds = samples.build_si(base)
+    for name, make in (("Made-up manuscript.pdf", samples.make_pdf),
+                       ("Scheme 2.cdxml", samples.make_cdxml)):
+        make(base / name)
+        manuscript.add_file(project, base / name)
+    folder = project.folder
+    project.close()
+    win = mw.MainWindow()
+    win.prefs.user_name = "A. Researcher"
+    win.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen)
+    win.resize(WIDTH, HEIGHT)
+    win.show()
+    win.open_project(folder)
+    settle(app)
+    win.select(mw.MANUSCRIPT_ITEM, mw.MANUSCRIPT_ITEM)
+    settle(app, 3)
+    save(win, "manuscript-check.png")
+    win.close_project()
+    win.close()
+
+
 def main() -> None:
     from PySide6.QtCore import QSettings, Qt
     from PySide6.QtWidgets import QApplication
-    import PySide6.QtWebEngineWidgets  # noqa: F401  (must come before the application)
     app = QApplication(sys.argv)
     app.setApplicationName("Chem SI Assistant")
     tmp = Path(tempfile.mkdtemp(prefix="csa_shots_"))
@@ -66,6 +139,7 @@ def main() -> None:
         c4 = parts["c4"]
         c4.values["nmr"][1]["text"] = "13C NMR (100 MHz, CDCl3) δ 159.0, 138.1, 126.7, 70.0, 55.3, 25.1"
         project.save_compound(c4)
+        editor_scheme = add_editor_scheme(project, parts["data"])
         folder = project.folder
         project.close()
 
@@ -94,8 +168,12 @@ def main() -> None:
         save(win, "project-overview.png")
         select("compound", parts["c2"].id, 6)
         save(win, "compound-page.png")
-        select("scheme", parts["scheme"].id, 6)
-        save(win, "scheme-page.png")
+        win.act_live.trigger()                  # (the live preview folded away: room for
+        select("scheme", editor_scheme, 4)      # the whole scheme)
+        win.panel.set_collapsed(False)
+        save(win, "scheme-editor.png")
+        win.act_live.trigger()
+        save_compiled_scheme(win.project, editor_scheme)
         select("section", parts["spectra"].id, 4)
         save(win, "spectra-section.png")
         win.act_warnings.setChecked(True)
@@ -116,6 +194,7 @@ def main() -> None:
         dlg.close()
         win.close_project()
         win.close()
+        save_manuscript_check(app, tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

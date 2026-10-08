@@ -7,6 +7,7 @@ import json
 import pytest
 
 from si_assistant.compile.document import Builder, CompileOptions
+from si_assistant.core import scheme_editor as se
 from si_assistant.core import checks, labels, links
 from si_assistant.core.markup import Paragraph, Run, mention_kind, objects, parse, serialize
 from si_assistant.core.tables import Cell, Table, block_from_text
@@ -178,6 +179,7 @@ def doc(project, tmp_path):
     data = p.add_section("data", "Products")
     p.set_id_table(data.id, ["1", "2"])
     scheme = p.add_scheme(data.id, name="Synthesis")
+    se.set_scheme_layout(p, scheme, {**se.scheme_layout(p.settings, scheme), "show_label": True})   # (numbered: SPEC §13p.1)
     c = p.add_compound(data.id, name="Product", scheme_id=scheme.id)
     p.add_field(c, {"key": "files"})
     src = tmp_path / "hplc.png"
@@ -439,3 +441,20 @@ def test_table_page_break_choice(doc):
     p.write_table(owner, t)
     assert p.read_table(owner, d["t1"]).breakable
     assert "split: true)" in builder(p).text_section(d["notes"])
+
+
+def test_a_scheme_without_its_label_is_not_numbered_and_mentions_say_why(doc):
+    """Schemes print without a label or caption by default (SPEC §13p.1): not numbered,
+    and a mention of one prints “??” with a warning saying how to turn the label on."""
+    p, d = doc
+    scheme = d["scheme"]
+    se.set_scheme_layout(p, scheme, {**se.scheme_layout(p.settings, scheme),
+                                     "show_label": False})
+    found = labels.compute(p)
+    assert scheme.id not in found.by_id
+    assert found.label(d["item"]["id"]) == "Figure S3"
+    p.write_front_text("cover", f"See @{{{scheme.id}}}.")
+    assert links.plain_text(p, p.read_front_text("cover")) == "See ??."
+    warnings = [w for w in checks.project_warnings(p) if w.check == "mention"]
+    assert len(warnings) == 1 and "printed without a label" in warnings[0].message
+    assert "Label and caption" in warnings[0].message

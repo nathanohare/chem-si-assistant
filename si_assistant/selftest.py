@@ -3,10 +3,9 @@
     Chem-SI-Assistant --self-test REPORT.json [PROJECT FOLDER]
 
 Checks that everything the program needs came with it — journal styles, word lists and
-dictionaries, icons, the user guide and licences, Ketcher (and that it really starts in Qt
-WebEngine and hands a structure back), RDKit (structures and drawings), Typst, Qt's SVG,
-PDF and web parts — and, given a project folder, compiles
-that project's SI (to its build/ folder, as Compile SI does). The results are written as
+dictionaries, icons, the user guide and licences, RDKit (structures and drawings), Typst,
+Qt's SVG and PDF parts (and that Qt WebEngine, no longer used, was left out) — and, given
+a project folder, compiles that project's SI (to its build/ folder, as Compile SI does). The results are written as
 JSON to REPORT.json (a packaged Windows program has no console to print to); the exit
 code is 0 when every check passed. Used by the release workflow and when building the
 installers by hand; it changes nothing on the computer except the project's build/
@@ -61,8 +60,8 @@ def _files() -> str:
 
 
 def _python() -> str:
-    """Python's own libraries the program relies on: https (update check, Crossref, the
-    Ketcher download), XML, ctypes (Windows clipboard and metafiles), compression."""
+    """Python's own libraries the program relies on: https (update check, Crossref
+    look-ups), XML, ctypes (Windows clipboard and metafiles), compression."""
     import bz2
     import ctypes
     import lzma
@@ -74,13 +73,6 @@ def _python() -> str:
     bz2.compress(b"x")
     ctypes.c_int(1)
     return ssl.OPENSSL_VERSION
-
-
-def _ketcher() -> str:
-    from . import ketcher_setup
-    if not ketcher_setup.installed():
-        raise RuntimeError(f"Ketcher is missing ({ketcher_setup.index_url_path()})")
-    return str(ketcher_setup.index_url_path())
 
 
 def _spelling() -> str:
@@ -121,7 +113,6 @@ def _qt() -> str:
     from PySide6.QtGui import QImage, QPainter
     from PySide6.QtSvg import QSvgRenderer
     import PySide6.QtPdf  # noqa: F401
-    import PySide6.QtWebEngineWidgets  # noqa: F401
     svg = QSvgRenderer(QByteArray(b'<svg xmlns="http://www.w3.org/2000/svg" width="10" '
                                   b'height="10"><rect width="10" height="10"/></svg>'))
     image = QImage(10, 10, QImage.Format.Format_ARGB32)
@@ -131,51 +122,19 @@ def _qt() -> str:
     painter.end()
     if image.pixelColor(5, 5).alpha() == 0:
         raise RuntimeError("Qt SVG drew nothing")
-    return "QtSvg, QtPdf, QtWebEngine"
+    if resources.is_frozen() and _module_shipped("PySide6.QtWebEngineCore"):
+        # (SPEC §13n.2: the structure editor and its web engine were removed; shipping
+        # the engine would only make the installers ~200 MB larger.)
+        raise RuntimeError("Qt WebEngine is bundled, but the program no longer uses it")
+    return "QtSvg, QtPdf (no Qt WebEngine)"
 
 
-def _wait(condition: Callable[[], bool], seconds: float) -> bool:
-    """Let Qt work until `condition()` is true (True) or `seconds` have passed (False)."""
-    from PySide6.QtCore import QCoreApplication, QEventLoop
-    end = time.monotonic() + seconds
-    while time.monotonic() < end:
-        QCoreApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, 100)
-        if condition():
-            return True
-        time.sleep(0.02)
-    return condition()
-
-
-def _ketcher_runs() -> str:
-    """Ketcher really starts in Qt WebEngine (its helper program, resources and language
-    files all came with the program): load a structure, read it back as a MOL block."""
-    from .core import chem
-    from .ui.ketcher_dialog import KetcherDialog
-    smiles = "CC(=O)N(C)Cc1ccccc1"
-    dialog = KetcherDialog(smiles)
+def _module_shipped(name: str) -> bool:
+    import importlib.util
     try:
-        dialog.show()
-        if not _wait(lambda: dialog._ready, 90):
-            raise RuntimeError("Ketcher did not start within 90 s")
-        molfile, end = "", time.monotonic() + 60
-        while time.monotonic() < end:   # (setting the structure takes Ketcher a moment)
-            dialog._result = ""
-            dialog.status.setText("")
-            dialog._fetch()
-            _wait(lambda: bool(dialog._result) or "⚠" in dialog.status.text(), 30)
-            molfile = dialog._result
-            if "V2000" in molfile or "V3000" in molfile:
-                try:
-                    mol = chem.parse_structure(molfile)
-                except chem.ChemError:   # (still empty: try again)
-                    mol = None
-                if mol is not None and mol.GetNumAtoms() == 12:
-                    return f"{smiles} drawn and read back as a MOL block"
-            _wait(lambda: False, 0.5)
-        raise RuntimeError(f"the structure did not come back ({dialog.status.text()!r})")
-    finally:
-        dialog.close()
-        dialog.deleteLater()
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def _compile(folder: Path) -> str:
@@ -200,8 +159,8 @@ def _compile(folder: Path) -> str:
 def run(report: Path, project: Path | None = None) -> int:
     """Run every check, write `report` (JSON) and return the exit code (0 = all passed)."""
     checks: list[tuple[str, Callable[[], str]]] = [
-        ("files", _files), ("python", _python), ("ketcher", _ketcher), ("spelling", _spelling),
-        ("rdkit", _rdkit), ("typst", _typst), ("qt", _qt), ("ketcher-runs", _ketcher_runs)]
+        ("files", _files), ("python", _python), ("spelling", _spelling),
+        ("rdkit", _rdkit), ("typst", _typst), ("qt", _qt)]
     if project is not None:
         checks.append(("compile", lambda: _compile(project)))
     results = {}

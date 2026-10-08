@@ -13,8 +13,7 @@ Used by the release workflow (.github/workflows/release.yml) and by hand:
 
 `build` runs PyInstaller with packaging/chem_si_assistant.spec: one folder holding the
 program and everything it needs (Python, Qt, RDKit, Typst, the journal styles, word lists,
-Ketcher, the user guide, the licences). Ketcher must have been fetched first
-(`python -m si_assistant.ketcher_setup`). The installers are then made from that folder:
+the user guide, the licences). The installers are then made from that folder:
 Inno Setup on Windows (packaging/windows/installer.iss), a .dmg on macOS, an AppImage on
 Linux (the workflow does those steps).
 
@@ -136,7 +135,6 @@ def data_files(root: Path = ROOT) -> list[tuple[str, str]]:
     pairs = [(str(pkg / "styles" / "*.typ"), "si_assistant/styles"),
              (str(pkg / "data" / "*.txt"), "si_assistant/data"),
              (str(pkg / "icons" / "*"), "si_assistant/icons"),
-             (str(pkg / "vendor" / "ketcher"), "si_assistant/vendor/ketcher"),
              (str(root / "LICENSE"), "."),
              (str(root / "THIRD_PARTY_NOTICES.md"), "."),
              (str(root / "docs" / "user-guide.md"), "docs")]
@@ -145,23 +143,30 @@ def data_files(root: Path = ROOT) -> list[tuple[str, str]]:
     return pairs
 
 
-# Qt parts PyInstaller would bring along that the program never uses (it shows Ketcher
-# with Qt WebEngine's widgets, not with QML): Python modules not to collect…
+# Qt parts PyInstaller would bring along that the program never uses. The program uses
+# only QtCore, QtGui, QtWidgets, QtSvg, QtPdf and QtPdfWidgets. Qt WebEngine (a whole
+# web browser, ~200 MB) is left out since the structure editor that needed it was removed
+# (SPEC §13n.2). Python modules not to collect…
 QT_EXCLUDES = ["PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets",
                "PySide6.QtOpenGL", "PySide6.QtOpenGLWidgets", "PySide6.Qt3DCore",
                "PySide6.QtQuick3D", "PySide6.QtCharts", "PySide6.QtGraphs",
-               "PySide6.QtMultimedia", "PySide6.QtDesigner", "PySide6.QtSql", "PySide6.QtTest"]
-# …and files not to ship (paths inside the program, with "/"):
-#  * Qt WebEngine's debug and developer-tools data (about 85 MB);
-#  * its interface languages other than English (Ketcher's own interface is English);
+               "PySide6.QtMultimedia", "PySide6.QtDesigner", "PySide6.QtSql", "PySide6.QtTest",
+               "PySide6.QtWebEngineCore", "PySide6.QtWebEngineWidgets",
+               "PySide6.QtWebEngineQuick", "PySide6.QtWebChannel", "PySide6.QtWebSockets",
+               "PySide6.QtWebView", "PySide6.QtPositioning"]
+# …and files not to ship (paths inside the program, with "/"), in case another part
+# brings them along anyway:
+#  * everything of Qt WebEngine: its libraries, helper program, data and languages;
 #  * Qt's translations of its own dialogs (the program's interface is English);
 #  * QML plugins (the program has no QML).
-# (Qt's folders are PySide6/… on Windows, PySide6/Qt/… on macOS and Linux, and inside
-# QtWebEngineCore.framework/Resources/ on macOS.)
-_DROP = (re.compile(r"(^|/)qtwebengine_[^/]*\.debug\.pak$"),
-         re.compile(r"(^|/)v8_context_snapshot[^/]*\.debug\.bin$"),
-         re.compile(r"(^|/)qtwebengine_devtools_resources\.pak$"),
-         re.compile(r"(^|/)qtwebengine_locales/(?!en-US\.pak$)[^/]+$"),
+# (Qt's folders are PySide6/… on Windows, PySide6/Qt/… on macOS and Linux; on macOS Qt
+# WebEngine is QtWebEngineCore.framework.)
+_DROP = (re.compile(r"(^|/)(lib)?Qt6?(WebEngine|WebChannel|WebSockets|Positioning)[^/]*$"),
+         re.compile(r"(^|/)Qt(WebEngine|WebChannel|Positioning)[^/]*\.framework/"),
+         re.compile(r"(^|/)QtWebEngineProcess[^/]*$"),
+         re.compile(r"(^|/)qtwebengine_[^/]*$"),
+         re.compile(r"(^|/)qtwebengine_locales/"),
+         re.compile(r"(^|/)PySide6/(Qt/)?resources/(icudtl\.dat|v8_context_snapshot[^/]*)$"),
          re.compile(r"(^|/)PySide6/(Qt/)?translations/[^/]+\.qm$"),
          re.compile(r"(^|/)PySide6/(Qt/)?qml/"),
          re.compile(r"(^|/)PySide6/(Qt/)?plugins/qmltooling/"))
@@ -174,9 +179,8 @@ def keep_in_bundle(dest: str) -> bool:
 
 
 def missing_sources(root: Path = ROOT) -> list[str]:
-    """What must exist before building (Ketcher is downloaded, not kept with the code)."""
-    needed = [root / "si_assistant" / "vendor" / "ketcher" / "index.html",
-              root / "LICENSE", root / "THIRD_PARTY_NOTICES.md",
+    """What must exist before building (all of it is kept with the code)."""
+    needed = [root / "LICENSE", root / "THIRD_PARTY_NOTICES.md",
               root / "docs" / "user-guide.md", root / "si_assistant" / "icons" / "app_icon.ico",
               root / "si_assistant" / "icons" / "app_icon.svg"]
     return [str(p.relative_to(root)) for p in needed if not p.exists()]
@@ -284,9 +288,7 @@ def build(dist: Path, work: Path) -> Path:
     """Run PyInstaller; returns the built program's folder (or the .app on macOS)."""
     missing = missing_sources()
     if missing:
-        raise SystemExit("Can't build yet, missing: " + ", ".join(missing)
-                         + ("\n(Ketcher: run  python -m si_assistant.ketcher_setup)"
-                            if any("ketcher" in m for m in missing) else ""))
+        raise SystemExit("Can't build yet, missing: " + ", ".join(missing))
     # Absolute: PyInstaller reads relative paths in the spec from the spec's own folder.
     work, dist = Path(work).resolve(), Path(dist).resolve()
     icons = make_icons(work / "icons")
@@ -313,10 +315,10 @@ def bundle_data_dir(app_dir: Path, platform: str = sys.platform) -> Path:
 
 
 def verify(app_dir: Path, platform: str = sys.platform) -> list[str]:
-    """What is missing from a built program (empty when complete)."""
+    """What is missing from a built program, or should not be in it (empty when all is
+    well)."""
     data = bundle_data_dir(app_dir, platform)
-    needed = [data / "si_assistant" / "vendor" / "ketcher" / "index.html",
-              data / "si_assistant" / "styles" / "acs.typ",
+    needed = [data / "si_assistant" / "styles" / "acs.typ",
               data / "si_assistant" / "data" / "azman_chemistry_dictionary.txt",
               data / "si_assistant" / "icons" / "app_icon_256.png",
               data / "spellchecker" / "resources" / "en.json.gz",
@@ -324,9 +326,10 @@ def verify(app_dir: Path, platform: str = sys.platform) -> list[str]:
               data / "docs" / "user-guide.md", data / "LICENSE",
               data / "THIRD_PARTY_NOTICES.md", executable(app_dir, platform)]
     missing = [str(p) for p in needed if not p.exists()]
-    process = "QtWebEngineProcess.exe" if platform.startswith("win") else "QtWebEngineProcess"
-    if not any(Path(app_dir).rglob(process)):
-        missing.append(process)
+    # Qt WebEngine is no longer used (SPEC §13n.2): it must not have come along.
+    for found in Path(app_dir).rglob("*WebEngine*"):
+        missing.append(f"should not be there: {found}")
+        break
     return missing
 
 
@@ -456,8 +459,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "verify":
         missing = verify(Path(args.app))
         for m in missing:
-            print(f"missing: {m}", file=sys.stderr)
-        print("complete" if not missing else f"{len(missing)} missing")
+            print(m if m.startswith("should not") else f"missing: {m}", file=sys.stderr)
+        print("complete" if not missing else f"{len(missing)} problem(s)")
         return 1 if missing else 0
     if args.command == "smoke":
         code = smoke(Path(args.exe))

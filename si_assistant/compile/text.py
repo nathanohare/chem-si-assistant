@@ -1,7 +1,7 @@
 """Turning stored text into Typst, and the automatic text formatting (SPEC §7.3).
 
 Text is handled as paragraphs of runs (core/markup.py): each run is plain text
-with bold / italic / superscript / subscript. Formatting helpers split plain
+with bold / italic / underline / superscript / subscript. Formatting helpers split plain
 runs further (e.g. "CDCl3" -> "CDCl" + subscript "3"); then every run is written
 to Typst as a quoted string, so no character in the user's text can ever be
 mistaken for Typst syntax.
@@ -41,9 +41,10 @@ def linked(runs: list[Run], n: int, target: str) -> list[Run]:
             out.append(r)
             continue
         head, tail = r.text[:left], r.text[left:]
-        out.append(LinkedRun(head, r.bold, r.italic, r.valign, target=target))
+        out.append(LinkedRun(head, r.bold, r.italic, r.valign, underline=r.underline,
+                             target=target))
         if tail:
-            out.append(Run(tail, r.bold, r.italic, r.valign))
+            out.append(Run(tail, r.bold, r.italic, r.valign, underline=r.underline))
         left -= len(head)
     return out
 
@@ -71,6 +72,8 @@ def run_to_typst(run: Run) -> str:
         out = f"#emph[{out}]"
     if run.bold:
         out = f"#strong[{out}]"
+    if run.underline:
+        out = f"#underline[{out}]"
     return out
 
 
@@ -114,7 +117,8 @@ def resolve_links(runs: list[Run], mention_text, known_refs: set[str] | None,
                 if problems is not None:
                     problems.append(f"A mention points to a {kind} that no longer exists "
                                     "(printed as “??”).")
-            out.append(Run(text, kind == "compound" or r.bold, r.italic, r.valign))
+            out.append(Run(text, kind == "compound" or r.bold, r.italic, r.valign,
+                           underline=r.underline))
         elif r.ref:
             ids = r.citations
             if known_refs is not None:
@@ -124,7 +128,8 @@ def resolve_links(runs: list[Run], mention_text, known_refs: set[str] | None,
                     problems.append("A citation points to a reference that is no longer in "
                                     "the References list; it was left out.")
             if ids:
-                out.append(Run("", r.bold, r.italic, r.valign, "cite:" + ",".join(ids)))
+                out.append(Run("", r.bold, r.italic, r.valign, "cite:" + ",".join(ids),
+                               underline=r.underline))
         else:
             out.append(r)
     return out
@@ -177,13 +182,14 @@ def _split(runs: list[Run], pattern: re.Pattern, make) -> list[Run]:
         pos = 0
         for m in pattern.finditer(run.text):
             if m.start() > pos:
-                out.append(Run(run.text[pos:m.start()], run.bold, run.italic))
+                out.append(Run(run.text[pos:m.start()], run.bold, run.italic,
+                               underline=run.underline))
             for piece in make(m):
                 out.append(Run(piece.text, run.bold or piece.bold, run.italic or piece.italic,
-                               piece.valign))
+                               piece.valign, underline=run.underline or piece.underline))
             pos = m.end()
         if pos < len(run.text):
-            out.append(Run(run.text[pos:], run.bold, run.italic))
+            out.append(Run(run.text[pos:], run.bold, run.italic, underline=run.underline))
     return [r for r in out if r.text or r.ref]
 
 
@@ -273,7 +279,7 @@ def _merge(runs: list[Run]) -> list[Run]:
     out: list[Run] = []
     for r in runs:
         if out and out[-1].same_format(r):
-            out[-1] = Run(out[-1].text + r.text, r.bold, r.italic, r.valign)
+            out[-1] = r.but(text=out[-1].text + r.text)
         else:
             out.append(r)
     return out

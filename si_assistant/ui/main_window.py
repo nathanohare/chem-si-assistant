@@ -35,6 +35,7 @@ from .front_matter import PANELS as FRONT_PANELS, FrontMatterOverview
 from .live_preview import MIN_WIDTH as MIN_PREVIEW_WIDTH, LivePreviewPane
 from .panels import FileSectionPanel, SectionPanel, TextSectionPanel
 from .project_dashboard import ProjectDashboard
+from . import hrms_reports_ui as hrms_ui
 from .spectra_page import SpectraPagePanel
 from .spectra_panel import SpectraSectionPanel
 
@@ -45,9 +46,19 @@ KIND_ROLE = Qt.ItemDataRole.UserRole + 1   # "project" (the dashboard, id "proje
                                            # "section", "scheme", "compound", "front_root",
                                            # "front" (id "cover", "toc" or "general") or
                                            # "spectra_page" (a compound's spectra; its id)
+                                           # or "references" (the reference list) or
+                                           # "manuscript" (the Manuscript check)
 TYPE_ROLE = Qt.ItemDataRole.UserRole + 2   # section type: "text", "file", "data", "spectra"
 PROJECT_ITEM = "project"                   # the project item's kind and id (SPEC §13k.3)
-FIXED_KINDS = (PROJECT_ITEM, "front_root", "front")   # never moved, renamed or deleted
+REFERENCES_ITEM = "references"             # its kind and id (SPEC §13n.10): always last
+MANUSCRIPT_ITEM = "manuscript"             # the Manuscript check (SPEC §13o): just above it
+# The Spectra section's own items: one page per compound with spectra, and "HRMS reports"
+# (SPEC §13n.3); they follow the compounds and can't be moved, renamed or deleted.
+HRMS_ITEM = "hrms_reports"
+SPECTRA_CHILDREN = ("spectra_page", HRMS_ITEM)
+FIXED_KINDS = (PROJECT_ITEM, "front_root", "front", MANUSCRIPT_ITEM,   # never moved,
+               REFERENCES_ITEM)                                     # renamed or deleted
+BOTTOM_KINDS = (MANUSCRIPT_ITEM, REFERENCES_ITEM)   # fixed items below the sections
 PANEL_TYPES = {"text": TextSectionPanel, "file": FileSectionPanel, "data": DataSectionPanel,
                SPECTRA_SECTION: SpectraSectionPanel}
 DELETE_TIP = "Delete the selected item (it goes to the project Trash)"
@@ -237,13 +248,15 @@ class WelcomePage(QWidget):
 
 class SectionTree(QTreeWidget):
     """The project item first (its dashboard, SPEC §13k.3), then the fixed "Front
-    matter" item (Cover page, Table of contents, General Information), then the sections. Custom sections contain sub-sections (any type, down
-    to 1.1.1); Data sections contain compounds and scheme pages; scheme pages contain
-    their compounds.
+    matter" item (Cover page, Table of contents, General Information), then the sections,
+    then the fixed "References" item (the reference list, SPEC §13n.10). Custom sections
+    contain sub-sections (any type, down to 1.1.1); Data sections contain compounds and
+    scheme pages; scheme pages contain their compounds.
 
     Drag-and-drop rules: sections move before/after other sections or into custom
-    sections; the project and front matter items cannot be moved and nothing can be
-    dropped into them (a section dropped on them goes first, after the front matter); scheme
+    sections; the project, front matter and References items cannot be moved and nothing
+    can be dropped into them (a section dropped on the first two goes first, after the
+    front matter; one dropped on References goes last, just before it); scheme
     pages move within or between Data sections; compounds move within or between Data
     sections and scheme pages. The tree only reports where something was dropped; the
     main window updates the project and rebuilds the tree.
@@ -267,6 +280,11 @@ class SectionTree(QTreeWidget):
     def _index(item: QTreeWidgetItem) -> int:
         return item.parent().indexOfChild(item)
 
+    def top_section_count(self) -> int:
+        """How many sections there are at the top level (the fixed items don't count)."""
+        return sum(1 for i in range(self.topLevelItemCount())
+                   if self.topLevelItem(i).data(0, KIND_ROLE) == "section")
+
     def section_index(self, item: QTreeWidgetItem) -> int:
         """A section item's position among its sibling sections (the project and front
         matter items at the very top do not count)."""
@@ -281,8 +299,9 @@ class SectionTree(QTreeWidget):
     def _section_drop(self, dragged, target, where):
         """("section", parent id or "", slot) for a dragged section, or None."""
         DIP = QAbstractItemView.DropIndicatorPosition
-        if target is None:
-            spot = ("section", "", self.topLevelItemCount())
+        if target is None or target.data(0, KIND_ROLE) in BOTTOM_KINDS:
+            spot = ("section", "", self.top_section_count())   # last, before the fixed
+            #                                                    items at the bottom
         elif target.data(0, KIND_ROLE) in FIXED_KINDS:
             spot = ("section", "", 0)   # right after the front matter
         else:
@@ -315,7 +334,7 @@ class SectionTree(QTreeWidget):
         if kind not in ("compound", "scheme") or target is None:
             return None
         t_kind = target.data(0, KIND_ROLE)
-        if t_kind in (*FIXED_KINDS, "spectra_page"):
+        if t_kind in (*FIXED_KINDS, *SPECTRA_CHILDREN):
             return None
         first_inside = where == DIP.BelowItem and target.isExpanded() and target.childCount()
 
@@ -538,9 +557,11 @@ class MainWindow(QMainWindow):
                                 "Ctrl+Shift+W", tip="Show every warning and flag in the project",
                                 icon=SP.SP_MessageBoxWarning)
         self.act_warnings.setCheckable(True)
+        # (The References page at the bottom of the tree, SPEC §13n.10; no toolbar button.)
         self.act_references = act("References", self.show_references, "Ctrl+Shift+R",
-                                  tip="The project's reference list: add by DOI, by hand or "
-                                      "from BibTeX/RIS", icon=SP.SP_FileDialogInfoView)
+                                  tip="The project's reference list (the References item at "
+                                      "the bottom of the tree): add by DOI, by hand or from "
+                                      "BibTeX/RIS", icon=SP.SP_FileDialogInfoView)
         self._preview: PreviewWindow | None = None
 
         file_menu = self.menuBar().addMenu("&File")
@@ -659,7 +680,6 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addActions([self.act_compile, self.act_preview, self.act_live, self.act_warnings])
         toolbar.addSeparator()
-        toolbar.addAction(self.act_references)
         toolbar.addAction(self.act_settings)
         toolbar.addAction(self.act_trash)
 
@@ -779,7 +799,7 @@ class MainWindow(QMainWindow):
         if isinstance(panel, DataSectionPanel):
             info["page"] = {"tab": panel.tabs.currentIndex()}
         elif isinstance(panel, SchemePanel):
-            # (its compound tab is the tree item; whether the scheme picture is folded away)
+            # (its compound tab is the tree item; whether the scheme is folded away)
             info["page"] = {"scheme_collapsed": panel.collapse_btn.isChecked()}
         return info
 
@@ -856,7 +876,8 @@ class MainWindow(QMainWindow):
             self.warnings_dock.hide()
         self.act_snapshot.setEnabled(writable)
         self.act_compile.setEnabled(writable)  # compiling writes to the project's build/ folder
-        self.act_preview.setEnabled(writable and kind not in (None, "front_root", PROJECT_ITEM))
+        self.act_preview.setEnabled(writable and kind not in (None, "front_root", PROJECT_ITEM,
+                                                              *BOTTOM_KINDS))
         for a in self.act_new_section.values():
             a.setEnabled(writable)
         self.new_section_button.setEnabled(writable)
@@ -868,7 +889,7 @@ class MainWindow(QMainWindow):
         self.act_new_scheme.setEnabled(writable and self._target_data_section() is not None)
         # The project item and the front matter are fixed: they cannot be renamed, deleted
         # or moved; nor can the compounds' spectra pages (they follow the compounds).
-        movable = writable and kind not in (None, *FIXED_KINDS, "spectra_page")
+        movable = writable and kind not in (None, *FIXED_KINDS, *SPECTRA_CHILDREN)
         for a in (self.act_rename, self.act_delete, self.act_up, self.act_down):
             a.setEnabled(movable)
         # The Spectra section can be moved and renamed, but never deleted (SPEC §13k.12).
@@ -1155,6 +1176,9 @@ class MainWindow(QMainWindow):
                 # _refresh_labels; kept up to date by _sync_spectra_pages).
                 for c in spectra_mod.compounds_with_spectra(self.project):
                     make(sec, "spectra_page", c.id, "", fixed).setIcon(0, spectrum_icon())
+                if hrms_ui.any_reports(self.project):
+                    self._hrms_tree_item(make(sec, HRMS_ITEM, HRMS_ITEM, "HRMS reports",
+                                              fixed))
             for item in s.items:
                 if isinstance(item, SchemePage):
                     k = make(sec, "scheme", item.id, item.name)
@@ -1169,6 +1193,18 @@ class MainWindow(QMainWindow):
 
         for s in self.project.top_sections:
             add_section(None, s, 1)
+        # The Manuscript check (SPEC §13o) and the reference list (SPEC §13n.10): always
+        # last, fixed like the front matter.
+        ms_item = make(None, MANUSCRIPT_ITEM, MANUSCRIPT_ITEM, "Manuscript check", fixed)
+        ms_item.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        ms_item.setToolTip(0, "Compare the manuscript (PDF or Word, and its ChemDraw files) "
+                              "with the SI: IDs, structures, yields, ee/er, dr, names and "
+                              "footnoted conditions. Never printed.")
+        refs_item = make(None, REFERENCES_ITEM, REFERENCES_ITEM, "References", fixed)
+        refs_item.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_FileDialogInfoView))
+        refs_item.setToolTip(0, "The project's reference list: add by DOI, by hand or from "
+                                "BibTeX/RIS. Only cited references are printed, at the end "
+                                "of the SI.")
         self._refresh_labels()
         if not rebuild_panel:
             if to_select is not None:
@@ -1210,6 +1246,12 @@ class MainWindow(QMainWindow):
         if kind is not None:
             self._flush_panel()
             self._show(kind, item_id)
+
+    def _manuscript_changed(self) -> None:
+        """The Manuscript check read files or a result was dismissed: the Warnings panel's
+        "Manuscript" group follows."""
+        if self.warnings_dock.isVisible():
+            self._warnings_timer.start()
 
     def _refresh_labels(self) -> None:
         """Update compound and scheme labels (ID, name, warnings, flags) without rebuilding."""
@@ -1264,33 +1306,46 @@ class MainWindow(QMainWindow):
         parent = self._find_item("section", section.id) if section is not None else None
         if parent is None:
             return
-        wanted = [c.id for c in spectra_mod.compounds_with_spectra(self.project)]
-        have = [parent.child(i).data(0, ID_ROLE) for i in range(parent.childCount())]
+        wanted = [("spectra_page", c.id)
+                  for c in spectra_mod.compounds_with_spectra(self.project)]
+        if hrms_ui.any_reports(self.project):   # (SPEC §13n.3)
+            wanted.append((HRMS_ITEM, HRMS_ITEM))
+        have = [(parent.child(i).data(0, KIND_ROLE), parent.child(i).data(0, ID_ROLE))
+                for i in range(parent.childCount())]
         if wanted == have:
             return
         current = self.tree.currentItem()
         lost = current is not None and current.parent() is parent and \
-            current.data(0, ID_ROLE) not in wanted
+            (current.data(0, KIND_ROLE), current.data(0, ID_ROLE)) not in wanted
         updating, self._updating_tree = self._updating_tree, True
-        kept = {parent.child(i).data(0, ID_ROLE): parent.child(i)
-                for i in range(parent.childCount())}
+        kept = {(parent.child(i).data(0, KIND_ROLE), parent.child(i).data(0, ID_ROLE)):
+                parent.child(i) for i in range(parent.childCount())}
         while parent.childCount():
             parent.takeChild(0)
         fixed = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        for cid in wanted:
-            item = kept.get(cid)
+        for kind, cid in wanted:
+            item = kept.get((kind, cid))
             if item is None:
-                item = QTreeWidgetItem([""])
+                item = QTreeWidgetItem(["HRMS reports" if kind == HRMS_ITEM else ""])
                 item.setData(0, ID_ROLE, cid)
-                item.setData(0, KIND_ROLE, "spectra_page")
+                item.setData(0, KIND_ROLE, kind)
                 item.setFlags(fixed)
-                item.setIcon(0, spectrum_icon())
+                if kind == HRMS_ITEM:
+                    self._hrms_tree_item(item)
+                else:
+                    item.setIcon(0, spectrum_icon())
             parent.addChild(item)
         if current is not None and not lost and current.parent() is parent:
             self.tree.setCurrentItem(current)   # (taking it out cleared the selection)
         self._updating_tree = updating
         if lost and not updating:
             self.tree.setCurrentItem(parent)
+
+    def _hrms_tree_item(self, item: QTreeWidgetItem) -> None:
+        item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
+        item.setToolTip(0, "The compounds' HRMS report files, printed at the end of the "
+                           "Spectra section when “Print HRMS reports” is on (shows what will "
+                           "print)")
 
     def _current(self) -> tuple[str | None, str | None]:
         item = self.tree.currentItem()
@@ -1474,11 +1529,14 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
             menu.addAction("Open the compound page",
                            lambda cid=item.data(0, ID_ROLE): self.select("compound", cid))
-        elif item is not None and item.data(0, KIND_ROLE) not in FIXED_KINDS:
+        elif item is not None and item.data(0, KIND_ROLE) in (*FIXED_KINDS, HRMS_ITEM):
+            pass
+        elif item is not None:
             menu.addSeparator()
             menu.addActions([self.act_rename, self.act_delete, self.act_up, self.act_down])
             kind, item_id = item.data(0, KIND_ROLE), item.data(0, ID_ROLE)
             if kind in ("compound", "scheme") and not self.project.read_only:
+                menu.addAction("Duplicate…", lambda: self.duplicate_item(kind, item_id))
                 self._add_move_menu(menu, kind, item_id)
             if kind == "section" and not self.project.read_only:
                 self._add_section_move_menu(menu, item_id)
@@ -1593,6 +1651,10 @@ class MainWindow(QMainWindow):
             # (after the click has finished: the page is replaced)
             panel.open_compound.connect(
                 lambda cid: QTimer.singleShot(0, lambda: self.select("compound", cid)))
+        elif kind == HRMS_ITEM:
+            panel = hrms_ui.HrmsReportsPage(self.project)
+            panel.open_compound.connect(
+                lambda cid: QTimer.singleShot(0, lambda: self.select("compound", cid)))
         elif kind == PROJECT_ITEM:
             panel = ProjectDashboard(self.project)
             panel.open_compound.connect(self.open_compound_at)
@@ -1606,6 +1668,16 @@ class MainWindow(QMainWindow):
             panel = FRONT_PANELS[item_id](self.project)
             # The title and authors appear in the window title and page header example.
             panel.saved.connect(lambda _msg: self._update_ui_state())
+        elif kind == MANUSCRIPT_ITEM:
+            from .manuscript_ui import ManuscriptPage
+            panel = ManuscriptPage(self.project)
+            panel.open_compound.connect(self.open_compound_at)
+            panel.changed.connect(self._manuscript_changed)
+        elif kind == REFERENCES_ITEM:
+            from .references_ui import ReferencesPage
+            panel = ReferencesPage(self.project)
+            # Citation chips and "missing reference" warnings may change with the list.
+            panel.saved.connect(lambda _msg: self._refresh_labels())
         else:
             section = self.project.section(item_id)
             panel = PANEL_TYPES[section.type](self.project, section)
@@ -1614,6 +1686,7 @@ class MainWindow(QMainWindow):
                 panel.ids_changed.connect(self._refresh_labels)
                 panel.open_compound.connect(self.open_compound_at)
                 panel.new_compound_requested.connect(self.new_compound)
+                panel.pages_requested.connect(self.pages_for_ids)
         panel.saved.connect(lambda msg: self.statusBar().showMessage(msg, 2500))
         panel.saved.connect(lambda _msg: self.preview_pane.schedule())
         self._set_panel(panel)
@@ -1684,23 +1757,27 @@ class MainWindow(QMainWindow):
     def _preview_target(self) -> tuple[str, str] | None:
         """What the live preview shows for the page on show (CompileOptions.only), or
         None for pages without one: the Data section overview and the Front matter item.
-        On a scheme page it follows the tree: the whole scheme page, or one compound
-        once one of its tabs (or tree items) is picked."""
+        On a scheme page it is always the whole scheme page, also while one of its
+        compounds is being edited (SPEC §13p.3): the compound prints with its scheme."""
         panel = self.panel
         if self.project is None or panel is None:
             return None
         kind, item_id = self._current()
         if isinstance(panel, SchemePanel):
-            compound_id = panel.current_compound_id()
-            if kind == "compound" and compound_id:
-                return ("compound", compound_id)
             return ("scheme", panel.scheme.id)
         if isinstance(panel, CompoundPanel):
+            if panel.compound.scheme_id:
+                return ("scheme", panel.compound.scheme_id)
             return ("compound", panel.compound.id)
         if isinstance(panel, SpectraPagePanel):
             return ("spectra", panel.compound.id)
+        if isinstance(panel, hrms_ui.HrmsReportsPage):
+            return ("hrms", "")
         if isinstance(panel, (DataSectionPanel, FrontMatterOverview, ProjectDashboard)):
             return None
+        if kind in BOTTOM_KINDS:
+            return None   # (the list itself is the page; compiled, only cited ones print;
+            #               the manuscript check is never printed)
         if isinstance(panel, SectionPanel):
             return ("section", panel.section.id)
         for key, cls in FRONT_PANELS.items():
@@ -1839,6 +1916,8 @@ class MainWindow(QMainWindow):
                 return f"Edit {p.id_report().display_id(item_id)}"
             if kind == "spectra_page":
                 return f"Edit the spectra of {p.id_report().display_id(item_id)}"
+            if kind == HRMS_ITEM:
+                return "HRMS reports"
             if kind == "scheme":
                 return f"Edit scheme page “{p.scheme(item_id).name}”"
             if kind == "section":
@@ -1848,6 +1927,10 @@ class MainWindow(QMainWindow):
                 return f"Edit section “{section.name}”"
             if kind == "front":
                 return f"Edit {front.FRONT_PAGES[item_id]}"
+            if kind == REFERENCES_ITEM:
+                return "Edit references"
+            if kind == MANUSCRIPT_ITEM:
+                return "Manuscript check"
             if kind == PROJECT_ITEM:
                 return "Change the project dashboard"
         except (KeyError, AttributeError):
@@ -1967,12 +2050,14 @@ class MainWindow(QMainWindow):
                 item_id, kind = self.project.compound(item_id).section_id, "section"
             elif kind == "scheme":
                 item_id, kind = self.project.scheme(item_id).section_id, "section"
-            elif kind == "spectra_page" and self.project.spectra_section is not None:
+            elif kind in SPECTRA_CHILDREN and self.project.spectra_section is not None:
                 item_id, kind = self.project.spectra_section.id, "section"
             if kind == "section":
                 section = self.project.section(item_id)
                 parent_id = section.parent_id
                 index = self.project.siblings(section).index(section) + 1
+            elif kind in BOTTOM_KINDS:
+                index = None   # last, just before the Manuscript check and References
             elif kind in FIXED_KINDS:
                 index = 0   # just after the front matter
         title = f"New {label} {'sub-section' if inside else 'section'}"
@@ -2070,14 +2155,82 @@ class MainWindow(QMainWindow):
         self._flush_panel()
         try:
             with self._step("New scheme page") as step:
+                # (drawn with the scheme editor: no blank compound — a product becomes one
+                # when its "Compound" box is ticked, SPEC §13n.4)
                 scheme = self.project.add_scheme(section_id, index)
                 self._place(step, "scheme", scheme.id)
-                self.project.add_compound(section_id, scheme_id=scheme.id)
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not create scheme page", str(e))
             return
         self._collapsed.discard(section_id)
         self._populate_tree(("scheme", scheme.id))
+
+    def pages_for_ids(self, section_id: str) -> None:
+        """The ID table's "Make pages for unused IDs…" (SPEC §13q.4)."""
+        if self.project is None or self.project.read_only:
+            return
+        section = self.project.section(section_id)
+        ids = self.project.ids_without_pages(section)
+        if not ids:
+            return
+        shown = ", ".join(i or "(empty row)" for i in ids[:10]) + (", …" if len(ids) > 10 else "")
+        empty = ids.count("")
+        if QMessageBox.question(
+                self, "Make pages for unused IDs",
+                f"Make {len(ids)} blank compound page(s) at the end of “{section.name}”, "
+                f"for {shown}?"
+                + (f"\n\n{empty} row(s) of the table are empty: those pages will have no "
+                   "ID until you fill them in." if empty else "")
+                + "\n\nThey start with the section's default fields; Edit ▸ Undo removes "
+                  "them again.") != QMessageBox.StandardButton.Yes:
+            return
+        self._flush_panel()
+        tab = self.panel.tabs.currentIndex() if isinstance(self.panel, DataSectionPanel) else 0
+        try:
+            with self._step(f"Make pages for the IDs of “{section.name}”",
+                            [("section", section_id)]):
+                made = self.project.add_pages_for_ids(section_id)
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not make the pages", str(e))
+            made = []
+        self._collapsed.discard(section_id)
+        self._populate_tree(("section", section_id))
+        if isinstance(self.panel, DataSectionPanel):
+            self.panel.tabs.setCurrentIndex(tab)
+        self.statusBar().showMessage(f"Made {len(made)} compound page(s).", 4000)
+
+    def duplicate_item(self, kind: str, item_id: str) -> None:
+        """Duplicate… a compound page or a scheme page (SPEC §13q.3)."""
+        if self.project is None or self.project.read_only:
+            return
+        from ..core import duplicate as dup
+        from .duplicate_ui import DuplicateDialog
+        self._flush_panel()
+        item = (self.project.scheme(item_id) if kind == "scheme"
+                else self.project.compound(item_id))
+        dialog = DuplicateDialog(self.project, item, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        copies, keys, place = dialog.copies.value(), dialog.keys(), dialog.place()
+        what = (f"scheme page “{item.name}”" if kind == "scheme"
+                else self.project.id_report().display_id(item_id))
+        self._set_panel(None)
+        try:
+            with self._step(f"Duplicate {what}" + (f" ({copies} copies)" if copies > 1 else ""),
+                            [(kind, item_id)]) as step:
+                if kind == "scheme":
+                    made = dup.duplicate_scheme(self.project, item, keys, copies, place)
+                else:
+                    made = dup.duplicate_compound(self.project, item, keys, copies, place)
+                self._place(step, kind, made[0].id)
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not duplicate", str(e))
+            self._populate_tree((kind, item_id))
+            return
+        self._collapsed.discard(item.section_id)
+        self._populate_tree((kind, made[0].id))
+        self.statusBar().showMessage(f"Made {len(made)} cop{'y' if len(made) == 1 else 'ies'} "
+                                     f"of {what}.", 4000)
 
     def convert_to_scheme(self, compound_id: str) -> None:
         if self.project is None or self.project.read_only:
@@ -2087,7 +2240,7 @@ class MainWindow(QMainWindow):
                 self, "Change to reaction scheme",
                 f"Make a scheme page for “{compound.name or 'this compound'}”?\n\nThe compound "
                 "becomes the first sub-page of the new scheme page (its data and ID are kept). "
-                "You can then paste the scheme and add the other compounds in it."
+                "You can then draw the scheme and add the other compounds in it."
         ) != QMessageBox.StandardButton.Yes:
             return
         self._flush_panel()
@@ -2160,7 +2313,7 @@ class MainWindow(QMainWindow):
 
     def delete_item(self) -> None:
         kind, item_id = self._current()
-        if kind in (None, *FIXED_KINDS, "spectra_page"):
+        if kind in (None, *FIXED_KINDS, *SPECTRA_CHILDREN):
             return
         if kind == "section":
             section = self.project.section(item_id)
@@ -2240,7 +2393,7 @@ class MainWindow(QMainWindow):
 
     def move_item(self, step: int) -> None:
         kind, item_id = self._current()
-        if kind in (None, *FIXED_KINDS, "spectra_page"):
+        if kind in (None, *FIXED_KINDS, *SPECTRA_CHILDREN):
             return
         self._flush_panel()
         with self._step(self._move_label(kind, item_id), [(kind, item_id)]):
@@ -2280,6 +2433,10 @@ class MainWindow(QMainWindow):
         with self._step("Change project settings"):
             accepted = dlg.exec() and not self.project.read_only
             saved = accepted and self._save(dlg.apply)
+            if saved:
+                # Another HRMS tolerance may change a found m/z filled from the report
+                # files (SPEC §13n.3a); a value typed by hand is never changed.
+                self._save(self.project.refresh_hrms_found)
         if accepted:
             if dlg.user_name():
                 self.prefs.user_name = dlg.user_name()
@@ -2292,18 +2449,18 @@ class MainWindow(QMainWindow):
             self._after_warnings_changed()  # re-rendered pictures: show the new ones
 
     def show_references(self, parent: QWidget | None = None) -> None:
+        """File ▸ References (Ctrl+Shift+R): the References page at the bottom of the tree
+        (SPEC §13n.10). From a text box's Cite list ("Add or edit references…", with
+        parent) the list opens in a window instead, so the page being typed on stays as
+        it is."""
         if self.project is None:
             return
-        from .references_ui import ReferencesDialog
         if isinstance(parent, QWidget):
-            # Opened from an editor's "Cite" box: leave the page as it is (it is in use).
+            from .references_ui import ReferencesDialog
             with self._step("Edit references"):
                 ReferencesDialog(self.project, parent).exec()
             return
-        self._flush_panel()
-        with self._step("Edit references"):
-            ReferencesDialog(self.project, self).exec()
-        self._after_warnings_changed()  # citation warnings and chip labels may have changed
+        self.select(REFERENCES_ITEM, REFERENCES_ITEM)
 
     def show_trash(self) -> None:
         if self.project is None:
@@ -2355,13 +2512,14 @@ class MainWindow(QMainWindow):
         if self.project is None or self.project.read_only:
             return
         kind, item_id = self._current()
-        if kind in (None, "front_root", PROJECT_ITEM):
+        if kind in (None, "front_root", PROJECT_ITEM, *BOTTOM_KINDS):
             return
         self._flush_panel()
         if kind == "compound" and isinstance(self.panel, SchemePanel):
             item_id = self.panel.current_compound_id() or item_id
         options = CompileOptions.from_settings(self.project.settings)
-        options.only = ("spectra" if kind == "spectra_page" else kind, item_id)
+        options.only = ({"spectra_page": "spectra", HRMS_ITEM: "hrms"}.get(kind, kind),
+                        item_id)
         if self._preview is None:
             self._preview = PreviewWindow(self)
         self._preview.release()  # free preview.pdf so it can be rewritten
@@ -2372,6 +2530,8 @@ class MainWindow(QMainWindow):
             what = self.project.id_report().display_id(item_id)
         elif kind == "spectra_page":
             what = f"the spectra of {self.project.id_report().display_id(item_id)}"
+        elif kind == HRMS_ITEM:
+            what = "the HRMS reports"
         elif kind == "scheme":
             what = self.project.scheme(item_id).name
         elif kind == "front":

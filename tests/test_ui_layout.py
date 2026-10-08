@@ -55,24 +55,16 @@ def test_collapse_fields_and_collapse_all(qapp, tmp_path):
     p.close()
 
 
-def test_scheme_collapse_and_save(qapp, tmp_path):
+def test_scheme_collapse(qapp, tmp_path):
     from si_assistant.ui.scheme_panel import SchemePanel
     p, data = new_project(tmp_path)
     scheme = p.add_scheme(data.id)
     p.add_compound(data.id, scheme_id=scheme.id)
-    p.set_scheme_picture(scheme, data=b"\x89PNG")
     panel = SchemePanel(p, scheme, lambda: "Tester", collapsed=True)
-    assert panel.picture_block.isHidden() and panel.collapse_btn.text() == "▸ Scheme"
+    # (the whole scheme editor folds away, SPEC §13n.4)
+    assert panel.scheme_area.isHidden() and panel.collapse_btn.text() == "▸ Scheme"
     panel.set_collapsed(False)
-    assert not panel.picture_block.isHidden()
-    assert not panel.save_btn.isHidden() and panel.edit_btn.isHidden()
-    panel.set_scheme_saved(True)
-    assert panel.save_btn.isHidden() and not panel.edit_btn.isHidden()
-    assert all(b.isHidden() for b in panel.buttons.values())
-    assert not panel.canvas.editable and panel._paste_locked
-    assert Project.open(p.folder).scheme(scheme.id).data["saved"] is True
-    panel.set_scheme_saved(False)
-    assert panel.canvas.editable and not panel._paste_locked
+    assert not panel.scheme_area.isHidden() and panel.collapse_btn.text() == "▾ Scheme"
     panel.flush()
     p.close()
 

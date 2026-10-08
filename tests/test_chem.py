@@ -175,8 +175,8 @@ def test_ppm_error():
 # ---------------------------------------------------------------------- reading structures
 
 def test_an_empty_mol_block_is_reported_not_a_crash():
-    # (what Ketcher returns for an empty drawing)
-    empty = "\n  Ketcher\n\n  0  0  0  0  0  0  0  0  0  0999 V2000\nM  END\n"
+    # (what a drawing program copies for an empty drawing)
+    empty = "\n  Editor\n\n  0  0  0  0  0  0  0  0  0  0999 V2000\nM  END\n"
     with pytest.raises(chem.ChemError, match="no atoms"):
         chem.parse_structure(empty)
 

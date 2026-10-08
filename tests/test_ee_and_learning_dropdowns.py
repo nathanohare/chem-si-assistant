@@ -74,7 +74,10 @@ def test_learned_choices_merge_and_order():
 def test_which_parts_learn():
     learning = {(d.key, p.key) for d in F.ALL_FIELDS.values() for p in d.parts if p.learn}
     assert learning == {("physical_state", "text"), ("rf", "visualization"),
-                        ("ee", "column"), ("ee", "eluent")}
+                        ("ee", "column"), ("ee", "eluent"),
+                        # (the Purification field, SPEC §13q.2)
+                        ("purification", "method"), ("purification", "phase"),
+                        ("purification", "eluent")}
     ee = {p.key: p for p in F.ALL_FIELDS["ee"].parts}
     assert ee["column"].kind == "combo" and ee["column"].choices == ()     # none built in
     assert ee["eluent"].kind == "combo"

@@ -72,17 +72,23 @@ DEFAULTS: dict[str, Any] = {
     "spectrum_frame_width": 0.5,      # pt
     "auto_crop": False,               # 12.8: cut white margins, then fill the slot
     "caption": False,                 # 12.9: "¹H NMR (CDCl₃, 500 MHz)" under the structure
+    "caption_size": 9.0,              # its size in pt (SPEC §13q.1)
     # SPEC §13l.7: links in the PDF. For the whole section, never for one spectrum.
     "nmr_links": False,               # "¹H NMR" at the start of a peak report → its spectrum
     "link_style": "plain",            # how the links look (LINK_STYLES)
     "link_back": False,               # a spectrum's header line → the compound's data
+    # SPEC §13n.3: the compounds' HRMS report files, printed in a sub-section "HRMS
+    # reports" at the end of this section. Each compound can say otherwise (compound.json
+    # hrms.print_reports, core/ms_reports.prints_reports).
+    "hrms_reports": False,
 }
-SECTION_ONLY_KEYS = ("nmr_links", "link_style", "link_back")
+SECTION_ONLY_KEYS = ("nmr_links", "link_style", "link_back", "hrms_reports")
 LINK_STYLES = {"plain": "Like normal text", "blue": "Blue",
                "blue_underline": "Blue and underlined"}
 POSITION_KEYS = ("x", "y")            # a dragged box (page overrides only)
 SCALE_RANGE = (0.25, 4.0)
 ID_SIZE_RANGE = (5.0, 24.0)
+CAPTION_SIZE_RANGE = (5.0, 18.0)
 FRAME_WIDTH_RANGE = (0.1, 5.0)
 STRUCTURE_BOX_IN = (1.5, 1.1)         # the structure's largest size at scale 1.0 (inches)
 
@@ -120,6 +126,8 @@ def _clean_value(key: str, value: Any) -> Any:
         if key == "id_size":
             v = float(value)
             return 0.0 if v <= 0 else min(ID_SIZE_RANGE[1], max(ID_SIZE_RANGE[0], v))
+        if key == "caption_size":
+            return min(CAPTION_SIZE_RANGE[1], max(CAPTION_SIZE_RANGE[0], float(value)))
         if key.endswith("_width"):
             return min(FRAME_WIDTH_RANGE[1], max(FRAME_WIDTH_RANGE[0], float(value)))
     except (TypeError, ValueError):
@@ -500,7 +508,7 @@ GUTTERS_IN = (0.6 / 2.54, 0.8 / 2.54)   # between slots: across, down
 HEADER_IN = 0.24                        # the header line above a spectrum, with its gap
 CORNER_INSET_IN = 0.4 / 2.54            # the box's distance from the spectrum's corner
 STYLE_TEXT_PT = {"ACS": 11.0, "Wiley": 11.0, "RSC": 10.5}   # the ID's size when "auto"
-CAPTION_PT = 9.0                        # the caption under the structure
+CAPTION_PT = DEFAULTS["caption_size"]    # the caption under the structure (its default)
 BOX_INSET_PT = 3.0                      # the box's padding
 
 

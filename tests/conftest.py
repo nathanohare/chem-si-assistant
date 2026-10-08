@@ -56,6 +56,27 @@ def _text_checks_in_temp(monkeypatch, tmp_path_factory):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _pubchem_offline(monkeypatch, tmp_path_factory):
+    """The PubChem name lookup (SPEC §13n.5) never uses the network in tests: a fetcher
+    that fails unless a test puts its own fake one in. Its "Don't show again" setting is
+    kept in a temporary file, and the lookup runs on the main thread."""
+    from PySide6.QtCore import QSettings
+    from si_assistant.core import pubchem
+    from si_assistant.ui import name_lookup
+
+    def no_network(url, timeout):
+        raise pubchem.LookupFailed("No network in tests.")
+
+    folder = tmp_path_factory.mktemp("pubchem")
+    monkeypatch.setattr(name_lookup, "fetcher", no_network)
+    monkeypatch.setattr(name_lookup, "USE_THREAD", False)
+    monkeypatch.setattr(name_lookup, "_note_shown", False)
+    monkeypatch.setattr(name_lookup, "_settings",
+                        lambda: QSettings(str(folder / "prefs.ini"), QSettings.Format.IniFormat))
+    yield
+
+
 @pytest.fixture
 def project(tmp_path):
     from si_assistant.core.project import Project

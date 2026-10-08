@@ -36,9 +36,12 @@ def read_image(path: Path, max_side: int = 0) -> QImage:
     """The picture at `path` (a null QImage if it can't be read). With `max_side`, a
     copy no larger than that many pixels on its longest side, for showing on screen
     (it still records the original's dpi, so don't use it to work out print sizes).
-    An SVG is drawn at SVG_DPI (or to fit `max_side`)."""
+    An SVG, or the first page of a PDF (ChemDraw's copy on macOS, SPEC §13n.1), is drawn
+    at SVG_DPI (or to fit `max_side`)."""
     if Path(path).suffix.lower() == ".svg":
         return render_svg_file(Path(path), SVG_DPI, max_side)
+    if Path(path).suffix.lower() == ".pdf":
+        return render_pdf_file(Path(path), SVG_DPI, max_side)
     reader = QImageReader(str(path))
     reader.setAutoTransform(True)
     size = reader.size()
@@ -76,9 +79,11 @@ def png_dpi(path: Path) -> float | None:
 
 def image_info(path: Path) -> tuple[int, int, float] | None:
     """(width px, height px, dpi) of a raster image, or None if it can't be read. An SVG
-    gives its printed size at DEFAULT_DPI (so width / dpi is its width in inches)."""
-    if Path(path).suffix.lower() == ".svg":
-        size = svg_file_size_in(Path(path))
+    gives its printed size at DEFAULT_DPI (so width / dpi is its width in inches), and so
+    does a PDF (its first page)."""
+    if Path(path).suffix.lower() in (".svg", ".pdf"):
+        size = (svg_file_size_in(Path(path)) if Path(path).suffix.lower() == ".svg"
+                else pdf_size_in(Path(path)))
         if size is None:
             return None
         return max(1, round(size[0] * DEFAULT_DPI)), max(1, round(size[1] * DEFAULT_DPI)), \
@@ -255,6 +260,45 @@ def render_svg_file(path: Path, dpi: float = SVG_DPI, max_side: int = 0) -> QIma
         k = max_side / max(w, h)
         w, h, dpi = w * k, h * k, dpi * k
     image = render_svg_bytes(data, max(1, round(w)), max(1, round(h)))
+    if not image.isNull():
+        dpm = round(dpi / 0.0254)
+        image.setDotsPerMeterX(dpm)
+        image.setDotsPerMeterY(dpm)
+    return image
+
+
+def pdf_size_in(path: Path) -> tuple[float, float] | None:
+    """The size of a PDF's first page in inches (None if it can't be read)."""
+    from PySide6.QtCore import QBuffer, QIODevice
+    from PySide6.QtPdf import QPdfDocument
+    try:
+        data = QByteArray(Path(path).read_bytes())
+    except OSError:
+        return None
+    buffer = QBuffer(data)
+    buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+    doc = QPdfDocument()
+    doc.load(buffer)
+    try:
+        if doc.status() != QPdfDocument.Status.Ready or doc.pageCount() < 1:
+            return None
+        size = doc.pagePointSize(0)
+    finally:
+        doc.close()
+    w, h = size.width() / 72, size.height() / 72
+    return (w, h) if w > 0 and h > 0 else None
+
+
+def render_pdf_file(path: Path, dpi: float = SVG_DPI, max_side: int = 0) -> QImage:
+    """The first page of a PDF drawn on white at `dpi` (or smaller, to fit `max_side`
+    pixels), recording that resolution; a null QImage if it can't be read."""
+    size = pdf_size_in(Path(path))
+    if size is None:
+        return QImage()
+    longest = max(size) * dpi
+    if max_side and longest > max_side:
+        dpi *= max_side / longest
+    image = render_page(Path(path), 1, dpi)
     if not image.isNull():
         dpm = round(dpi / 0.0254)
         image.setDotsPerMeterX(dpm)

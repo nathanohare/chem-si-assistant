@@ -136,16 +136,28 @@ def test_gp_sentence_placeholders(project):
         "flash chromatography afforded 3a as a colorless oil.")
     assert project.field_filled(c, next(d for d in project.field_defs(c) if d.key == "procedure"))
 
-    # Typed values override automatic ones; a missing value is a warning.
+    # A missing value is a warning. A typed {scale} differing from the filled Reaction
+    # scale field is a warning too, and the field is printed (SPEC §13n.9).
     project.update_general_procedure(gp["id"], sentence="Following {GP}, {starting material} "
                                                         "({scale}) was heated to {temperature}.")
     c.values["procedure"]["values"]["scale"] = "0.5 mmol of amide"
     ws = [w for w in checks.all_warnings(project, c, project.id_report()) if w.check == "gp"]
-    assert len(ws) == 1 and "{temperature}" in ws[0].message
+    assert len(ws) == 2 and "{temperature}" in ws[0].message
+    assert ws[1].key == "gp:scale-differs" and "0.20 mmol" in ws[1].message
     text = "".join(r.text for r in links.display_runs(
         project, compound_block(project, c, "3a").paragraphs[0].runs))
-    assert text.startswith("Following General Procedure A, 1a (0.5 mmol of amide) was heated "
+    assert text.startswith("Following General Procedure A, 1a (0.20 mmol) was heated "
                            "to [temperature].")
+    # Typed values override the other automatic ones (§2.7), and {scale} when the Reaction
+    # scale field is empty.
+    c.values["procedure"]["values"]["GP"] = "GP-A"
+    c.values["scale"] = {"value": "", "unit": "mmol"}
+    assert not [w for w in checks.all_warnings(project, c, project.id_report())
+                if w.key == "gp:scale-differs"]
+    text = "".join(r.text for r in links.display_runs(
+        project, compound_block(project, c, "3a").paragraphs[0].runs))
+    assert text.startswith("Following GP-A, 1a (0.5 mmol of amide) was heated")
+    del c.values["procedure"]["values"]["GP"]
 
     # Deleting the GP: the compound keeps its choice and gets a warning; restore brings it back.
     entry = project.delete_general_procedure(gp["id"])

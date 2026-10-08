@@ -7,6 +7,7 @@ from PySide6.QtCore import QMimeData
 from PySide6.QtGui import QGuiApplication, QImage, QTextCursor
 from PySide6.QtWidgets import QMessageBox, QTableWidgetSelectionRange
 
+from si_assistant.core import scheme_editor as se
 from si_assistant.core import labels
 from si_assistant.core.tables import Cell, Table
 from si_assistant.ui import rich_text, text_objects
@@ -258,6 +259,7 @@ def test_mention_picker_lists_figures_tables_and_schemes(setup):
     p, notes, t1, f1, _tmp = setup
     data = p.add_section("data", "Products")
     scheme = p.add_scheme(data.id, name="Route")
+    se.set_scheme_layout(p, scheme, {**se.scheme_layout(p.settings, scheme), "show_label": True})   # (numbered: SPEC §13p.1)
     groups = dict(rich_text.link_context().targets())
     assert [i for i, _t in groups["Tables"]] == [t1]
     assert [i for i, _t in groups["Figures"]] == [f1]
@@ -280,6 +282,7 @@ def test_duplicate_label_is_flagged_in_chips_and_warnings(setup):
     from si_assistant.ui.warnings_panel import WarningsPanel
     data = p.add_section("data", "Products")
     scheme = p.add_scheme(data.id, name="Route")
+    se.set_scheme_layout(p, scheme, {**se.scheme_layout(p.settings, scheme), "show_label": True})   # (numbered: SPEC §13p.1)
     p.set_scheme_label(scheme.id, "Table S1")
     ctx = rich_text.link_context()
     ctx.invalidate()
@@ -317,6 +320,7 @@ def test_scheme_label_and_inline_file_label(qapp, project, tmp_path):
     data = p.add_section("data", "Products")
     p.set_id_table(data.id, ["1"])
     scheme = p.add_scheme(data.id, name="Route")
+    se.set_scheme_layout(p, scheme, {**se.scheme_layout(p.settings, scheme), "show_label": True})   # (numbered: SPEC §13p.1)
     panel = SchemePanel(p, scheme, lambda: "Tester")
     assert panel.label_edit.placeholderText() == "Scheme S1 (automatic)"
     panel.label_edit.setText("Scheme 2b")

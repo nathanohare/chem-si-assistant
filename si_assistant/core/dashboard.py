@@ -402,6 +402,7 @@ CHECK_LABELS = {
     "gp": "General procedures", "mention": "Deleted mentions",
     "citation": "Missing references", "label": "Duplicate labels",
     "object": "Missing figure or table files",
+    "gp_name": "Duplicate procedure names",
 }
 FLAGS_LABEL = "Flagged by a person"
 

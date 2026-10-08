@@ -26,30 +26,66 @@ def test_private_files_and_folders(project, tmp_path):
     assert (c.folder / "private" / "3a_1H.fid" / "fid").read_bytes() == b"raw nmr"
 
 
-def test_wheel_does_not_change_unfocused_dropdown(qapp):
+def _wheel(target, ticks: int = -1):
     from PySide6.QtCore import QPoint, QPointF, Qt
     from PySide6.QtGui import QWheelEvent
-    from PySide6.QtWidgets import QApplication, QComboBox
+    from PySide6.QtWidgets import QApplication
+    ev = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, 120 * ticks),
+                     Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                     Qt.ScrollPhase.NoScrollPhase, False)
+    QApplication.sendEvent(target, ev)
+
+
+def test_wheel_never_changes_a_dropdown(qapp):
+    """SPEC §13n.6: dropdowns and number boxes ignore the wheel even when clicked into
+    (the page scrolls instead)."""
+    from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QScrollArea,
+                                   QSpinBox, QVBoxLayout, QWidget)
     from si_assistant.ui.wheel_guard import WheelGuard
     guard = WheelGuard()
     QApplication.instance().installEventFilter(guard)
     try:
+        page = QWidget()
+        layout = QVBoxLayout(page)
         box = QComboBox()
         box.addItems(["mmol", "µmol", "mol"])
-
-        def wheel():
-            ev = QWheelEvent(QPointF(5, 5), QPointF(5, 5), QPoint(0, 0), QPoint(0, -120),
-                             Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
-                             Qt.ScrollPhase.NoScrollPhase, False)
-            QApplication.sendEvent(box, ev)
-
-        wheel()
-        assert box.currentIndex() == 0          # not focused: unchanged
-        box.show()
-        box.setFocus()
+        editable = QComboBox()
+        editable.setEditable(True)
+        editable.addItems(["ESI", "APCI", "EI"])
+        spin = QSpinBox()
+        spin.setRange(0, 10)
+        double = QDoubleSpinBox()
+        double.setRange(0, 10)
+        for w in (box, editable, spin, double):
+            layout.addWidget(w)
+        layout.addSpacing(3000)
+        scroll = QScrollArea()
+        scroll.setWidget(page)
+        scroll.resize(300, 200)
+        scroll.show()
         qapp.processEvents()
-        if box.hasFocus():                      # offscreen focus is best-effort
-            wheel()
-            assert box.currentIndex() == 1
+        bar = scroll.verticalScrollBar()
+
+        _wheel(box)
+        assert box.currentIndex() == 0          # not focused: unchanged…
+        assert bar.value() > 0                  # …and the page scrolled instead
+        for combo in (box, editable):
+            combo.setFocus()
+            qapp.processEvents()
+            _wheel(combo)
+            if combo.isEditable():
+                _wheel(combo.lineEdit())
+            assert combo.currentIndex() == 0    # focused (selected) too: unchanged
+        for number in (spin, double):
+            _wheel(number, ticks=1)
+            assert number.value() == 0          # not clicked into: unchanged
+            number.setFocus()
+            qapp.processEvents()
+            _wheel(number, ticks=1)
+            assert number.value() == 0          # clicked into: still unchanged
+        before = bar.value()
+        _wheel(spin)
+        assert bar.value() > before             # the page scrolls instead
+        scroll.close()
     finally:
         QApplication.instance().removeEventFilter(guard)

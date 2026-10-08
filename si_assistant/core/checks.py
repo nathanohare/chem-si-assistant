@@ -11,7 +11,7 @@ import hashlib
 import re
 from dataclasses import dataclass
 
-from . import chem, impurities, nmr_parse
+from . import chem, impurities, ms_reports, nmr_parse
 from . import fields as F
 from .compound_ids import IdReport
 from .markup import parse as parse_markup
@@ -231,6 +231,12 @@ def all_warnings(project, compound, id_report: IdReport) -> list[Warning]:
                         "hrms", "hrms",
                         f"The typed M formula ({sp.info.formula}) differs from the structure's "
                         f"({auto.info.formula}).", "hrms:formula-differs", fp))
+        if ms_reports.report_items(compound):
+            # A found m/z typed by hand that the report files don't back up (SPEC §13n.3a).
+            message, match = ms_reports.differs_message(project, compound)
+            if message and match is not None:
+                out.append(Warning("hrms", "hrms", message, "hrms:report-differs",
+                                   _fp(fp, match.file, round(match.mz, 6))))
 
     reports = compound.values.get("nmr") or [] if "nmr" in keys else []
     texts = {r.get("id", str(i)): _report_text(r) for i, r in enumerate(reports)}
@@ -375,9 +381,7 @@ def all_warnings(project, compound, id_report: IdReport) -> list[Warning]:
     for place in links.compound_texts(project, compound):
         gone, missing = links.broken_links(project, parse_markup(place.text))
         for cid in gone:
-            w = Warning("mention", place.field,
-                        f"This text mentions {_a_kind(cid)} that has been deleted (shown as "
-                        "“??”). Restore it from the Trash, or remove the mention.",
+            w = Warning("mention", place.field, "This text " + _gone_text(project, cid),
                         f"mention:{place.field}:{cid}", _fp(cid))
             if w.key not in seen:
                 seen.add(w.key)
@@ -408,6 +412,11 @@ def all_warnings(project, compound, id_report: IdReport) -> list[Warning]:
                                    f"for {{{name}}} (it would be printed as [{name}]).",
                                    f"gp:value:{procedures.key(name)}",
                                    _fp(gp.get("sentence", ""), typed)))
+            # The {scale} box and the Reaction scale field disagree (SPEC §13n.9).
+            conflict = procedures.scale_conflict(project, compound)
+            if conflict:
+                out.append(Warning("gp", "procedure", conflict, "gp:scale-differs",
+                                   _fp(typed, compound.values.get("scale"))))
     return out
 
 
@@ -417,6 +426,23 @@ def _a_kind(item_id: str) -> str:
             "scheme": "a scheme"}[mention_kind(item_id)]
 
 
+def _gone_text(project, item_id: str) -> str:
+    """"mentions … (printed as “??”) …" for a mention whose target has no label: deleted,
+    or a scheme printed without its label and caption (the default, SPEC §13p.1)."""
+    from .markup import mention_kind
+    if mention_kind(item_id) == "scheme":
+        try:
+            scheme = project.scheme(item_id)
+        except KeyError:
+            scheme = None
+        if scheme is not None:
+            return (f"mentions scheme “{scheme.name}”, which is printed without a label "
+                    "(printed as “??”). Tick “Label and caption” in the scheme's Layout…, or "
+                    "remove the mention.")
+    return (f"mentions {_a_kind(item_id)} that has been deleted (printed as “??”). Restore "
+            "it from the Trash, or remove the mention.")
+
+
 # ---------------------------------------------------------------------- project-wide checks
 
 @dataclass
@@ -424,7 +450,7 @@ class ProjectWarning:
     """A warning that is not about one compound: two items with the same label, a
     mention in a section's text whose target was deleted (SPEC §13k.5a), or a figure or
     table in a text whose picture or table file is missing (SPEC §13k.5)."""
-    check: str                  # "label", "mention", "citation" or "object"
+    check: str                  # "label", "mention", "citation", "object" or "gp_name"
     message: str
     place: tuple[str, str]      # the tree item to open: ("front", "general"), ("section",
                                 # id), ("scheme", id) or ("compound", id)
@@ -446,20 +472,36 @@ def project_warnings(project, labels=None) -> list[ProjectWarning]:
                          "one of them its own label, or let both be numbered automatically.",
                 item.place, "files" if item.place[0] == "compound" else ""))
     for place in links.all_texts(project, compounds=False):
-        if place.kind not in ("front", "section", "gp", "gp_sentence", "table"):
+        if place.kind not in ("front", "section", "gp", "gp_sentence", "table", "scheme"):
             continue
         gone, missing = links.broken_links(project, parse_markup(place.text), labels)
         target = _text_place(project, place)
         for item_id in gone:
             out.append(ProjectWarning(
-                "mention", f"{place.where}: mentions {_a_kind(item_id)} that has been deleted "
-                           "(printed as “??”). Restore it from the Trash, or remove the mention.",
-                target))
+                "mention", f"{place.where}: " + _gone_text(project, item_id), target))
         for _rid in missing:   # (the same check as a compound text's missing reference)
             out.append(ProjectWarning(
                 "citation", f"{place.where}: cites a reference that is no longer in the "
                            "References list; it will be left out of the SI.", target))
     out += missing_objects(project)
+    out += duplicate_gp_names(project)
+    return out
+
+
+def duplicate_gp_names(project) -> list[ProjectWarning]:
+    """Two general procedures with the same name (ignoring capitals and spaces) anywhere
+    in the project (SPEC §13n.8): the SI would print two procedures with the same
+    heading, and compounds would choose between two identical names."""
+    from . import procedures
+    out: list[ProjectWarning] = []
+    for group in procedures.duplicate_names(project).values():
+        for section, gp in group:
+            others = "; ".join(f"“{o.get('name', '')}” in “{s.name}”"
+                               for s, o in group if o is not gp)
+            out.append(ProjectWarning(
+                "gp_name", f"General procedure “{gp.get('name', '')}” (in “{section.name}”) has "
+                           f"the same name as {others}. Rename one of them (Data section ▸ "
+                           "General procedures).", ("section", section.id)))
     return out
 
 
@@ -493,6 +535,8 @@ def missing_objects(project) -> list[ProjectWarning]:
 def _text_place(project, place) -> tuple[str, str]:
     if place.kind == "front":
         return ("front", place.owner_id)
+    if place.kind == "scheme":   # (the scheme editor's conditions and labels)
+        return ("scheme", place.owner_id)
     if place.kind in ("section", "table"):
         return ("front", "general") if place.owner_id == "general" else ("section",
                                                                           place.owner_id)

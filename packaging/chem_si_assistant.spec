@@ -1,7 +1,7 @@
 # PyInstaller recipe for Chem SI Assistant (SPEC §13m.2, Phase 8).
 #
 # Run through   python packaging/build_app.py build --dist <folder> --work <folder>
-# (it first checks Ketcher is there and makes the icons). Builds ONE FOLDER (not one
+# (it first checks the files it needs are there and makes the icons). Builds ONE FOLDER (not one
 # file: it starts faster and an installer can update it in place) with a windowed
 # program (no console window):
 #   Windows: <dist>/Chem SI Assistant/Chem SI Assistant.exe   (+ _internal/)
@@ -33,8 +33,7 @@ a = Analysis(
     datas=datas,
     hiddenimports=[
         # Imported inside functions or by Qt itself, so PyInstaller may not see them.
-        "PySide6.QtWebEngineWidgets", "PySide6.QtWebEngineCore", "PySide6.QtPdf",
-        "PySide6.QtPdfWidgets", "PySide6.QtSvg", "rdkit.Chem.rdChemReactions",
+        "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtSvg", "rdkit.Chem.rdChemReactions",
         "pypdf", "spellchecker",
     ],
     hookspath=[],
@@ -43,8 +42,8 @@ a = Analysis(
               "jupyter", "notebook", "pytest", "tests", "PIL", "scipy"] + B.QT_EXCLUDES,
     noarchive=False,
 )
-# Leave out what the program never uses (Qt WebEngine's debug data and other languages,
-# QML plugins…; see build_app.keep_in_bundle).
+# Leave out what the program never uses (Qt WebEngine, Qt's translations, QML plugins…;
+# see build_app.keep_in_bundle).
 a.datas = [d for d in a.datas if B.keep_in_bundle(d[0])]
 a.binaries = [b for b in a.binaries if B.keep_in_bundle(b[0])]
 pyz = PYZ(a.pure)

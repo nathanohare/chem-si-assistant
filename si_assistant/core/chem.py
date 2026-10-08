@@ -80,60 +80,6 @@ def mol_to_block(mol: Chem.Mol) -> str:
     return Chem.MolToMolBlock(mol)
 
 
-def _centroid_x(mol: Chem.Mol) -> float:
-    if not mol.GetNumConformers():
-        return 0.0
-    return float(mol.GetConformer().GetPositions()[:, 0].mean())
-
-
-def scheme_pieces(text: str) -> list[Chem.Mol]:
-    """The structures in a copied scheme, ordered left to right.
-
-    `text` is what ChemDraw puts on the clipboard: a reaction ($RXN) or a MOL
-    block holding every structure of the scheme as separate pieces. Pieces with
-    fewer than two heavy atoms (e.g. a lone counter-ion) are left out. Raises ChemError.
-    """
-    text = (text or "").strip("﻿")
-    if text.lstrip().startswith("$RXN"):
-        from rdkit.Chem import rdChemReactions
-        try:
-            rxn = rdChemReactions.ReactionFromRxnBlock(text)
-        except Exception:  # noqa: BLE001 — RDKit raises several types here
-            rxn = None
-        if rxn is None:
-            raise ChemError("The copied reaction could not be read.")
-        mols = list(rxn.GetReactants()) + list(rxn.GetProducts())
-    else:
-        mols = list(Chem.GetMolFrags(parse_structure(text), asMols=True, sanitizeFrags=True))
-    pieces = []
-    for m in mols:
-        m = Chem.Mol(m)
-        try:
-            Chem.SanitizeMol(m)
-        except Exception:  # noqa: BLE001
-            continue
-        if m.GetNumHeavyAtoms() >= 2:
-            if not _has_2d_coords(m):
-                rdDepictor.Compute2DCoords(m)
-            pieces.append(m)
-    return sorted(pieces, key=_centroid_x)
-
-
-def rightmost_structure(text: str) -> tuple[Chem.Mol, int]:
-    """The right-most structure in a copied scheme, and how many structures there were."""
-    pieces = scheme_pieces(text)
-    if not pieces:
-        raise ChemError("No structures were found in the copied scheme.")
-    return pieces[-1], len(pieces)
-
-
-def same_structure_key(mol: Chem.Mol, stereo: bool = True) -> str:
-    """A key that is equal for the same compound however it was drawn: canonical SMILES of
-    the largest piece (so a salt matches its organic ion), optionally ignoring stereo."""
-    pieces = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
-    largest = max(pieces, key=lambda m: m.GetNumHeavyAtoms())
-    return Chem.MolToSmiles(Chem.RemoveHs(largest), isomericSmiles=stereo)
-
 def mdlct_to_molblock(data: bytes) -> str:
     """Decode ChemDraw's "MDLCT" clipboard format (length-prefixed lines) to a MOL block."""
     lines, i = [], 0
