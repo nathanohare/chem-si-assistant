@@ -286,9 +286,10 @@ def _merge(runs: list[Run]) -> list[Run]:
 
 
 def charge_runs(display: str) -> list[Run]:
-    """An adduct like "[M+H]+" or "[M−H]−" with the charge as superscript."""
-    m = re.match(r"^(\[.*\])(\d*[+\-−][•·]?)$", display.strip())
+    """An adduct like "[M+H]+", "[M−H]−" or "[M]+." with the charge as superscript. It
+    reads the same labels as chem.adduct_display and prints the radical the same way (•)."""
+    m = re.match(r"^(\[.*\])(\d*[+\-−][•·.]?)$", display.strip())
     if not m:
         return [Run(display)]
-    charge = m.group(2).replace("-", "−")
+    charge = m.group(2).replace("-", "−").replace(".", "•").replace("·", "•")
     return [Run(m.group(1).replace("-", "−")), Run(charge, valign=SUPER)]

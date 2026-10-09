@@ -279,16 +279,21 @@ def chem_dictionary() -> frozenset[str]:
 
 
 def _read_lines(path: Path) -> list[str]:
-    """The lines of a dictionary file. It should be UTF-8, but one saved by another
-    program (Notepad's "ANSI", Excel's "Text") is read as Windows-1252 instead of failing."""
+    """The lines of a dictionary file ([] if there is none). It should be UTF-8, but one
+    saved by Notepad as "Unicode" (UTF-16, with a BOM) is read as UTF-16, and one saved
+    as "ANSI" (or Excel's "Text") as Windows-1252, instead of failing. Any other read
+    error is raised, so that add_word never rewrites a file it could not read."""
     try:
         data = Path(path).read_bytes()
-    except OSError:
+    except FileNotFoundError:
         return []
-    try:
-        text = data.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        text = data.decode("cp1252", errors="replace")
+    if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+        text = data.decode("utf-16", errors="replace")   # the BOM gives the byte order
+    else:
+        try:
+            text = data.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = data.decode("cp1252", errors="replace")
     return text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
 
 
@@ -299,13 +304,18 @@ def _is_word_line(line: str) -> bool:
 def read_words(path: Path) -> set[str]:
     """A dictionary file: one word per line (blank lines and "#" comments are ignored).
     A missing or unreadable file gives no words; it never stops the program."""
-    return {line.strip() for line in _read_lines(path) if _is_word_line(line)}
+    try:
+        lines = _read_lines(path)
+    except OSError:
+        return set()
+    return {line.strip() for line in lines if _is_word_line(line)}
 
 
 def add_word(path: Path, word: str) -> bool:
     """Add a word to a dictionary file, one per line, in alphabetical order among the
     words (other lines, such as "#" comments, are kept as they are). False if it was
-    already there (in any capitalisation)."""
+    already there (in any capitalisation). Raises OSError, leaving the file as it is, if
+    the file exists but cannot be read."""
     word = word.strip()
     lines = [line.rstrip() for line in _read_lines(path)]
     while lines and not lines[-1]:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 
+import shiboken6
 from PySide6.QtCore import QEventLoop, QObject, QSettings, Qt, Signal
 from PySide6.QtWidgets import QApplication, QCheckBox, QLabel, QMessageBox, QPushButton
 
@@ -74,8 +75,9 @@ class _Done(QObject):
     finished = Signal(object)
 
 
-def run_lookup(mol) -> pubchem.NameResult:
-    """pubchem.lookup_name in a thread; the window keeps drawing itself meanwhile."""
+def run_lookup(mol) -> pubchem.NameResult | None:
+    """pubchem.lookup_name in a thread; the window keeps drawing itself meanwhile. None:
+    the wait was cut short before the answer came (e.g. the program is closing)."""
     if not USE_THREAD:
         return pubchem.lookup_name(mol, fetch=fetcher)
     box: dict = {}
@@ -96,7 +98,7 @@ def run_lookup(mol) -> pubchem.NameResult:
     thread.start()
     if "result" not in box:
         loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
-    return box["result"]
+    return box.get("result")
 
 
 class NameEditor(PartsEditor):
@@ -117,7 +119,8 @@ class NameEditor(PartsEditor):
         self.note.setStyleSheet("color: palette(placeholder-text);")
         grid.addWidget(self.lookup_btn, 0, grid.columnCount())
         grid.addWidget(self.note, grid.rowCount(), 0, 1, -1)
-        stored = self.compound.values.get(self.defn.key) or {}
+        stored = self.compound.values.get(self.defn.key)
+        stored = stored if isinstance(stored, dict) else {}   # (a hand-edited compound.json)
         source = stored.get(FROM_KEY)
         self._from = dict(source) if isinstance(source, dict) else None
         self.changed.connect(self._show_note)
@@ -164,7 +167,12 @@ class NameEditor(PartsEditor):
             result = run_lookup(mol)
         finally:
             QApplication.restoreOverrideCursor()
-            self.refresh_structure()
+            # Timers kept running while waiting: the page may have been rebuilt (e.g. the
+            # project was taken over and is now read-only), and then this editor is gone.
+            if shiboken6.isValid(self):
+                self.refresh_structure()
+        if result is None or not shiboken6.isValid(self) or self.project.read_only:
+            return
         self.apply(result)
 
     def apply(self, result: pubchem.NameResult) -> bool:

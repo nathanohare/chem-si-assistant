@@ -92,7 +92,7 @@ class SchemeWriter:
             img = b.image(picture, STRUCTURE_MAX_IN, pdf_natural=True,
                           natural_factor=factor * pct)
             code = img[0] if img else None
-        elif mol is not None:
+        if code is None and mol is not None:   # (also when the picture can't be used)
             code = self.drawn(mol, sid, scale=pct)
         if code is None:
             return None
@@ -201,21 +201,10 @@ class SchemeWriter:
 
     def conditions_yields(self, step: dict) -> str:
         """The step's yields for under its conditions: "92%", or with several products
-        "92% (3b), 5% (3c)"."""
-        found = []
-        for box in step["products"]:
-            runs = self.yield_runs(box)
-            if not runs:
-                continue
-            label = se.label_markup(self.project, self.scheme, box)
-            found.append((runs, label))
-        if not found:
-            return ""
-        if len(found) == 1:
-            return runs_to_typst(found[0][0])
+        "92% (3b), 5% (3c)" (se.conditions_yield_parts: the scheme editor shows the same)."""
         parts = []
-        for runs, label in found:
-            code = runs_to_typst(runs)
+        for y, label in se.conditions_yield_parts(self.project, self.scheme, step):
+            code = runs_to_typst([Run(y)])
             if label:
                 ref = [r for p in parse(label) for r in p.runs]
                 code += " (" + self.runs_code(ref, f"{self.where} ▸ ID label") + ")"

@@ -13,12 +13,16 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_program_starts_and_quits_cleanly(tmp_path):
+    # SI_ASSISTANT_SETTINGS_DIR: the program keeps its per-computer settings in tmp_path,
+    # so this test never reads or changes the real ones (the registry on Windows).
     env = dict(os.environ, SI_ASSISTANT_SMOKE_TEST="1", QT_QPA_PLATFORM="offscreen",
-               PYTHONFAULTHANDLER="1")
+               PYTHONFAULTHANDLER="1", SI_ASSISTANT_SETTINGS_DIR=str(tmp_path))
     result = subprocess.run([sys.executable, "-m", "si_assistant"], cwd=ROOT, env=env,
                             capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, (
         f"The program crashed on start-up (exit code {result.returncode}):\n{result.stderr}")
+    # Start-up wrote its settings (e.g. "carried over from the old name") to tmp_path.
+    assert list((tmp_path / "settings").rglob("*.ini")), result.stderr
 
 
 def test_modules_import_without_a_running_app():

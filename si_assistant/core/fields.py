@@ -237,7 +237,11 @@ LIBRARY_FIELDS: tuple[FieldDef, ...] = (
              filled_parts=("value",)),
     FieldDef("ea", "Elemental analysis", "parts",
              (Part("calcd", "Calcd", placeholder="C, 65.21; H, 5.47; N, 6.08"),
-              Part("found", "Found", placeholder="C, 65.03; H, 5.52; N, 6.01"))),
+              Part("found", "Found", placeholder="C, 65.03; H, 5.52; N, 6.01"),
+              # Optional: the formula the values were calculated for (e.g. a solvate);
+              # empty prints the structure's formula.
+              Part("formula", "Formula", placeholder="auto: from the structure")),
+             filled_parts=("calcd", "found")),
     FieldDef("xray", "X-ray (CCDC number)", "parts", (Part("ccdc", placeholder="2345678"),)),
     FieldDef("references", "References (known compound)", "citations",
              description="For known compounds: a sentence such as “Spectral data matched those "
@@ -316,24 +320,37 @@ def empty_value(defn: FieldDef) -> Any:
     return None
 
 
+def part_text(value: Any) -> str:
+    """A stored part value as the text shown in its box. A hand-edited compound.json may
+    hold null (shown empty, not as "None") or something that is not text at all (also
+    shown empty; numbers are shown as written)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return ""
+
+
 def is_filled(defn: FieldDef, value: Any, text: str = "") -> bool:
     """Whether a field counts as filled in (drives the "complete" status).
 
     `text` is the stored text for richtext/notes fields; `value` is the
     compound.json value for everything else. For structure fields, `value` is
-    True when a structure exists.
+    True when a structure exists. (A value of the wrong form, from a hand-edited
+    compound.json, counts as empty.)
     """
     if defn.kind in ("richtext", "notes"):
         return bool(text.strip())
     if defn.kind == "structure":
         return bool(value)
     if defn.kind == "parts":
-        value = value or {}
-        return all(str(value.get(k, "")).strip() for k in defn.required_parts())
+        value = value if isinstance(value, dict) else {}
+        return all(part_text(value.get(k, "")).strip() for k in defn.required_parts())
     if defn.kind == "nmr":
-        return any(str(r.get("text", "")).strip() for r in (value or []))
+        return isinstance(value, list) and any(
+            part_text(r.get("text", "")).strip() for r in value if isinstance(r, dict))
     if defn.kind in ("attachments", "private"):
-        return bool(value)
+        return isinstance(value, list) and bool(value)
     if defn.kind == "citations":
-        return bool((value or {}).get("refs"))
+        return bool(value.get("refs")) if isinstance(value, dict) else False
     return False

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QFileDialog, QFrame, QGr
 
 from ..core import ms_reports
 from ..core.project import Compound, Project, ProjectError
+from .structure_widgets import paste_key
 
 WARN_COLOUR = "#d35400"
 
@@ -50,7 +51,8 @@ class HrmsReportsBox(QFrame):
     files_changed = Signal()   # a file was added or removed (saved already)
     saved = Signal(str)        # status-bar message
 
-    def __init__(self, project: Project, compound: Compound, before_write: Callable[[], None],
+    def __init__(self, project: Project, compound: Compound,
+                 before_write: Callable[[], bool | None],
                  shown_id: Callable[[], str], parent: QWidget | None = None):
         super().__init__(parent)
         self.project = project
@@ -74,7 +76,7 @@ class HrmsReportsBox(QFrame):
         self.add_btn.clicked.connect(self._choose)
         self.paste_btn = QPushButton("Paste copied files")
         self.paste_btn.setToolTip("Add files (or folders) copied in File Explorer or Finder. "
-                                  "Click this box and press Ctrl+V does the same.")
+                                  f"Click this box and press {paste_key()} does the same.")
         self.paste_btn.clicked.connect(self.paste)
         for b in (self.add_btn, self.paste_btn):
             b.setEnabled(not ro)
@@ -122,7 +124,8 @@ class HrmsReportsBox(QFrame):
             name = str(item.get("file", ""))
             path = self.project.hrms_report_path(self.compound, name)
             folder = item.get("kind") == "folder" or path.is_dir()
-            link = QPushButton(("📁 " if folder else "📄 ") + name)
+            # ("&&": a "&" in a file name is shown, not taken as an Alt+ shortcut)
+            link = QPushButton(("📁 " if folder else "📄 ") + name.replace("&", "&&"))
             link.setFlat(True)
             link.setStyleSheet("text-align: left; text-decoration: underline;")
             link.setToolTip(f"{name}\nOpen" + (" the folder" if folder else
@@ -138,7 +141,7 @@ class HrmsReportsBox(QFrame):
             note.setStyleSheet(f"color: {WARN_COLOUR};" if not data.readable or not data.count
                                else "color: palette(placeholder-text);")
             if not path.exists():
-                link.setText(f"⚠ {name} (missing)")
+                link.setText(f"⚠ {name.replace('&', '&&')} (missing)")
             remove = QToolButton()
             remove.setText("✕")
             remove.setToolTip("Remove (moves it to the project Trash)")
@@ -183,8 +186,10 @@ class HrmsReportsBox(QFrame):
         paths = [Path(p) for p in paths if p]
         if not paths or self.project.read_only:
             return
-        self.before_write()
+        if self.before_write() is False:   # (the page's typing couldn't be saved: said so)
+            return
         errors = []
+        added = 0
         names = paths[0].name if len(paths) == 1 else f"{len(paths)} files"
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)   # (raw data can be big)
         try:
@@ -192,13 +197,16 @@ class HrmsReportsBox(QFrame):
                 for path in paths:
                     try:
                         self.project.add_hrms_report(self.compound, path)
+                        added += 1
                     except (ProjectError, OSError) as e:
                         errors.append(f"{path.name}: {e}")
         finally:
             QApplication.restoreOverrideCursor()
         self.rebuild()
         self.files_changed.emit()
-        self.saved.emit(f"Added {names}")
+        if added:   # (when none was added, the warning below says why)
+            self.saved.emit(f"Added {names}" if not errors else
+                            f"Added {added} of {len(paths)} files")
         if errors:
             QMessageBox.warning(self, "Some files were not added", "\n\n".join(errors))
 
@@ -210,7 +218,8 @@ class HrmsReportsBox(QFrame):
         self.remove_now(name)
 
     def remove_now(self, name: str) -> None:
-        self.before_write()
+        if self.before_write() is False:
+            return
         try:
             with self.project.undo_step(f"Remove {name} from {self.shown_id()} ▸ HRMS"):
                 self.project.remove_hrms_report(self.compound, name)
@@ -223,7 +232,14 @@ class HrmsReportsBox(QFrame):
         if self.project.read_only:
             return
         choice = self.print_box.itemData(index)
-        self.before_write()
+        if self.before_write() is False:   # (show the stored choice again)
+            value = self.compound.values.get("hrms")
+            own = value.get(ms_reports.PRINT_KEY) if isinstance(value, dict) else None
+            self.print_box.blockSignals(True)
+            self.print_box.setCurrentIndex({True: 1, False: 2}.get(own, 0)
+                                           if isinstance(own, bool) else 0)
+            self.print_box.blockSignals(False)
+            return
         try:
             with self.project.undo_step(f"Change the printing of {self.shown_id()}'s HRMS "
                                         "reports"):
@@ -272,10 +288,14 @@ def _describe_file(path: Path) -> str:
     if not path.exists():
         return "missing: not printed"
     if kind == "pdf":
+        from ..compile import document
         try:
-            from pypdf import PdfReader
-            n = len(PdfReader(str(path)).pages)
+            n = document.pdf_page_count(path)
             return f"PDF: {n} page{'s' if n != 1 else ''}, each as a page"
+        except document.PdfUnreadable as e:
+            if e.encrypted:
+                return "password-protected PDF: not printed"
+            return "PDF that can't be opened: not printed"
         except Exception:  # noqa: BLE001
             return "PDF that can't be opened: not printed"
     if kind == "picture":

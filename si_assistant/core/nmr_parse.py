@@ -62,17 +62,33 @@ def data_part(text: str) -> str:
 
 
 def peaks(text: str) -> list[Peak]:
-    """Every peak in a report, with the bracketed details that follow it."""
+    """Every peak in a report, with the bracketed details that follow it (the details
+    may hold brackets of their own, e.g. "(s, 9H, C(CH3)3)" or "(d, J(C,F) = 247 Hz)")."""
     data = data_part(text)
     out = []
-    pattern = re.compile(rf"({_NUMBER})(?:\s*[–—-]\s*({_NUMBER}))?\s*(?:\(([^()]*)\))?")
-    for m in pattern.finditer(data):
+    pattern = re.compile(rf"({_NUMBER})(?:\s*[–—-]\s*({_NUMBER}))?\s*")
+    pos = 0
+    while (m := pattern.search(data, pos)) is not None:
+        pos = m.end()
         # Skip numbers that are inside brackets (J values, "2C") — they are part of details.
         before = data[:m.start()]
         if before.count("(") > before.count(")"):
             continue
+        details = ""
+        if data.startswith("(", m.end()):
+            depth = 0
+            for i in range(m.end(), len(data)):
+                if data[i] == "(":
+                    depth += 1
+                elif data[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        details = data[m.end() + 1:i].strip()
+                        pos = i + 1     # carry on after the whole bracket
+                        break
+            # (no matching ")": no details, and the numbers inside are skipped above)
         out.append(Peak(_num(m.group(1)), _num(m.group(2)) if m.group(2) else None,
-                        (m.group(3) or "").strip()))
+                        details))
     return out
 
 

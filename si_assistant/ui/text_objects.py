@@ -254,43 +254,71 @@ class ObjectStore:
 
 # ---------------------------------------------------------------------- pictures on screen
 
+THUMB_COUNT = 60                    # pictures kept for the screen, at most
+THUMB_BYTES = 192 * 1024 * 1024     # and at most this much memory
 _thumbs: OrderedDict = OrderedDict()
+_inches: OrderedDict = OrderedDict()
 
 
 def thumbnail(path: Path) -> QImage:
     """A copy of the picture for the screen (pasted pictures are 1200 dpi), kept until
-    the file changes. PDFs show their first page."""
+    the file changes. PDFs show their first page (at 100 dpi: picture_inches relies on
+    it)."""
     try:
         st = path.stat()
     except OSError:
         return QImage()
-    key = (str(path), st.st_mtime_ns, st.st_size)
+    name = str(path)
+    key = (name, st.st_mtime_ns, st.st_size)
     image = _thumbs.get(key)
-    if image is None:
-        if path.suffix.lower() == ".pdf":
-            from .clipboard_image import render_pdf
-            try:
-                image = render_pdf(path.read_bytes(), 100) or QImage()
-            except OSError:
-                image = QImage()
-        else:
-            image = read_image(path, THUMB_SIDE)
-        _thumbs[key] = image
-        while len(_thumbs) > 60:
-            _thumbs.popitem(last=False)
+    if image is not None:
+        _thumbs.move_to_end(key)   # (the least recently shown goes first)
+        return image
+    if path.suffix.lower() == ".pdf":
+        from .clipboard_image import render_pdf
+        try:
+            image = render_pdf(path.read_bytes(), 100) or QImage()
+        except OSError:
+            image = QImage()
+    else:
+        image = read_image(path, THUMB_SIDE)
+    if image.isNull():
+        return image   # (not kept: a file being synced or locked is read again next time)
+    for old in [k for k in _thumbs if k[0] == name]:   # older versions of this file
+        del _thumbs[old]
+    _thumbs[key] = image
+    total = sum(i.sizeInBytes() for i in _thumbs.values())
+    # (the newest is always kept, even alone over the limit: not read again on every paint)
+    while len(_thumbs) > 1 and (len(_thumbs) > THUMB_COUNT or total > THUMB_BYTES):
+        _old, dropped = _thumbs.popitem(last=False)
+        total -= dropped.sizeInBytes()
     return image
 
 
 def picture_inches(path: Path) -> tuple[float, float] | None:
-    """The printed size of a picture in inches, if it is known."""
+    """The printed size of a picture in inches, if it is known. Kept until the file
+    changes: reading a JPEG's or TIFF's resolution decodes the whole picture, and this is
+    asked on every layout and paint."""
     if path.suffix.lower() == ".pdf":
         image = thumbnail(path)
         return (image.width() / 100, image.height() / 100) if not image.isNull() else None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    size = _inches.get(key)
+    if size is not None:
+        _inches.move_to_end(key)
+        return size
     info = image_info(path)
     if info is None:
-        return None
+        return None   # (not kept: a file being synced or locked is read again next time)
     w, h, dpi = info
-    return w / dpi, h / dpi
+    size = _inches[key] = (w / dpi, h / dpi)
+    while len(_inches) > 200:
+        _inches.popitem(last=False)
+    return size
 
 
 def _available_width(doc) -> float:
@@ -413,19 +441,34 @@ def cell_plain(text: str) -> str:
     return " / ".join(x for x in out if x)
 
 
+_markup_docs: OrderedDict = OrderedDict()
+
+
 def _draw_markup(painter, box: QRectF, text: str, font: QFont, align, colour: QColor) -> None:
     """Draw a cell's (or footnote's) stored text in `box` on one line, with its formatting,
-    centred vertically and cut off at the box's edge."""
+    centred vertically and cut off at the box's edge. The laid-out text is kept for the
+    next paint (a table is drawn again on every key typed above it), found by what is
+    drawn: the HTML (with the links' current labels and the colour), font, alignment and
+    width, so it can never show something old."""
     from .table_editor import markup_html
-    doc = QTextDocument()
-    doc.setDocumentMargin(0)
-    doc.setDefaultFont(font)
-    option = QTextOption(align)
-    option.setWrapMode(QTextOption.WrapMode.NoWrap)
-    doc.setDefaultTextOption(option)
-    doc.setHtml(f"<span style='color:{colour.name()}'>"
-                + markup_html(text).replace("<br>", " / ") + "</span>")
-    doc.setTextWidth(box.width())
+    html = (f"<span style='color:{colour.name()}'>"
+            + markup_html(text).replace("<br>", " / ") + "</span>")
+    key = (html, font.key(), int(getattr(align, "value", align)), round(box.width(), 3))
+    doc = _markup_docs.get(key)
+    if doc is None:
+        doc = QTextDocument()
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(font)
+        option = QTextOption(align)
+        option.setWrapMode(QTextOption.WrapMode.NoWrap)
+        doc.setDefaultTextOption(option)
+        doc.setHtml(html)
+        doc.setTextWidth(box.width())
+        _markup_docs[key] = doc
+        while len(_markup_docs) > 1000:
+            _markup_docs.popitem(last=False)
+    else:
+        _markup_docs.move_to_end(key)
     painter.save()
     painter.setClipRect(box)
     painter.translate(box.left(), box.top() + max(0.0, (box.height() - doc.size().height()) / 2))
@@ -703,14 +746,36 @@ def replace_with_clipboard(edit, figure_id: str) -> None:
     edit.refresh_objects()
 
 
-def save_typing_first(edit) -> None:
+def save_typing_first(edit) -> bool:
     """Before adding or removing a figure or table: save typing not saved yet (the page's
-    autosave), so it stays an undo step of its own and is not undone with the figure."""
+    autosave), so it stays an undo step of its own and is not undone with the figure.
+    Returns False if that save failed: the page has said so, and the typing stays on the
+    page, tried again with the next change or when the page is left."""
     page = edit.parentWidget()
     while page is not None and not callable(getattr(page, "flush", None)):
         page = page.parentWidget()
-    if page is not None:
+    if page is None:
+        return True
+    save_waiting = getattr(page, "save_waiting", None)
+    if callable(save_waiting):
+        return save_waiting() is not False
+    # The pages with figures and tables (a text section, General Information): their
+    # ordinary autosave. Not flush(), the save made when leaving the page, whose warning
+    # says the changes are lost if the page is closed (here the page stays open).
+    autosave = getattr(page, "_save_text", None) or getattr(page, "_save", None)
+    timer = getattr(page, "_timer", None)
+    if callable(autosave) and timer is not None and hasattr(page, "_unsaved"):
+        if timer.isActive() or page._unsaved:
+            autosave()   # (says so itself if it fails)
+        return not page._unsaved
+    try:
         page.flush()
+    except (ProjectError, OSError) as e:
+        QMessageBox.warning(edit, "Could not save", f"{e}\n\nWhat you typed is still on the "
+                            "page; saving it is tried again with your next change or when "
+                            "you leave the page.")
+        return False
+    return True
 
 
 def remove_object(edit, kind: str, item_id: str) -> None:
@@ -724,7 +789,14 @@ def remove_object(edit, kind: str, item_id: str) -> None:
                             f"Edit ▸ Undo ({key_text()}) brings it back in its place."
                             ) != QMessageBox.StandardButton.Yes:
         return
-    save_typing_first(edit)
+    if not save_typing_first(edit):
+        # Removed now, the typing still waiting would be saved as part of the removal, and
+        # Edit ▸ Undo of the removal would take it back too. Nothing is lost by waiting.
+        QMessageBox.warning(edit, f"Remove {kind}",
+                            f"{label} was not removed, because your latest typing on this "
+                            "page could not be saved first (see the previous message). "
+                            "Try again once saving works; nothing has been lost.")
+        return
     caption = caption_markup(edit, kind, item_id)
     # One undo step for the picture or table and its paragraph: the text's autosave that
     # follows joins it (then_merge: that one only, so typing after it is a step of its own).
@@ -773,7 +845,7 @@ def new_table(edit, block=None) -> None:
     store = edit.objects
     if store is None or not store.editable or edit.isReadOnly():
         return
-    table = table_from_block(block) if block else Table.new()
+    table = table_from_block(block, edit) if block else Table.new()
     dlg = TableEditorDialog(table, "", "", edit, new=True)
     if not dlg.exec():
         return
@@ -787,11 +859,15 @@ def new_table(edit, block=None) -> None:
     edit.insert_object("table", table_id, caption_runs(dlg.caption()))
 
 
-def table_from_block(block) -> Table:
-    """A new table from cells copied from Word or Excel (the first row as its header)."""
+def table_from_block(block, parent: QWidget | None = None) -> Table:
+    """A new table from cells copied from Word or Excel (the first row as its header). With
+    a `parent`, says so if the block was too large to paste whole."""
     table = Table.new(1, 1)
-    table.paste(0, 0, block)
+    left_out = table.paste(0, 0, block)
     table.header_rows = 1 if table.n_rows > 1 else 0
+    if parent is not None:
+        from .table_editor import warn_left_out
+        warn_left_out(parent, left_out)
     return table
 
 
@@ -840,7 +916,7 @@ def html_with_tables(edit, doc) -> list[Paragraph] | None:
                 continue
             try:
                 out.append(Paragraph([], 0,
-                                     table=edit.objects.new_table(table_from_block(piece))))
+                                     table=edit.objects.new_table(table_from_block(piece, edit))))
             except (ProjectError, OSError) as e:
                 QMessageBox.warning(edit, "Could not save the table", str(e))
     return out

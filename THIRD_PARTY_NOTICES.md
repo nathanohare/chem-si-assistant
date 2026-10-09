@@ -12,6 +12,7 @@ the addresses given.
 | RDKit | Structures, formulas, masses, structure drawings | BSD-3-Clause | https://github.com/rdkit/rdkit |
 | Typst (the `typst` Python package, which includes the Typst compiler) | Typesetting the SI PDF | Apache-2.0 | https://github.com/messense/typst-py · https://github.com/typst/typst |
 | pypdf | Reading spectra PDFs (page counts), the text of HRMS report PDFs and the text of manuscript PDFs (Manuscript check) | BSD-3-Clause | https://github.com/py-pdf/pypdf |
+| cryptography (Python Cryptographic Authority; its compiled part includes OpenSSL, Apache-2.0), with the compiled part of cffi (`_cffi_backend`) | Lets pypdf open PDFs that their software saved with edit restrictions (see below). Nothing else. | cryptography: Apache-2.0 or BSD-3-Clause (dual-licensed, either may be chosen); cffi: MIT-0 (MIT No Attribution; MIT in older versions); pycparser (installed with cffi when running from the source code, not in the installers): BSD-3-Clause | https://github.com/pyca/cryptography · https://github.com/python-cffi/cffi · https://github.com/eliben/pycparser |
 | chem-vision (Nathan O'Hare) — code adapted, not bundled | The Manuscript check's reading of compound labels, yields, ee/er, dr, footnote markers, scope tables and ChemDraw (.cdxml) text (`si_assistant/core/ms_parse.py`, `si_assistant/core/ms_read.py`) | MIT (notice below) | https://github.com/nathanohare/Claude-chem-vision |
 | NumPy | Picture trimming, scheme label placement, spectra handling | BSD-3-Clause | https://numpy.org |
 | pyspellchecker (with its English word list) | Spelling check | MIT | https://github.com/barrust/pyspellchecker |
@@ -31,6 +32,23 @@ is sent):
   clicked. https://pubchem.ncbi.nlm.nih.gov/docs/pug-rest
 - **GitHub** — checking for a new version and downloading it (Help ▸ Check for updates),
   and the "New issue" page for feedback. https://github.com/nathanohare/chem-si-assistant
+
+### Why a "cryptography" package is included
+
+Many NMR and mass-spectrometry programs save their PDF reports with *edit restrictions*:
+anyone can open and read the file without a password, but the file is stored encrypted
+(usually AES) so that other programs know not to change it. pypdf, which the program uses to count
+the pages of spectra PDFs and to read the text of HRMS report and manuscript PDFs, needs
+the free `cryptography` package to read such files; without it they would be reported as
+"password-protected" and left out of the SI.
+
+That is the only thing `cryptography` is used for: **reading** these PDFs, on your
+computer, the same way any PDF viewer opens them. Chem SI Assistant does not encrypt your
+files and keeps no passwords or keys, and reading these PDFs sends nothing anywhere. A PDF
+that really needs a password to open is still reported as password-protected and left out
+(save an unprotected copy, e.g. Print ▸ Save as PDF). `cffi` is a small helper that
+`cryptography` needs to run; `pycparser` is installed along with `cffi` when running from
+the source code (the installers leave it out).
 
 HRMS report files are read by the program's own code (`si_assistant/core/ms_reports.py`),
 written from the published open format descriptions — mzML and mzData (HUPO-PSI), mzXML

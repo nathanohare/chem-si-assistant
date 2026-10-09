@@ -4,11 +4,12 @@ and drawing SVG spectra (SPEC §13l.1)."""
 from __future__ import annotations
 
 import html
+import os
 import re
 import struct
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QRectF, QSize, Qt
+from PySide6.QtCore import QByteArray, QRect, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QImage, QImageReader, QPainter
 
 DEFAULT_DPI = 300  # for pictures that don't say (most scanned/exported figures are ≥300 dpi)
@@ -77,10 +78,34 @@ def png_dpi(path: Path) -> float | None:
         return None
 
 
+# image_info's answers, kept until the file changes (its size or modification time), so a
+# JPEG is not decoded again at every build. A file that can't be read is not remembered
+# (it may be an online-only OneDrive file, or locked, and readable next time).
+_INFO: dict[tuple, tuple[int, int, float]] = {}
+_INFO_MAX = 500
+
+
 def image_info(path: Path) -> tuple[int, int, float] | None:
     """(width px, height px, dpi) of a raster image, or None if it can't be read. An SVG
     gives its printed size at DEFAULT_DPI (so width / dpi is its width in inches), and so
     does a PDF (its first page)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    hit = _INFO.get(key)
+    if hit is not None:
+        return hit
+    info = _read_image_info(path)
+    if info is not None:
+        if len(_INFO) >= _INFO_MAX:
+            _INFO.clear()
+        _INFO[key] = info
+    return info
+
+
+def _read_image_info(path: Path) -> tuple[int, int, float] | None:
     if Path(path).suffix.lower() in (".svg", ".pdf"):
         size = (svg_file_size_in(Path(path)) if Path(path).suffix.lower() == ".svg"
                 else pdf_size_in(Path(path)))
@@ -92,10 +117,18 @@ def image_info(path: Path) -> tuple[int, int, float] | None:
     size = reader.size()
     dpi = png_dpi(path)
     if not size.isValid() or (dpi is None and bytes(reader.format()) != b"png"):
-        image = QImage(str(path))
+        # The resolution comes with the picture: read only a corner of it (decoding a
+        # large JPEG whole takes a tenth of a second); the size is the file's own.
+        image = QImage()
+        if size.isValid():
+            probe = QImageReader(str(path))
+            probe.setClipRect(QRect(0, 0, min(8, size.width()), min(8, size.height())))
+            image = probe.read()
         if image.isNull():
-            return None
-        size = image.size()
+            image = QImage(str(path))
+            if image.isNull():
+                return None
+            size = image.size()
         dpm = image.dotsPerMeterX()
         dpi = dpm * 0.0254 if dpm else None
     if not dpi:

@@ -1,0 +1,2 @@
+The conditions of the reduction were optimized with 4′-bromoacetophenone, which gives alcohol **@{c-ad564675}** (@{t-1ece4eb2}). Sodium borohydride (1.5 equiv) in methanol at 0 °C gave the highest yield (entry 1) and became General Procedure A. In THF the reduction was slow (entry 4), and sodium triacetoxyborohydride did not reduce the ketone (entry 7).
+!table{t-1ece4eb2} Optimization of the reduction of 4′-bromoacetophenone

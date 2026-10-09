@@ -379,8 +379,15 @@ def _rendered_spectrum(emf: bytes, conv: emf_svg.Conversion | None, why: str
 
 
 def _blank(image: QImage) -> bool:
-    mask, _pixels = ink(image)
-    return not mask.any()
+    """True when no pixel has a channel below INK_LEVEL (the same rule as ink(), without
+    building its mask and copy of the pixels: a 600-dpi page is large)."""
+    if image.isNull():
+        return True
+    rgb = image.convertToFormat(QImage.Format.Format_RGB32)   # (kept while px is used)
+    w, h = rgb.width(), rgb.height()
+    px = np.frombuffer(rgb.constBits(), np.uint8, count=rgb.sizeInBytes())
+    px = px.reshape(h, rgb.bytesPerLine())[:, : w * 4].reshape(h, w, 4)[:, :, :3]
+    return int(px.min()) >= INK_LEVEL
 
 
 @dataclass
@@ -625,9 +632,10 @@ def paste_spectrum(parent: QWidget, project, compound,
     from ..core.project import ATTACHMENT_EXTENSIONS, ProjectError
     from .field_widgets import guess_spectrum_type
     # Typing not saved yet (e.g. a peak report typed a moment ago) is saved first: the
-    # type guess reads the saved reports, and it stays an undo step of its own.
-    if before_write is not None:
-        before_write()
+    # type guess reads the saved reports, and it stays an undo step of its own. If it
+    # could not be saved (the user was told), nothing is pasted.
+    if before_write is not None and before_write() is False:
+        return None
     copied = clipboard_files()
     files = [f for f in copied if f.suffix.lower() in ATTACHMENT_EXTENSIONS and f.is_file()]
     kind = "" if files else clipboard_kind()
@@ -645,7 +653,7 @@ def paste_spectrum(parent: QWidget, project, compound,
         chosen = None
     else:
         if files:
-            guess, note = guess_spectrum_type(files[0].name), f"{files[0].name}:"
+            guess, note = guess_spectrum_type(files[0].name, shown), f"{files[0].name}:"
         else:
             guess = S.guess_pasted_type(compound)
             note = "Guessed from the NMR reports that have no spectrum yet."
@@ -688,10 +696,15 @@ def paste_spectrum(parent: QWidget, project, compound,
             else:
                 items = [project.attach_compound_file(
                     compound, "spectra", f,
-                    {"type": chosen or guess_spectrum_type(f.name)}) for f in files]
+                    {"type": chosen or guess_spectrum_type(f.name, shown)}) for f in files]
                 message = ("Pasted " + (files[0].name if len(files) == 1 else
                                         f"{len(files)} files") +
                            " (a copy is stored in the project folder).")
+                skipped = [f.name for f in copied if f not in files]
+                if skipped:
+                    names = ", ".join(skipped[:5]) + (
+                        f" and {len(skipped) - 5} more" if len(skipped) > 5 else "")
+                    message += f" Not pasted: {names} (spectra can be PDFs or pictures)."
             if added_field:
                 message += " The Spectra field was added to this compound's page again."
     except (ProjectError, OSError) as e:

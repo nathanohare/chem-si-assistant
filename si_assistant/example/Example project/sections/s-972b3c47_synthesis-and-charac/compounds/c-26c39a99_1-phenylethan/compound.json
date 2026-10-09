@@ -1,0 +1,127 @@
+{
+  "id": "c-26c39a99",
+  "id_override": "",
+  "fields": [
+    {
+      "key": "structure"
+    },
+    {
+      "key": "name"
+    },
+    {
+      "key": "procedure"
+    },
+    {
+      "key": "scale"
+    },
+    {
+      "key": "yield"
+    },
+    {
+      "key": "physical_state"
+    },
+    {
+      "key": "purification"
+    },
+    {
+      "key": "rf"
+    },
+    {
+      "key": "nmr"
+    },
+    {
+      "key": "hrms"
+    },
+    {
+      "key": "spectra"
+    },
+    {
+      "key": "references"
+    },
+    {
+      "key": "notes"
+    }
+  ],
+  "values": {
+    "name": {
+      "text": "1-Phenylethan-1-ol"
+    },
+    "scale": {
+      "value": "0.50",
+      "unit": "mmol"
+    },
+    "yield": {
+      "percent": "94",
+      "mass": "57.4",
+      "mass_unit": "mg"
+    },
+    "physical_state": {
+      "text": "colorless oil"
+    },
+    "purification": {
+      "method": "flash column chromatography",
+      "phase": "SiO₂",
+      "eluent": "n-hexane/EtOAc 4:1",
+      "sentence": ""
+    },
+    "rf": {
+      "value": "0.23",
+      "eluent": "n-hexane/EtOAc 4:1",
+      "visualization": ""
+    },
+    "nmr": [
+      {
+        "id": "r-77b66975",
+        "nucleus": "1H",
+        "label": "",
+        "text": "1H NMR (500 MHz, CDCl3) δ 7.39 – 7.34 (m, 4H), 7.30 – 7.27 (m, 1H), 4.90 (q, J = 6.5 Hz, 1H), 1.96 (s, 1H), 1.50 (d, J = 6.5 Hz, 3H)."
+      },
+      {
+        "id": "r-a2c773f9",
+        "nucleus": "13C",
+        "label": "",
+        "text": "13C NMR (126 MHz, CDCl3) δ 146.0, 128.6, 127.6, 125.5, 70.5, 25.3."
+      }
+    ],
+    "hrms": {
+      "ionization": "ESI",
+      "adduct": "[M+Na]+",
+      "found": "145.0625",
+      "species": "",
+      "formula": ""
+    },
+    "spectra": [
+      {
+        "file": "2a_1H.pdf",
+        "type": "1H",
+        "title": "",
+        "struct_caption": ""
+      },
+      {
+        "file": "2a_13C.pdf",
+        "type": "13C",
+        "title": "",
+        "struct_caption": ""
+      }
+    ],
+    "references": {
+      "text": "Spectral data matched those reported in the literature.",
+      "refs": [
+        "r-30ec8485",
+        "r-f111eece"
+      ]
+    },
+    "procedure": {
+      "gp": "gp-cb78be13",
+      "values": {
+        "ketone": "acetophenone",
+        "ketone ID": "**1a**",
+        "mass": "60.1 mg"
+      }
+    },
+    "structure": {
+      "from_scheme": false
+    }
+  },
+  "flags": {}
+}

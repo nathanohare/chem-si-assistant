@@ -522,6 +522,36 @@ def row_fields(cells: dict[str, str]) -> dict:
     return parsed
 
 
+QUANT = "quant."      # a quantitative yield, as the tables write it
+RACEMIC = "rac"       # racemic: 0% ee
+_QUANT_RE = re.compile(r"(?i)^quant(?:\.|itative)?$")
+_RACEMIC_RE = re.compile(r"(?i)^rac(?:\.|emic)?$")
+
+
+def is_quant(text) -> bool:
+    """Is it a quantitative yield written as a word ("quant.", "quant", "quantitative")?"""
+    return bool(_QUANT_RE.match(normalize(str(text or "")).strip()))
+
+
+def is_racemic(text) -> bool:
+    """Is it "rac", "rac." or "racemic" (0% ee)?"""
+    return bool(_RACEMIC_RE.match(normalize(str(text or "")).strip()))
+
+
+def _cell_value(kind: str, text) -> str:
+    """A yield/ee/er/dr/conversion cell as a value: a number or ratio as it is, a
+    quantitative yield as "quant.", racemic as "rac"; "" for a cell with no value
+    ("–", "n.d.", "trace", "nr")."""
+    text = str(text or "").strip()
+    if re.search(r"\d", text):
+        return text
+    if kind in ("yield", "conversion") and is_quant(text):
+        return QUANT
+    if kind in ("ee", "er") and is_racemic(text):
+        return RACEMIC
+    return ""
+
+
 def table_records(table: dict) -> list[dict]:
     """One record per row with a product ID: {"ids": [id], "yield", "ee", "er", "dr",
     "footnotes", "entry"}. Rows whose product ID is repeated in the same table (an
@@ -538,8 +568,11 @@ def table_records(table: dict) -> list[dict]:
                "entry": f.get("entry", "")}
         if ids.count(pid) == 1:
             for k in ("yield", "ee", "er", "dr", "conversion"):
-                if f.get(k):
-                    rec[k] = f[k]
+                v = _cell_value(k, f.get(k))
+                if v == RACEMIC and k == "er":
+                    rec.setdefault("ee", v)     # (shown and compared as an ee: 0%)
+                elif v:
+                    rec[k] = v
             if rec.get("er") and not rec.get("ee"):
                 ee = er_to_ee(rec["er"])
                 if ee is not None:

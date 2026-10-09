@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import shiboken6
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox,
@@ -257,20 +258,30 @@ class ManuscriptPage(QWidget):
             paths, _ = QFileDialog.getOpenFileNames(self, caption, "", flt)
         if not paths:
             return
-        added = []
+        ok = []
         for p in paths:
             path = Path(p)
             if path.suffix.lower() not in M.MANUSCRIPT_EXTENSIONS + M.CHEMDRAW_EXTENSIONS:
                 QMessageBox.information(self, "Manuscript check",
                                         f"“{path.name}” is not a PDF, Word or ChemDraw file.")
                 continue
+            ok.append(path)
+        # One undo step for the files added together (messages after it is closed).
+        added, errors = [], []
+        if ok:
+            label = (f"Add manuscript file {ok[0].name}" if len(ok) == 1
+                     else f"Add {len(ok)} manuscript files")
             try:
-                with self.project.undo_step(f"Add manuscript file {path.name}",
-                                            where=[("manuscript", "manuscript")]):
-                    added.append(M.add_file(self.project, path).name)
+                with self.project.undo_step(label, where=[("manuscript", "manuscript")]):
+                    for path in ok:
+                        try:
+                            added.append(M.add_file(self.project, path).name)
+                        except (OSError, ProjectError) as e:
+                            errors.append(f"“{path.name}” could not be added:\n{e}")
             except (OSError, ProjectError) as e:
-                QMessageBox.warning(self, "Manuscript check",
-                                    f"“{path.name}” could not be added:\n{e}")
+                errors.append(str(e))
+        if errors:
+            QMessageBox.warning(self, "Manuscript check", "\n\n".join(errors))
         if any(Path(a).suffix.lower() == ".cdx" for a in added):
             QMessageBox.information(
                 self, "ChemDraw .cdx file",
@@ -295,6 +306,14 @@ class ManuscriptPage(QWidget):
             with self.project.undo_step(f"Remove manuscript file {name}",
                                         where=[("manuscript", "manuscript")]):
                 M.remove_file(self.project, name)
+        except FileNotFoundError:
+            QMessageBox.warning(self, "Remove file",
+                                f"“{name}” is no longer in the manuscript folder (it was moved "
+                                "or deleted outside the program). The list has been updated.")
+            self.changed.emit()      # (the Warnings panel follows too)
+            self._fill_files()
+            self.run_check()
+            return
         except (OSError, ProjectError) as e:
             QMessageBox.warning(self, "Remove file", str(e))
             return
@@ -319,9 +338,10 @@ class ManuscriptPage(QWidget):
             self._show_result()
             return
         sources = None if force else M.cached_sources(self.project)
-        if sources is None:
+        # (a file that could not be opened last time is tried again)
+        if sources is None or any(s.transient for s in sources):
             sources = self._read_with_progress(force)
-            if sources is None:      # stopped
+            if sources is None or not shiboken6.isValid(self):   # stopped, or page gone
                 return
         self.result = M.check(self.project, sources)
         self._fill_files()
@@ -332,24 +352,34 @@ class ManuscriptPage(QWidget):
         dialog = QProgressDialog("Reading the manuscript…", "Stop", 0, 0, self)
         dialog.setWindowTitle("Manuscript check")
         dialog.setWindowModality(Qt.WindowModality.WindowModal)
-        dialog.setMinimumDuration(400)
+        dialog.setMinimumDuration(0)
         dialog.setAutoClose(False)
+        dialog.show()     # (modal at once: no click elsewhere while the files are read)
 
         def progress(message: str) -> bool:
-            dialog.setLabelText(message)
-            QApplication.processEvents()
-            return not dialog.wasCanceled()
+            # The page (and its dialog) can be deleted while events are processed (another
+            # page shown, the project closed): stop, and keep nothing of this reading.
+            if not (shiboken6.isValid(self) and shiboken6.isValid(dialog)):
+                return False
+            try:
+                dialog.setLabelText(message)
+                QApplication.processEvents()
+                return shiboken6.isValid(dialog) and not dialog.wasCanceled()
+            except RuntimeError:
+                return False
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             return M.read_all(self.project, progress, force=force)
         except ms_read.Stopped:
-            self.summary.setText("The check was stopped. Click “Check again” to finish it.")
+            if shiboken6.isValid(self):
+                self.summary.setText("The check was stopped. Click “Check again” to finish it.")
             return None
         finally:
             QApplication.restoreOverrideCursor()
-            dialog.close()
-            dialog.deleteLater()
+            if shiboken6.isValid(dialog):
+                dialog.close()
+                dialog.deleteLater()
 
     def _show_result(self) -> None:
         self.summary.setText(self.result.summary())
@@ -419,20 +449,41 @@ class ManuscriptPage(QWidget):
             reason = ask_reason(self, f.message)
             if reason is None:
                 return
-        with self.project.undo_step("Dismiss a manuscript warning",
-                                    where=[("manuscript", "manuscript")]):
-            M.dismiss(self.project, f, reason)
-        self.result = M.check(self.project, self._sources())
-        self._show_result()
-        self.changed.emit()
+        try:
+            with self.project.undo_step("Dismiss a manuscript warning",
+                                        where=[("manuscript", "manuscript")]):
+                M.dismiss(self.project, f, reason)
+        except (OSError, ProjectError) as e:
+            QMessageBox.warning(self, "Dismiss",
+                                "The dismissal could not be saved (manuscript/dismissed.json "
+                                f"may be open in another program, or offline):\n{e}")
+            return
+        self._recheck_after_dismissal()
 
     def restore_selected(self) -> None:
         f = self._selected_finding()
         if f is None or f.status != M.DISMISSED or self.project.read_only:
             return
-        with self.project.undo_step("Restore a manuscript warning",
-                                    where=[("manuscript", "manuscript")]):
-            M.restore(self.project, f.key)
-        self.result = M.check(self.project, self._sources())
-        self._show_result()
-        self.changed.emit()
+        try:
+            with self.project.undo_step("Restore a manuscript warning",
+                                        where=[("manuscript", "manuscript")]):
+                M.restore(self.project, f.key)
+        except (OSError, ProjectError) as e:
+            QMessageBox.warning(self, "Restore",
+                                "The warning could not be restored (manuscript/dismissed.json "
+                                f"may be open in another program, or offline):\n{e}")
+            return
+        self._recheck_after_dismissal()
+
+    def _recheck_after_dismissal(self) -> None:
+        """Show the results again after a dismissal changed. If a file changed since it was
+        last read (edited after “Open file”, or synced), it is read again rather than
+        comparing nothing ("0 compounds checked")."""
+        sources = self._sources()
+        if sources is None:
+            self.run_check()        # reads with the progress dialog, then shows the result
+        else:
+            self.result = M.check(self.project, sources)
+            self._show_result()
+        if shiboken6.isValid(self):
+            self.changed.emit()     # (the dismissal is saved even if the reading was stopped)

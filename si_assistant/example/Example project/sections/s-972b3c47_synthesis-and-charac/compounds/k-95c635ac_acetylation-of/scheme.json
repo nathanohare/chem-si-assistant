@@ -1,0 +1,34 @@
+{
+  "id": "k-95c635ac",
+  "name": "Acetylation of 1-(4-bromophenyl)ethan-1-ol",
+  "children": [
+    "c-6c300e43"
+  ],
+  "mode": "editor",
+  "editor": {
+    "starting": [
+      {
+        "id": "b-3f624a6a",
+        "structure": "editor/b-3f624a6a.mol",
+        "label": "@{c-ad564675}"
+      }
+    ],
+    "steps": [
+      {
+        "id": "st-9ed27c41",
+        "top": "Ac_{2}O, Et_{3}N, DMAP (5 mol %)",
+        "bottom": "CH_{2}Cl_{2}, rt, 2 h",
+        "products": [
+          {
+            "id": "b-ee356d74",
+            "compound": "c-6c300e43"
+          }
+        ]
+      }
+    ],
+    "inline": {},
+    "layout": {
+      "show_label": true
+    }
+  }
+}

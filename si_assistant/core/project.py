@@ -20,10 +20,14 @@ This module has no user-interface code so it can be unit-tested directly.
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
+import shutil
+import stat
+import sys
 import zipfile
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -140,6 +144,24 @@ class ProjectError(Exception):
 
 class ReadOnlyError(ProjectError):
     pass
+
+
+class ProjectMovedError(ReadOnlyError):
+    """The project folder is no longer where it was opened (renamed or moved meanwhile)."""
+
+
+class BoxCopyFailed(ProjectError):
+    """A scheme compound was moved to the Trash (`entry`: the delete is done), but the
+    scheme editor's box that showed it could not keep a copy of its structure (`cause`,
+    e.g. a file held by OneDrive): the box is left empty. Edit ▸ Undo puts both back."""
+
+    def __init__(self, entry, name: str, cause: BaseException):
+        self.entry, self.cause = entry, cause
+        super().__init__(
+            f"“{name}” was moved to the Trash, but the scheme's box that showed it could not "
+            f"keep a copy of its structure ({cause}), so that box is now empty. Edit ▸ Undo "
+            "puts back both the compound and the box (or draw the structure in the box "
+            "again).")
 
 
 def _format_number(value) -> int:
@@ -265,7 +287,8 @@ class Compound:
 
     @property
     def name(self) -> str:
-        return str((self.values.get("name") or {}).get("text", "")).strip()
+        name = self.values.get("name")   # (a hand-edited file may hold null or a number)
+        return F.part_text(name.get("text", "")).strip() if isinstance(name, dict) else ""
 
     @property
     def id_override(self) -> str:
@@ -327,11 +350,13 @@ class TrashEntry:
 
     @property
     def deleted_at(self) -> str:
-        return self.info.get("deleted_at", "")
+        value = self.info.get("deleted_at")   # (entry.json may have been edited by hand)
+        return value if isinstance(value, str) else ""
 
     @property
     def deleted_by(self) -> str:
-        return self.info.get("deleted_by", "")
+        value = self.info.get("deleted_by")
+        return value if isinstance(value, str) else ""
 
 
 class Project:
@@ -343,10 +368,23 @@ class Project:
         self.top_sections: list[Section] = []   # the section tree's top level
         self.references: list[dict[str, Any]] = []
         self.load_warnings: list[str] = []
-        self._structure_cache: dict[Path, tuple[tuple[int, int], object]] = {}
+        # The load warnings about a file that could not be read at all (the others only
+        # inform: e.g. a sync program's conflict copy, a value set aside from a hand-edited
+        # file, a copied folder). Rebuilt by every reload().
+        self.read_failures: list[str] = []
+        # {structure.mol: (stamp, molecule, generic atoms, molecule as drawn)}
+        self._structure_cache: dict[Path, tuple[tuple[int, int], object, tuple, object]] = {}
         self.journal: undo.Journal | None = None   # see enable_undo
         self.saved_format = FORMAT_VERSION   # read from project.json by reload()
         self.saved_by = ""
+        # Sections, compounds and scheme pages whose JSON file could not be read at load
+        # (damaged, or an online-only OneDrive file while offline): {id: folder}. They are
+        # not shown, but keep their place in the saved tree and orders (_merge_tree,
+        # _merge_ids) until the file can be read again. Rebuilt by every reload().
+        self._skipped: dict[str, Path] = {}
+        self._lifted: dict[str, str] = {}   # sub-section id -> the skipped section it was in
+        self._saved_tree: list = []          # project.json's section_tree, as last read/written
+        self._references_unread = False      # references.json could not be read at load
 
     @property
     def newer_format(self) -> bool:
@@ -387,26 +425,57 @@ class Project:
         return project
 
     def reload(self) -> None:
+        """(Re)read the whole project from its files. Everything is read first and only
+        then replaces what is in memory, so a failure part-way changes nothing."""
         try:
             raw = read_json(self.folder / PROJECT_FILE, {})
-        except ValueError as e:
+        except (ValueError, OSError) as e:
             raise ProjectError(f"{PROJECT_FILE} could not be read: {e}") from e
+        if not isinstance(raw, dict):
+            raise ProjectError(f"{PROJECT_FILE} could not be read: it does not hold the "
+                               "project's settings (it may have been edited by hand).")
         tree = raw.pop("section_tree", None)
         order = raw.pop("section_order", [])   # projects saved before sub-sections existed
         if not isinstance(tree, list):
-            tree = [{"id": sid} for sid in order if isinstance(sid, str)]
+            tree = [{"id": sid} for sid in order if isinstance(sid, str)] \
+                if isinstance(order, list) else []
         # Which file format (and program version) saved the project (SPEC §13m.3): a
         # newer format than this program knows is opened read-only after a warning.
-        self.saved_format = _format_number(raw.pop("format_version", None))
-        self.saved_by = str(raw.pop(SAVED_BY_KEY, "") or "")
-        self.settings = {**default_settings(self.folder.name), **raw}
+        saved_format = _format_number(raw.pop("format_version", None))
+        saved_by = str(raw.pop(SAVED_BY_KEY, "") or "")
+        settings = {**default_settings(self.folder.name), **raw}
+        if not isinstance(settings.get("journal_style"), str):
+            # (a list, number or null typed into project.json by hand: the journal style is
+            # looked up by name everywhere, so it is read as the default, ACS)
+            settings["journal_style"] = "ACS"
         # NMR impurity tolerances saved by older versions: their old defaults become the
         # new defaults (SPEC §13l.9). In memory only; saved with the next settings change.
         from . import impurities
-        impurities.upgrade_settings(self.settings)
-        self.load_warnings = []
-        self.top_sections = self._load_sections(tree)
-        self.references = self._load_references()
+        impurities.upgrade_settings(settings)
+        self.load_warnings, self.read_failures = [], []
+        self._skipped, self._lifted = {}, {}
+        top = self._load_sections(tree)
+        references = self._load_references()
+        try:
+            front = read_json(self.front_folder / FRONT_DATA_FILE, {})
+        except OSError:
+            front = {}   # (nothing is written over it: see _keep_damaged)
+            self._read_failure(
+                f"{FRONT_DIR}/{FRONT_DATA_FILE} could not be read (it may be an online-only "
+                "OneDrive file while this computer is offline); General Information figures "
+                "are not shown, and cannot be changed, until it can be read. Then reopen the "
+                "project.")
+        except ValueError:
+            front = None
+        if not isinstance(front, dict):
+            self._read_failure(
+                f"{FRONT_DIR}/{FRONT_DATA_FILE} could not be read; General Information "
+                "figures are not shown. A copy of the file (front.damaged-….json) is kept "
+                "before the next change.")
+        self.saved_format, self.saved_by, self.settings = saved_format, saved_by, settings
+        self.top_sections, self.references = top, references
+        self._saved_tree = copy.deepcopy(tree)
+        self._warn_conflict_copies()
 
     def _load_sections(self, tree: list) -> list[Section]:
         found: dict[str, Section] = {}
@@ -415,17 +484,18 @@ class Project:
             for sub in sorted(sections_dir.iterdir()):
                 if not (sub / SECTION_FILE).is_file():
                     continue
-                try:
-                    data = read_json(sub / SECTION_FILE, {})
-                except ValueError:
-                    self.load_warnings.append(f"Could not read {sub.name}/{SECTION_FILE}; skipped.")
+                data = self._read_item_json(sub, SECTION_FILE, "")
+                if data is None:
                     continue
-                sid = data.get("id") or sub.name.split("_", 1)[0]
+                sid = data.get("id")
+                if not isinstance(sid, str) or not sid:
+                    sid = data["id"] = sub.name.split("_", 1)[0]
                 if sid in found:
                     self.load_warnings.append(
                         f"Two section folders share the ID {sid}; skipped {sub.name}.")
                     continue
                 found[sid] = self._make_section(sub, data)
+        self._set_aside_copies(list(found.values()))
         top = self._place_tree(tree, found, 1, None)
         # Folders not in the saved tree (e.g. added by a sync) go at the end.
         for section in found.values():
@@ -446,8 +516,14 @@ class Project:
             if not isinstance(node, dict):
                 continue
             kids = node.get("children") or []
-            section = found.pop(node.get("id"), None)
+            node_id = node.get("id") if isinstance(node.get("id"), str) else None
+            section = found.pop(node_id, None) if node_id else None
             if section is None:   # its folder is gone: keep its sub-sections
+                if node_id in self._skipped:   # (only unreadable: they go back later)
+                    for kid in kids if isinstance(kids, list) else []:
+                        kid_id = kid.get("id") if isinstance(kid, dict) else kid
+                        if isinstance(kid_id, str):
+                            self._lifted[kid_id] = node_id
                 out += self._place_tree(kids, found, depth, parent)
                 continue
             section.parent_id = parent.id if parent else None
@@ -465,6 +541,8 @@ class Project:
                                 if s.children else {})} for s in sections]
 
     def _make_section(self, folder: Path, data: dict[str, Any]) -> Section:
+        data = _clean_section_data(data if isinstance(data, dict) else {},
+                                   f"{folder.name}/{SECTION_FILE}", self.load_warnings)
         sid = data.get("id") or folder.name.split("_", 1)[0]
         section = Section(id=sid, type=data.get("type", "text"),
                           name=data.get("name", folder.name), folder=folder, data=data)
@@ -480,19 +558,117 @@ class Project:
         for sub in sorted(parent.iterdir()):
             if not (sub / json_name).is_file():
                 continue
-            try:
-                data = read_json(sub / json_name, {})
-            except ValueError:
-                self.load_warnings.append(f"Could not read {where} ▸ {sub.name}/{json_name}; "
-                                          "skipped.")
+            data = self._read_item_json(sub, json_name, f"{where} ▸ ")
+            if data is None:
                 continue
-            item_id = data.get("id") or sub.name.split("_", 1)[0]
-            if item_id in found:
-                self.load_warnings.append(f"Two folders share the ID {item_id}; skipped {sub.name}.")
+            item_id = data.get("id")
+            if not isinstance(item_id, str) or not item_id:
+                item_id = sub.name.split("_", 1)[0]
+            if item_id in found:   # (a copy in the same section: see _set_aside_copies)
+                self._skipped.setdefault(item_id, sub)
+                self.load_warnings.append(
+                    f"Two folders share the ID {item_id}: {where} ▸ {found[item_id][0].name} "
+                    f"is shown, {where} ▸ {sub.name} is not. Delete the copy you do not need "
+                    "(in File Explorer or Finder), then reopen the project.")
                 continue
             data["id"] = item_id
+            if json_name == COMPOUND_FILE:
+                _clean_compound_data(data, f"{where} ▸ {sub.name}/{json_name}",
+                                     self.load_warnings)
             found[item_id] = (sub, data)
         return found
+
+    def _set_aside_copies(self, sections: list[Section]) -> None:
+        """A compound or scheme page folder copied into another Data section (e.g. in File
+        Explorer) has the same ID as the original, so only one of the two is shown: the
+        one its own section lists (in its saved order, or as a compound of one of its scheme
+        pages), else the first found. The other keeps its place like an unreadable item
+        (see _skipped), so nothing moves when the user deletes the copy they don't need."""
+        copies: dict[str, list[tuple[Section, Any, SchemePage | None]]] = {}
+        for section in sections:
+            for item in section.items:
+                copies.setdefault(item.id, []).append((section, item, None))
+                for child in getattr(item, "children", []):
+                    copies.setdefault(child.id, []).append((section, child, item))
+
+        def rank(copy_):
+            section, item, scheme = copy_
+            order = section.data.get("compound_order")
+            listed = scheme in section.items if scheme is not None else                 isinstance(order, list) and item.id in order
+            return listed, bool(getattr(item, "children", None))
+
+        # (scheme pages first: a compound on a scheme page set aside is not kept)
+        for item_id, found in sorted(copies.items(),
+                                     key=lambda pair: any(f[2] is not None for f in pair[1])):
+            if len(found) < 2:
+                continue
+            kept = max(found, key=rank)   # (the first of the best)
+            for section, item, scheme in found:
+                if item is kept[1]:
+                    continue
+                (scheme.children if scheme is not None else section.items).remove(item)
+                self._skipped.setdefault(item_id, item.folder)
+                self.load_warnings.append(
+                    f"Two folders share the ID {item_id}: {kept[0].name} ▸ "
+                    f"{kept[1].folder.name} is shown, {section.name} ▸ {item.folder.name} is "
+                    "not (it is probably a copy). Delete the copy you do not need (in File "
+                    "Explorer or Finder), then reopen the project.")
+
+    def _read_item_json(self, folder: Path, json_name: str, where: str) -> dict | None:
+        """`folder`/`json_name` (section.json, compound.json or scheme.json), or None,
+        with a load warning, when it can't be read. The item then keeps its place in the
+        saved tree or order until it can be read again (see _skipped)."""
+        try:
+            data = read_json(folder / json_name, {})
+        except OSError:
+            problem = ("could not be read (it may be an online-only OneDrive file while this "
+                       "computer is offline, or open in another program)")
+        except ValueError:
+            problem = "could not be read (it is damaged, or was edited by hand)"
+        else:
+            if isinstance(data, dict):
+                return data
+            problem = "does not hold what the program expects (it may have been edited by hand)"
+        self._skipped.setdefault(folder.name.split("_", 1)[0], folder)
+        shifted = "" if json_name == SECTION_FILE else \
+            ", and the compound IDs after it may be shifted"
+        self._read_failure(
+            f"{where}{folder.name}/{json_name} {problem}. It is not shown{shifted} until it "
+            "can be read, but it keeps its place: repair it (or let OneDrive download it), "
+            "then reopen the project.")
+        return None
+
+    def _read_failure(self, message: str) -> None:
+        """A load warning about a file that could not be read (see read_failures)."""
+        self.load_warnings.append(message)
+        self.read_failures.append(message)
+
+    def _warn_conflict_copies(self) -> None:
+        """When a file was changed on two computers before they synced, OneDrive keeps
+        the other version next to it as e.g. "compound-LAPTOP.json" (Dropbox: "compound
+        (… conflicted copy …).json"). The program reads only the usual file, so say so;
+        nothing is merged, renamed or deleted."""
+        from . import manuscript
+        folders: list[tuple[Path, tuple[str, ...] | None]] = [
+            (self.folder, None), (self.front_folder, None),
+            (self.front_folder / TABLES_DIR, None),
+            (self.folder / manuscript.MANUSCRIPT_DIR, (manuscript.DISMISSED_FILE,))]
+        for section in self.sections:
+            folders += [(section.folder, None), (section.folder / GP_DIR, None),
+                        (section.folder / TABLES_DIR, None)]
+            for item in section.items:
+                folders.append((item.folder, None))
+                folders += [(c.folder, None) for c in getattr(item, "children", [])]
+        found = [str(path.relative_to(self.folder)) for folder, only in folders
+                 for path in _conflict_copies(folder, only)]
+        if found:
+            shown = ", ".join(found[:10]) + (f" and {len(found) - 10} more" if len(found) > 10
+                                             else "")
+            self.load_warnings.append(
+                "OneDrive (or another sync program) kept two versions of some files, because "
+                "they were changed on two computers. The program reads only the usual file, so "
+                f"what is in the extra copy is not shown: {shown}. Open both, copy over what "
+                "you need, then delete the extra file.")
 
     def _load_items(self, section: Section) -> list["Compound | SchemePage"]:
         folder = section.folder / COMPOUNDS_DIR
@@ -513,7 +689,10 @@ class Project:
         """A scheme page, taking its children out of `compounds`."""
         from . import scheme_editor
         scheme = SchemePage(data["id"], folder, data, section.id)
-        for cid in data.get("children", []):
+        children = data.get("children")
+        for cid in children if isinstance(children, list) else []:
+            if not isinstance(cid, str):
+                continue
             child = compounds.pop(cid, None)
             if child is not None:
                 child.scheme_id = scheme.id
@@ -557,10 +736,13 @@ class Project:
         return self.journal
 
     def _lock_ours_or_unknown(self) -> bool:
+        """Is the lock still ours, or is there none (so build/undo/ is ours to remove)?"""
         try:
-            return self.lock_still_ours() or lockmod.read_lock(self.folder) is None
+            return self.lock_still_ours() or lockmod.read_lock_strict(self.folder) is None
         except OSError:
-            return True
+            # Can't tell (e.g. a half-synced .lock of someone taking over): build/undo/ is
+            # left alone. An old history is removed anyway the next time it is opened.
+            return False
 
     def stop_undo(self) -> None:
         """Someone else has taken the project over: stop keeping a history, and leave
@@ -607,10 +789,28 @@ class Project:
         try:
             step = self.journal.redo() if redo else self.journal.undo()
         except undo.UndoError as e:
-            raise ProjectError(str(e)) from e
+            # It may have stopped half-way: read the files back, so that what is in memory
+            # (and saved by the next autosave) matches them.
+            self._structure_cache.clear()
+            message = str(e)
+            try:
+                self.reload()
+            except (ProjectError, OSError, ValueError) as again:
+                self.read_only = True   # (never save what is in memory over the files)
+                message += ("\n\nThe project could not be read back from its files either, "
+                            "so it is now read-only. Please close it and open it again."
+                            f"\n\n{again}")
+            raise ProjectError(message) from e
         finally:
             self._structure_cache.clear()
-        self.reload()
+        try:
+            self.reload()
+        except (ProjectError, OSError, ValueError) as e:
+            # What is in memory no longer matches the files: never save it over them.
+            self.read_only = True
+            raise ProjectError(f"{'Redo' if redo else 'Undo'} was done, but the project could "
+                               "not be read back from its files, so it is now read-only. "
+                               f"Please close it and open it again.\n\n{e}") from e
         return step
 
     # ------------------------------------------------------------------ saving
@@ -618,22 +818,106 @@ class Project:
     def _check_writable(self) -> None:
         if self.read_only:
             raise ReadOnlyError("This project is open read-only.")
+        if not (self.folder / PROJECT_FILE).is_file():
+            # Renamed or moved while open (the window notices within seconds): writing
+            # would re-create the old folder with only the changed files in it.
+            raise ProjectMovedError(
+                f"The project folder is no longer at:\n{self.folder}\n\nIt may have been "
+                "renamed or moved. Close the project and reopen it from its new place.")
 
     def save_settings(self) -> None:
         self._check_writable()
+        tree = self._merge_tree(self._tree_json(self.top_sections), self._saved_tree)
         atomic_write_json(self.folder / PROJECT_FILE, {
             "format_version": FORMAT_VERSION,
             SAVED_BY_KEY: _program_version(),
             **self.settings,
-            "section_tree": self._tree_json(self.top_sections),
+            "section_tree": tree,
         })
+        self._saved_tree = copy.deepcopy(tree)
 
     def save_section(self, section: Section) -> None:
         self._check_writable()
         section.data.update({"id": section.id, "type": section.type, "name": section.name})
         if section.type == "data":
-            section.data["compound_order"] = [i.id for i in section.items]
+            section.data["compound_order"] = self._merge_ids(
+                [i.id for i in section.items], section.data.get("compound_order"))
         atomic_write_json(section.folder / SECTION_FILE, section.data)
+
+    # ---- items whose file could not be read keep their place (see _skipped)
+
+    def _still_skipped(self, item_id) -> bool:
+        """Was `item_id` left out at load only because its file could not be read, and is
+        its folder still there? (A folder deleted meanwhile is dropped for good.)"""
+        return isinstance(item_id, str) and item_id in self._skipped \
+            and self._skipped[item_id].is_dir()
+
+    def _merge_ids(self, new: list[str], old) -> list[str]:
+        """`new` (a compound order, or a scheme's children) with the ids of `old` (the one
+        saved before) put back that are missing only because their file could not be
+        read, each after the one it followed before."""
+        out = list(new)
+        for n, item_id in enumerate(old if isinstance(old, list) else []):
+            if item_id in out or not self._still_skipped(item_id):
+                continue
+            before = next((i for i in reversed(old[:n]) if i in out), None)
+            out.insert(out.index(before) + 1 if before is not None else 0, item_id)
+        return out
+
+    def _merge_tree(self, new: list[dict[str, Any]], old: list) -> list[dict[str, Any]]:
+        """The section tree to save (`new`), with the sections of the saved tree (`old`)
+        put back that are missing only because their section.json could not be read: at
+        their old place, with the sub-sections lifted out of them at load (unless the user
+        has moved those since)."""
+        if not any(self._still_skipped(i) for i in self._skipped):
+            return new
+        present: set[str] = set()
+
+        def collect(nodes):
+            for n in nodes:
+                present.add(n["id"])
+                collect(n.get("children", []))
+
+        def find(nodes, sid):
+            for n in nodes:
+                if n["id"] == sid:
+                    return n
+                hit = find(n.get("children", []), sid)
+                if hit is not None:
+                    return hit
+            return None
+
+        def take_lifted(nodes, sid):
+            out = []
+            for n in list(nodes):
+                if self._lifted.get(n["id"]) == sid:
+                    nodes.remove(n)
+                    out.append(n)
+                else:
+                    out += take_lifted(n.get("children", []), sid)
+            return out
+
+        def walk(old_nodes, parent_id):
+            before: list[str] = []
+            for node in old_nodes if isinstance(old_nodes, list) else []:
+                node = {"id": node} if isinstance(node, str) else node
+                if not isinstance(node, dict) or not isinstance(node.get("id"), str):
+                    continue
+                sid = node["id"]
+                if sid not in present and self._still_skipped(sid):
+                    kids = take_lifted(new, sid)
+                    parent = find(new, parent_id) if parent_id else None
+                    siblings = parent.setdefault("children", []) if parent else new
+                    ids = [n["id"] for n in siblings]
+                    at = next((ids.index(b) + 1 for b in reversed(before) if b in ids), 0)
+                    siblings.insert(at, {"id": sid, **({"children": kids} if kids else {})})
+                    present.add(sid)
+                before.append(sid)
+                walk(node.get("children"), sid)
+
+        collect(new)
+        walk(old, None)
+        return new
 
     # ------------------------------------------------------------------ sections
 
@@ -757,8 +1041,19 @@ class Project:
         if not name:
             raise ProjectError("Section names cannot be empty.")
         section = self.section(section_id)
+        old, had, old_data = section.name, "name" in section.data, section.data.get("name")
         section.name = name
-        self.save_section(section)
+        try:
+            self.save_section(section)
+        except BaseException:
+            # (not saved: memory keeps what section.json has, so the tree doesn't show the
+            # new name as if saved, nor does a later save write it unseen)
+            section.name = old
+            if had:
+                section.data["name"] = old_data
+            else:
+                section.data.pop("name", None)
+            raise
 
     def set_order(self, section_ids: list[str], parent_id: str | None = None) -> None:
         """Reorder the top-level sections (or the sub-sections of `parent_id`)."""
@@ -767,8 +1062,13 @@ class Project:
         by_id = {s.id: s for s in container}
         if sorted(section_ids) != sorted(by_id):
             raise ValueError("New order must contain exactly the existing sections.")
+        before = container[:]
         container[:] = [by_id[sid] for sid in section_ids]
-        self.save_settings()
+        try:
+            self.save_settings()
+        except BaseException:
+            container[:] = before   # (not saved: the order in memory stays as on disk)
+            raise
 
     _SAME_PARENT = object()
 
@@ -782,11 +1082,24 @@ class Project:
             parent_id = section.parent_id
         parent_id = parent_id or None
         self.check_section_place(parent_id, section)
-        self.siblings(section).remove(section)
+        lifted = self._lifted.pop(section_id, None)   # (put where the user wants it, it
+        # stays there)
+        old_container, old_parent = self.siblings(section), section.parent_id
+        old_index = old_container.index(section)
+        old_container.remove(section)
         container = self.section(parent_id).children if parent_id else self.top_sections
         container.insert(max(0, min(new_index, len(container))), section)
         section.parent_id = parent_id
-        self.save_settings()
+        try:
+            self.save_settings()
+        except BaseException:
+            # (not saved: the section goes back where it was in memory, as on disk)
+            container.remove(section)
+            old_container.insert(old_index, section)
+            section.parent_id = old_parent
+            if lifted is not None:
+                self._lifted[section_id] = lifted
+            raise
 
     # ------------------------------------------------------------------ the Spectra section
 
@@ -804,6 +1117,9 @@ class Project:
         existing = self.spectra_section
         if existing is not None or self.read_only:
             return existing
+        if any(self._still_skipped(i) and self._skipped[i].parent == self.folder / SECTIONS_DIR
+               for i in self._skipped):
+            return None   # (a section that could not be read may be the Spectra section)
         section = self.add_section(SPECTRA_SECTION, spectra_mod.DEFAULT_NAME)
         for key in spectra_mod.LEGACY_KEYS:
             self.settings.pop(key, None)
@@ -873,11 +1189,21 @@ class Project:
         if item is None:
             raise ProjectError(f"{file_name} is no longer attached to this compound.")
         text = text.strip()
+        had, old = key in item, item.get(key)
         if text:
             item[key] = text
         elif key in item:
             item[key] = ""   # (the Spectra field keeps its parts; empty = automatic)
-        self.save_compound(compound)
+        try:
+            self.save_compound(compound)
+        except BaseException:
+            # (not saved: memory keeps what the file has, so a later save can't write it
+            # unseen, and the page sees the typing as still to be saved)
+            if had:
+                item[key] = old
+            else:
+                item.pop(key, None)
+            raise
 
     # ------------------------------------------------------------------ text sections
 
@@ -972,12 +1298,13 @@ class Project:
         self._check_writable()
         path = self.section_file_path(section)
         original = self.section_file_source(section)
-        section.data["file"] = None
-        self.save_section(section)
+        # Trash first: if the file is open elsewhere this raises with nothing changed.
         if path is not None and path.exists():
             self._move_to_trash(path, kind="file", name=path.name,
                                 extra={"section_id": section.id, "section_name": section.name},
                                 companions=_present(original))
+        section.data["file"] = None
+        self.save_section(section)
 
     # ------------------------------------------------------------------ trash
 
@@ -998,17 +1325,50 @@ class Project:
                                "Move out to the top level).")
         container = self.siblings(section)
         index = container.index(section)
-        below = self.subtree(section)[1:]
+        tree, unread = self._tree_with_unread(section)
+        below = [s.folder for s in self.subtree(section)[1:]] + unread
         entry = self._move_to_trash(section.folder, kind="section", name=section.name,
                                     extra={"section_id": section.id, "type": section.type,
                                            "original_index": index,
                                            "parent_id": section.parent_id or "",
-                                           "tree": self._tree_json([section])[0],
+                                           "tree": tree,
                                            "subsections": len(below)},
-                                    companions=tuple(s.folder for s in below))
+                                    companions=tuple(below))
         container.remove(section)
         self.save_settings()
         return entry
+
+    def _tree_with_unread(self, section: Section) -> tuple[dict[str, Any], list[Path]]:
+        """The section's tree, with the sub-sections the saved tree has below it whose
+        section.json could not be read at load put back at their place (see _merge_tree),
+        and those sub-sections' folders: they go to the Trash with it."""
+        def find(nodes):
+            for node in nodes if isinstance(nodes, list) else []:
+                node = {"id": node} if isinstance(node, str) else node
+                if not isinstance(node, dict):
+                    continue
+                if node.get("id") == section.id:
+                    return node
+                hit = find(node.get("children"))
+                if hit is not None:
+                    return hit
+            return None
+
+        tree = self._tree_json([section])
+        saved = find(self._saved_tree)
+        if saved is not None:
+            tree = self._merge_tree(tree, [saved])
+        shown = {s.id for s in self.subtree(section)}
+        unread: list[Path] = []
+
+        def collect(nodes):
+            for node in nodes:
+                if node["id"] not in shown and self._still_skipped(node["id"]):
+                    unread.append(self._skipped[node["id"]])
+                collect(node.get("children", []))
+
+        collect(tree)
+        return tree[0], unread
 
     def _move_to_trash(self, path: Path, kind: str, name: str, extra: dict,
                        companions: tuple[Path, ...] = ()) -> TrashEntry:
@@ -1065,10 +1425,14 @@ class Project:
                 except ValueError:
                     info = None
                 if isinstance(info, dict):
-                    name = info.get("name", sub.name)
+                    # (entry.json edited by hand: the name and kind are always text)
+                    name = info.get("name")
+                    name = sub.name if name is None or name == "" else str(name)
+                    kind = info.get("kind", "?")
+                    kind = kind if isinstance(kind, str) else "?"
                     if info.get("pending"):   # the deletion stopped part-way (e.g. a crash)
                         name = f"{name} (deletion did not finish)"
-                    entries.append(TrashEntry(sub.name, info.get("kind", "?"), name, sub, info))
+                    entries.append(TrashEntry(sub.name, kind, name, sub, info))
                 elif any(sub.iterdir()):
                     # Files with no description (e.g. from a crash in an older version):
                     # still listed, so they are not silently lost.
@@ -1084,7 +1448,12 @@ class Project:
         entry = next((e for e in self.list_trash() if e.id == entry_id), None)
         if entry is None:
             raise ProjectError("That item is no longer in the Trash.")
-        item = entry.folder / entry.info["item"]
+        name = entry.info.get("item")
+        # (a plain file or folder name inside the entry; only an unfinished deletion has none)
+        if not (isinstance(name, str) and (ms_reports.safe_report_name(name)
+                                           or (name == "" and entry.kind == "incomplete"))):
+            raise _trash_damaged(entry)
+        item = entry.folder / name
         if entry.kind == "section":
             message = self._restore_section(entry, item)
         elif entry.kind == "file":
@@ -1119,7 +1488,21 @@ class Project:
             message = self._restore_incomplete(entry)
         else:
             raise ProjectError(f"Unknown kind of Trash item: {entry.kind}")
-        fileio.remove_tree(entry.folder, ignore_errors=True)
+        left = [p.name for p in entry.folder.iterdir() if p.name != TRASH_ENTRY_FILE] \
+            if entry.kind in ("section", "scheme") and entry.folder.is_dir() else []
+        if left:
+            # (these move everything they restore: anything still here was not listed in
+            # the description, e.g. entry.json edited by hand. It is kept, and the Trash
+            # shows it as an unfinished deletion, never thrown away.)
+            try:
+                fileio.remove_file(entry.folder / TRASH_ENTRY_FILE)
+            except OSError:
+                pass
+            message += (" Some files deleted with it were not put back, because the Trash's "
+                        "description of them is damaged; they are still in the Trash ("
+                        + ", ".join(sorted(left)) + ").")
+        else:
+            fileio.remove_tree(entry.folder, ignore_errors=True)
         if entry.kind in ("section", "incomplete"):
             try:   # (a section deleted by an older version may still hold !image lines)
                 self.upgrade_all_pictures()
@@ -1135,7 +1518,8 @@ class Project:
     def _restore_section(self, entry: TrashEntry, item: Path) -> str:
         """Put a section back where it was, with the sub-sections deleted with it."""
         parent_dir = self.folder / SECTIONS_DIR
-        names = [item.name] + list(entry.info.get("companions", []))
+        saved_index = _trash_index(entry.info)   # (checked before anything is moved)
+        names = [item.name] + _trash_names(entry, "companions")
         # (A deletion that stopped part-way holds only some of them; the rest never left.)
         names = [n for n in names if (entry.folder / n).exists()]
         if not names:
@@ -1143,18 +1527,18 @@ class Project:
         for name in names:
             if (parent_dir / name).exists():
                 raise ProjectError(f"Cannot restore: {name} already exists.")
+        datas = {name: _trashed_json(entry.folder / name, SECTION_FILE) for name in names}
         fileio.make_dirs(parent_dir)
         found: dict[str, Section] = {}
         for name in names:
-            source = entry.folder / name
-            if not source.exists():
-                continue
-            fileio.move(source, parent_dir / name)
-            data = read_json(parent_dir / name / SECTION_FILE, {})
+            fileio.move(entry.folder / name, parent_dir / name)
+            data = datas[name]
             if name == item.name:
                 data.setdefault("id", entry.info.get("section_id"))
             section = self._make_section(parent_dir / name, data)
             found[section.id] = section
+            if self._skipped.get(section.id) == section.folder:   # (unread at load)
+                del self._skipped[section.id]
         root_id = entry.info.get("section_id") or next(iter(found), "")
         tree = entry.info.get("tree") or {"id": root_id}
         parent_id = entry.info.get("parent_id") or None
@@ -1169,8 +1553,8 @@ class Project:
         for leftover in found.values():   # (not in the saved tree: keep it next to the rest)
             leftover.parent_id = parent_id
             placed.append(leftover)
-        index = int(entry.info.get("original_index", len(container)))
-        index = len(container) if note else max(0, min(index, len(container)))
+        index = len(container) if note or saved_index is None \
+            else max(0, min(saved_index, len(container)))
         container[index:index] = placed
         self.save_settings()
         name = placed[0].name if placed else entry.name
@@ -1180,7 +1564,13 @@ class Project:
 
     def _restore_incomplete(self, entry: TrashEntry) -> str:
         """A Trash folder with no description: put back any section folders it holds (at
-        the top level); anything else is left for the user to look at."""
+        the top level); anything else is left for the user to look at. The newer files kept
+        when an undo could not be finished (their list of where each came from, "files")
+        are never put back automatically (those places may now hold other versions): the
+        list is shown, for the user to copy what they need by hand."""
+        files = entry.info.get("files")
+        if isinstance(files, dict) and files:
+            raise ProjectError(self._kept_files_list(entry, files))
         parent_dir = self.folder / SECTIONS_DIR
         contents = sorted(entry.folder.iterdir())
         sections = [p for p in contents if p.is_dir() and (p / SECTION_FILE).is_file()]
@@ -1190,22 +1580,48 @@ class Project:
                 "The program cannot tell where these files belong, so they were left in the "
                 f"Trash folder for you to move by hand:\n{entry.folder}")
         known = {s.id for s in self.sections}
+        datas = {p: _trashed_json(p, SECTION_FILE) for p in sections}
         for p in sections:
-            sid = read_json(p / SECTION_FILE, {}).get("id") or p.name.split("_", 1)[0]
+            sid = datas[p].get("id") or p.name.split("_", 1)[0]
             if (parent_dir / p.name).exists() or sid in known:
                 raise ProjectError(f"Cannot restore: {p.name} is already in the project.")
         fileio.make_dirs(parent_dir)
         names = []
         for p in sections:
             fileio.rename(p, parent_dir / p.name)
-            section = self._make_section(parent_dir / p.name,
-                                         read_json(parent_dir / p.name / SECTION_FILE, {}))
+            section = self._make_section(parent_dir / p.name, datas[p])
             section.parent_id = None
             self.top_sections.append(section)
             names.append(section.name)
         self.save_settings()
         return ("Restored " + ", ".join(f"“{n}”" for n in names) + " at the end of the "
                 "section list." if names else "Restored the files.")
+
+    @staticmethod
+    def _kept_files_list(entry: TrashEntry, files: dict) -> str:
+        """The plain-words list of the newer files kept after an unfinished undo."""
+        lines = []
+        root = entry.folder.resolve()
+        for stored, place in sorted((k, v) for k, v in files.items()
+                                    if isinstance(k, str) and isinstance(v, str)):
+            path = entry.folder / stored   # (hand-editable: only files inside the entry)
+            try:
+                inside = path.resolve().is_relative_to(root) and path.is_file()
+            except (OSError, ValueError):
+                inside = False
+            if inside:
+                lines.append(f"  {stored}  was  {place}")
+        if not lines:
+            return ("The newer files kept when an undo could not be finished are no longer in "
+                    f"this Trash folder:\n{entry.folder}")
+        shown = "\n".join(lines[:10]) + (f"\n  …and {len(lines) - 10} more (all listed in "
+                                         f"{TRASH_ENTRY_FILE})" if len(lines) > 10 else "")
+        return ("These are the newer versions of files, kept when an undo could not be "
+                "finished. They are not put back automatically, as those places may now hold "
+                "other versions. To keep one, copy it from\n"
+                f"{entry.folder}\nto the place shown and give it that name (e.g. "
+                "procedure.txt). Emptying the Trash deletes them.\n\n"
+                f"Each file in that Trash folder, and where it came from:\n{shown}")
 
     # ------------------------------------------------------------------ compounds
 
@@ -1254,8 +1670,10 @@ class Project:
                 for n in F.DEFAULT_NMR_NUCLEI]
 
     def add_compound(self, section_id: str, index: int | None = None, name: str = "",
-                     scheme_id: str | None = None) -> Compound:
-        """New compound in a Data section, or inside one of its scheme pages."""
+                     scheme_id: str | None = None, save_owner: bool = True) -> Compound:
+        """New compound in a Data section, or inside one of its scheme pages.
+        `save_owner`=False: the caller saves the section or scheme once itself (e.g. after
+        making several copies)."""
         self._check_writable()
         section = self._data_section(section_id)
         container, parent, owner = self._container(section, scheme_id)
@@ -1271,7 +1689,14 @@ class Project:
         self.save_compound(compound)
         container.insert(len(container) if index is None else max(0, min(index, len(container))),
                          compound)
-        self._save_owner(owner)
+        if save_owner:
+            try:
+                self._save_owner(owner)
+            except BaseException:
+                # (the owner file does not list it: no page left in memory or on disk)
+                container.remove(compound)
+                fileio.remove_tree(folder, ignore_errors=True)
+                raise
         return compound
 
     @staticmethod
@@ -1300,17 +1725,83 @@ class Project:
         section = self.section(compound.section_id)
         container, _parent, owner = self._container(section, compound.scheme_id)
         index = container.index(compound)
-        if isinstance(owner, SchemePage):
-            # The scheme editor's box that showed it keeps a copy of its structure.
-            from . import scheme_editor
-            scheme_editor.compound_leaving(self, owner, compound.id)
-        entry = self._move_to_trash(
-            compound.folder, kind="compound", name=compound.name or "unnamed compound",
-            extra={"compound_id": compound.id, "section_id": section.id,
-                   "section_name": section.name, "scheme_id": compound.scheme_id or "",
-                   "original_index": index})
+        # All or nothing. First the owner's file is saved without the compound: a real write
+        # (saving unchanged contents writes nothing, so proves nothing), so an owner file
+        # open in another program stops the delete before anything moves.
+        in_scheme = isinstance(owner, SchemePage)
+        owner_file = owner.folder / (SCHEME_FILE if in_scheme else SECTION_FILE)
+        saved = owner_file.read_bytes() if owner_file.is_file() else None
+        key = "children" if in_scheme else "compound_order"   # (the list the save rewrites)
+        had, listed = key in owner.data, owner.data.get(key)
         container.remove(compound)
-        self._save_owner(owner)
+        try:
+            self._save_owner(owner)
+        finally:
+            container.insert(index, compound)   # (until the folder is in the Trash)
+            if had:
+                owner.data[key] = listed
+            else:
+                owner.data.pop(key, None)
+        # Then the move (a file open in another program stops it, and then nothing has
+        # changed: the owner's file is put back as it was, the scheme's box stays linked,
+        # no files are copied).
+        try:
+            entry = self._move_to_trash(
+                compound.folder, kind="compound", name=compound.name or "unnamed compound",
+                extra={"compound_id": compound.id, "section_id": section.id,
+                       "section_name": section.name, "scheme_id": compound.scheme_id or "",
+                       "original_index": index})
+        except BaseException:
+            try:
+                if saved is not None:
+                    atomic_write_bytes(owner_file, saved)
+                else:
+                    self._save_owner(owner)
+            except OSError:
+                pass   # (its folder is still there, and an unlisted compound is still loaded)
+            raise
+        folder = compound.folder
+        copy_failed = None
+        leaving, unlinked = None, []
+        try:
+            if in_scheme:
+                # The scheme editor's box that showed it keeps a copy of its structure,
+                # copied from the compound's folder in the Trash (saved below).
+                from . import scheme_editor
+                compound.folder = entry.folder / folder.name
+                try:
+                    leaving = scheme_editor.leave_boxes(self, owner, compound.id)
+                except OSError as e:
+                    copy_failed = e   # (the page is in the Trash: the delete is done; its
+                    # box is unlinked, and left empty)
+                    for box, _where in scheme_editor.all_boxes(owner):
+                        if box.get("compound") == compound.id:
+                            box.pop("compound", None)
+                            unlinked.append(box)
+                finally:
+                    compound.folder = folder
+        finally:
+            # (deleted even if the box's copy failed: the page is in the Trash)
+            container.remove(compound)
+            try:
+                self._save_owner(owner)
+            except OSError as e:
+                if not in_scheme:
+                    raise
+                # scheme.json became held after the first save: the page is in the Trash
+                # (and no longer listed there), but its box is still linked in the file.
+                # Memory keeps that too (the box shows nothing; a restore from the Trash
+                # links it again), the copies are removed, and the user is told.
+                if leaving is not None:
+                    leaving.put_back()
+                for box in unlinked:
+                    box["compound"] = compound.id
+                copy_failed = copy_failed or e
+            else:
+                if leaving is not None:
+                    leaving.done()
+        if copy_failed is not None:
+            raise BoxCopyFailed(entry, compound.name or "unnamed compound", copy_failed)
         return entry
 
     def move_compound(self, compound_id: str, section_id: str, index: int,
@@ -1327,6 +1818,8 @@ class Project:
         if isinstance(src_owner, SchemePage) and src_owner is not dst_owner:
             # (leaving a scheme: the box that showed it keeps a copy of its structure)
             scheme_editor.compound_leaving(self, src_owner, compound.id)
+        # (put back if nothing could be moved or saved: the IDs come from the order)
+        before, owner_data = list(src), copy.deepcopy(src_owner.data)
         src.remove(compound)
         if dst_parent != src_parent:
             dest = _unique_path(dst_parent / compound.folder.name)
@@ -1334,12 +1827,26 @@ class Project:
             try:
                 fileio.move(compound.folder, dest)
             except OSError:
-                src.append(compound)  # put it back in memory; nothing moved
+                src[:] = before   # back in its old place in memory; nothing moved
                 raise
             compound.folder = dest
         compound.section_id = target_section.id
         compound.scheme_id = scheme_id or None
         dst.insert(max(0, min(index, len(dst))), compound)
+        if src is dst:
+            # Moved within one list: if it can't be saved, memory keeps the order on disk
+            # (or the tree would show the compounds renumbered, and the next save of the
+            # section or scheme page would write it unseen).
+            try:
+                if isinstance(dst_owner, SchemePage):
+                    scheme_editor.sync_children(self, dst_owner, save=False)
+                self._save_owner(dst_owner)
+            except BaseException:
+                src[:] = before
+                dst_owner.data.clear()
+                dst_owner.data.update(owner_data)
+                raise
+            return
         if isinstance(dst_owner, SchemePage):
             # An editor scheme's compounds stay in the order of their boxes.
             scheme_editor.sync_children(self, dst_owner, save=False)
@@ -1361,13 +1868,15 @@ class Project:
         dest = parent / item.name
         if dest.exists():
             raise ProjectError(f"Cannot restore: {dest.name} already exists.")
+        data = _clean_compound_data(_trashed_json(item, COMPOUND_FILE),
+                                    f"{section.name} ▸ {dest.name}/{COMPOUND_FILE}", [])
+        index = _trash_index(entry.info)   # (checked before anything is moved)
         fileio.make_dirs(dest.parent)
         fileio.move(item, dest)
-        data = read_json(dest / COMPOUND_FILE, {})
         compound = Compound(data.get("id", entry.info.get("compound_id")), dest, data,
                             section.id, scheme_id)
-        index = int(entry.info.get("original_index", len(container)))
-        container.insert(max(0, min(index, len(container))), compound)
+        index = len(container) if index is None else max(0, min(index, len(container)))
+        container.insert(index, compound)
         if isinstance(owner, SchemePage):
             # (a scheme made with the editor orders its compounds as its boxes, SPEC §13n.4)
             from . import scheme_editor
@@ -1388,7 +1897,8 @@ class Project:
 
     def save_scheme(self, scheme: SchemePage) -> None:
         self._check_writable()
-        scheme.data.update({"id": scheme.id, "children": [c.id for c in scheme.children]})
+        scheme.data.update({"id": scheme.id, "children": self._merge_ids(
+            [c.id for c in scheme.children], scheme.data.get("children"))})
         atomic_write_json(scheme.folder / SCHEME_FILE, scheme.data)
 
     def add_scheme(self, section_id: str, index: int | None = None,
@@ -1417,16 +1927,29 @@ class Project:
         if not name:
             raise ProjectError("Scheme names cannot be empty.")
         scheme = self.scheme(scheme_id)
-        scheme.data["name"] = name
-        self.save_scheme(scheme)
+        self._save_scheme_value(scheme, "name", name)
 
     def set_scheme_label(self, scheme_id: str, label: str) -> None:
         """Type over the scheme's automatic label ("Scheme S2"); "" = automatic."""
         scheme = self.scheme(scheme_id)
-        scheme.data["label"] = label.strip()
-        if not scheme.data["label"]:
-            del scheme.data["label"]
-        self.save_scheme(scheme)
+        self._save_scheme_value(scheme, "label", label.strip() or None)
+
+    def _save_scheme_value(self, scheme: SchemePage, key: str, value) -> None:
+        """Set (None: remove) one entry of scheme.json and save; if the save fails, the
+        scheme in memory is put back as it was, so a later save cannot write it unseen."""
+        had, old = key in scheme.data, scheme.data.get(key)
+        if value is None:
+            scheme.data.pop(key, None)
+        else:
+            scheme.data[key] = value
+        try:
+            self.save_scheme(scheme)
+        except BaseException:
+            if had:
+                scheme.data[key] = old
+            else:
+                scheme.data.pop(key, None)
+            raise
 
     def delete_scheme(self, scheme_id: str) -> TrashEntry:
         """Move a scheme page, with its compounds, to the Trash."""
@@ -1434,13 +1957,14 @@ class Project:
         scheme = self.scheme(scheme_id)
         section = self.section(scheme.section_id)
         index = section.items.index(scheme)
+        folders = [c.folder for c in scheme.children] + list(self._unread_children(scheme).values())
         entry = self._move_to_trash(scheme.folder, kind="scheme", name=scheme.name,
                                     extra={"scheme_id": scheme.id, "section_id": section.id,
                                            "section_name": section.name,
                                            "original_index": index,
-                                           "children": [c.folder.name for c in scheme.children]})
-        for child in scheme.children:  # its compounds go into the same Trash entry
-            fileio.move(child.folder, entry.folder / child.folder.name)
+                                           "children": [f.name for f in folders]},
+                                    # its compounds go into the same Trash entry, all or nothing
+                                    companions=tuple(folders))
         section.items.remove(scheme)
         self.save_section(section)
         return entry
@@ -1453,56 +1977,134 @@ class Project:
                 f"The Data section “{entry.info.get('section_name', '?')}” this scheme "
                 "belonged to no longer exists. Restore that section first.") from None
         parent = section.folder / COMPOUNDS_DIR
-        names = [item.name] + list(entry.info.get("children", []))
+        child_names = _trash_names(entry, "children")
+        # A deletion that stopped part-way (e.g. a crash) took only some of its compound
+        # pages: the rest never left the section, and are shown there meanwhile. They
+        # join the scheme again (as its scheme.json says, and the next open would do).
+        stayed = {n for n in child_names
+                  if not (entry.folder / n).exists() and (parent / n).is_dir()}
+        names = [item.name] + [n for n in child_names if n not in stayed]
         for name in names:
             if (parent / name).exists():
                 raise ProjectError(f"Cannot restore: {name} already exists.")
+        data = _trashed_json(item, SCHEME_FILE)
+        index = _trash_index(entry.info)   # (checked before anything is moved)
+        loaded = {c.folder: c for c in self.all_compounds() if c.folder.parent == parent}
         fileio.make_dirs(parent)
         for name in names:
             if (entry.folder / name).exists():
                 fileio.move(entry.folder / name, parent / name)
         dest = parent / item.name
-        data = read_json(dest / SCHEME_FILE, {})
         data.setdefault("id", entry.info.get("scheme_id"))
-        children = {}
-        for name in entry.info.get("children", []):
-            d = read_json(parent / name / COMPOUND_FILE, {})
+        children, unread = {}, 0
+        for name in child_names:
+            if not (parent / name).is_dir():
+                continue
+            shown = loaded.get(parent / name) if name in stayed else None
+            if shown is not None:
+                at = next((i for i, x in enumerate(section.items) if x is shown), None)
+                if shown.scheme_id or at is None:
+                    continue   # (taken into another scheme meanwhile: left there)
+                del section.items[at]   # the same page, not a second copy of it
+                children[shown.id] = shown
+                continue
+            try:
+                d = read_json(parent / name / COMPOUND_FILE, {})
+            except (ValueError, OSError):
+                # (one that could not be read at load either: it keeps its place, _skipped)
+                self._skipped.setdefault(name.split("_", 1)[0], parent / name)
+                unread += 1
+                continue
+            d = _clean_compound_data(d if isinstance(d, dict) else {},
+                                     f"{section.name} ▸ {name}/{COMPOUND_FILE}", [])
             cid = d.get("id") or name.split("_", 1)[0]
             children[cid] = Compound(cid, parent / name, d, section.id)
+            if self._skipped.get(cid) == parent / name:   # (unread at load)
+                del self._skipped[cid]
         scheme = self._make_scheme(section, dest, data, children)
-        index = int(entry.info.get("original_index", len(section.items)))
-        section.items.insert(max(0, min(index, len(section.items))), scheme)
+        index = len(section.items) if index is None \
+            else max(0, min(index, len(section.items)))
+        section.items.insert(index, scheme)
         self.save_section(section)
-        return f"Restored scheme “{scheme.name}” to “{section.name}”."
+        return f"Restored scheme “{scheme.name}” to “{section.name}”." + (
+            f" {unread} of its compound pages could not be read; they keep their place and "
+            "are shown once their files can be read (repair them, or let OneDrive download "
+            "them, then reopen the project)." if unread else "")
+
+    def _unread_children(self, scheme: SchemePage) -> dict[str, Path]:
+        """{id: folder} of the scheme's compound pages whose compound.json could not be
+        read at load (see _skipped): not shown, but they move and go to the Trash with it."""
+        shown = {c.id for c in scheme.children}
+        children = scheme.data.get("children")
+        out: dict[str, Path] = {}
+        for cid in children if isinstance(children, list) else []:
+            if cid not in shown and self._still_skipped(cid) \
+                    and self._skipped[cid].parent == scheme.folder.parent:
+                out[cid] = self._skipped[cid]
+        return out
 
     def move_scheme(self, scheme_id: str, section_id: str, index: int) -> None:
         self._check_writable()
         scheme = self.scheme(scheme_id)
         source = self.section(scheme.section_id)
         target = self._data_section(section_id)
+        old_index = source.items.index(scheme)   # (put back there if it can't be moved:
+        # the compound IDs come from the order)
         source.items.remove(scheme)
         if target is not source:
             parent = target.folder / COMPOUNDS_DIR
             fileio.make_dirs(parent)
+            # (an unread compound page of it is only a folder: its id stands for it here)
+            unread = self._unread_children(scheme)
             moved: list[tuple[object, Path]] = []
             try:
-                for obj in [scheme, *scheme.children]:
-                    dest = _unique_path(parent / obj.folder.name)
-                    fileio.move(obj.folder, dest)
-                    moved.append((obj, obj.folder))
-                    obj.folder = dest
+                for obj in [scheme, *scheme.children, *unread]:
+                    old = unread[obj] if isinstance(obj, str) else obj.folder
+                    dest = _unique_path(parent / old.name)
+                    fileio.move(old, dest)
+                    moved.append((obj, old))
+                    if isinstance(obj, str):
+                        self._skipped[obj] = dest
+                    else:
+                        obj.folder = dest
             except OSError:
+                # (back in memory first, so a folder that can't be moved back below does
+                # not lose it there)
+                source.items.insert(old_index, scheme)
                 for obj, old in reversed(moved):  # undo, so nothing is left half-moved
-                    fileio.move(obj.folder, old)
-                    obj.folder = old
-                source.items.append(scheme)
+                    if isinstance(obj, str):
+                        fileio.move(self._skipped[obj], old)
+                        self._skipped[obj] = old
+                    else:
+                        fileio.move(obj.folder, old)
+                        obj.folder = old
                 raise
             scheme.section_id = target.id
             for child in scheme.children:
                 child.section_id = target.id
-            self.save_section(source)
+            # Memory follows the folders, now in the target section (a section.json that
+            # can't be saved must not drop the scheme from memory, nor leave it out of the
+            # next save of the target). Both files are tried: the first failure is raised.
+            # (A source section.json still listing it does no harm: a listed folder that
+            # isn't there is passed over.)
+            target.items.insert(max(0, min(index, len(target.items))), scheme)
+            failed = None
+            for section in (source, target):
+                try:
+                    self.save_section(section)
+                except Exception as e:
+                    failed = failed or e
+            if failed is not None:
+                raise failed
+            return
         target.items.insert(max(0, min(index, len(target.items))), scheme)
-        self.save_section(target)
+        try:
+            self.save_section(target)
+        except BaseException:
+            # (moved within the section but not saved: memory keeps the order on disk)
+            target.items.remove(scheme)
+            target.items.insert(old_index, scheme)
+            raise
 
     def convert_to_scheme(self, compound_id: str) -> SchemePage:
         """Turn a compound page into a scheme page with the compound as its first sub-page
@@ -1759,16 +2361,30 @@ class Project:
         """Hide an automatic warning for this compound (SPEC §8). It comes back if the data
         it was about changes (its fingerprint no longer matches)."""
         self._check_writable()
+        before = copy.deepcopy(compound.data.get("dismissed"))
         compound.data.setdefault("dismissed", {})[warning.key] = {
             "fingerprint": warning.fingerprint, "message": warning.message,
             "reason": reason.strip(), "by": self.lock.user if self.lock else "",
             "at": datetime.now().isoformat(timespec="seconds")}
-        self.save_compound(compound)
+        self._save_dismissed(compound, before)
 
     def restore_warning(self, compound: Compound, key: str) -> None:
         self._check_writable()
+        before = copy.deepcopy(compound.data.get("dismissed"))
         if (compound.data.get("dismissed") or {}).pop(key, None) is not None:
+            self._save_dismissed(compound, before)
+
+    def _save_dismissed(self, compound: Compound, before) -> None:
+        """Save a dismissal or restore; if it cannot be saved, the compound in memory is put
+        back as it was (`before`), so it still matches its file."""
+        try:
             self.save_compound(compound)
+        except BaseException:
+            if before is None:
+                compound.data.pop("dismissed", None)
+            else:
+                compound.data["dismissed"] = before
+            raise
 
     def field_defs(self, compound: Compound) -> list[F.FieldDef]:
         return [d for d in (F.field_def(e) for e in compound.fields) if d is not None]
@@ -1791,6 +2407,10 @@ class Project:
 
     def _text_path(self, compound: Compound, key: str) -> Path:
         return compound.folder / (NOTES_FILE if key == "notes" else f"{safe_filename(key)}.txt")
+
+    def compound_text_path(self, compound: Compound, key: str) -> Path:
+        """The file a compound's long-text field (procedure, notes…) is kept in."""
+        return self._text_path(compound, key)
 
     def read_compound_text(self, compound: Compound, key: str) -> str:
         return read_text(self._text_path(compound, key))
@@ -1940,16 +2560,17 @@ class Project:
         if item is None:
             return
         original = self.attachment_original(compound, field_key, item)
-        items.remove(item)
-        self.save_compound(compound)
         path = self.attachment_path(compound, field_key, file_name)
         if path.exists():
+            # Trash first: if the file is open elsewhere this raises with nothing changed.
             # (a pasted spectrum's original goes with it, and comes back with it)
             self._move_to_trash(path, kind="compound_file", name=file_name,
                                 extra={"compound_id": compound.id, "field_key": field_key,
                                        "item": path.name, "item_values": item,
                                        "compound_name": compound.name},
                                 companions=_present(original))
+        items.remove(item)
+        self.save_compound(compound)
 
     def _restore_compound_file(self, entry: TrashEntry, item: Path) -> str:
         try:
@@ -1957,20 +2578,45 @@ class Project:
         except KeyError:
             raise ProjectError("The compound this file belonged to no longer exists. "
                                f"The file is still in the Trash folder:\n{item}") from None
-        key = entry.info["field_key"]
+        key = entry.info.get("field_key")
+        if not isinstance(key, str) or not key:
+            raise _trash_damaged(entry)
+        item_values = entry.info.get("item_values")
+        item_values = item_values if isinstance(item_values, dict) else {}
         if key == "structure":
-            if self.structure_path(compound).exists():
+            path = self.structure_path(compound)
+            if path.exists():
                 raise ProjectError("This compound already has a structure. Clear it first, "
                                    "then restore the old one.")
-            self.set_structure(compound, read_text(item))
+            try:
+                mol = chem.parse_structure(read_text(item))
+            except chem.ChemError:
+                raise ProjectError("The structure in the Trash could not be read. The file "
+                                   f"is still in the Trash folder:\n{item}") from None
+            # (one with a generic atom (R, X, *) is put back too, as set_structure keeps it)
+            # Put back as it was: unlike set_structure, this keeps the ChemDraw picture
+            # pasted with it and the "from scheme" mark (Clear structure left both). Only
+            # a ChemDraw picture pasted since (with another structure) goes to the Trash.
+            picture = self._chemdraw_picture_hashes(compound)
+            if picture and entry.info.get("chemdraw_picture") not in picture:
+                self._remove_image(compound, "structure_image")
+                compound.values["structure"]["image_source"] = ""
+                self.save_compound(compound)
+            atomic_write_text(path, chem.mol_to_block(mol))
+            self._structure_cache.pop(path, None)
+            if self._sync_hrms_found(compound):
+                self.save_compound(compound)
+            self.ensure_heteroatom_reports(compound)
         elif key in self._IMAGE_SLOTS:
             self._set_image(compound, key, item, vector=_trash_companion(entry))
         elif key == "private_files":
-            self.add_private_item(compound, item, entry.info.get("item_values", {}).get("note", ""))
+            note = item_values.get("note", "")
+            self.add_private_item(compound, item, note if isinstance(note, str) else "",
+                                  move=True)
         elif key == ms_reports.TRASH_FIELD:
-            self.add_hrms_report(compound, item)
+            self.add_hrms_report(compound, item, move=True)
         else:
-            values = {k: v for k, v in entry.info.get("item_values", {}).items() if k != "file"}
+            values = {k: v for k, v in item_values.items() if k != "file"}
             self.attach_compound_file(compound, key, item, values,
                                       original=_trash_companion(entry))
         return f"Restored {item.name} to “{compound.name or 'unnamed compound'}”."
@@ -1994,26 +2640,66 @@ class Project:
             compound.values["hrms"] = value
         return value
 
-    def add_hrms_report(self, compound: Compound, source: Path) -> dict[str, str]:
+    def add_hrms_report(self, compound: Compound, source: Path,
+                        move: bool = False) -> dict[str, str]:
         """Copy an HRMS report file — any type — or a whole folder (e.g. an Agilent .d data
         folder) into the compound's hrms/ folder and list it in the HRMS field. The Found
-        box is then filled from the reports if it is empty (ms_reports.update_found)."""
+        box is then filled from the reports if it is empty (ms_reports.update_found).
+        `move`: a Trash restore, moved back rather than copied (see _copy_in)."""
         self._check_writable()
         source = Path(source)
         if not source.exists():
             raise ProjectError(f"Not found:\n{source}")
         dest = _unique_path(self.hrms_report_dir(compound) / safe_filename(source.name))
-        fileio.make_dirs(dest.parent)
-        if source.is_dir():
-            fileio.copy_tree(source, dest)
-        else:
-            fileio.copy_file(source, dest)
         item = {"file": dest.name, "kind": "folder" if source.is_dir() else "file"}
-        value = self._hrms_value(compound)
-        value.setdefault(ms_reports.REPORTS_KEY, []).append(item)
-        ms_reports.update_found(self, compound, value)
-        self.save_compound(compound)
+        moved = self._copy_in(source, dest, move)
+        with _put_back_on_error(compound, "hrms", dest, source, moved):
+            value = self._hrms_value(compound)
+            items = value.get(ms_reports.REPORTS_KEY)
+            if not isinstance(items, list):   # (a number or text typed in place of the list)
+                items = value[ms_reports.REPORTS_KEY] = []
+            items.append(item)
+            ms_reports.update_found(self, compound, value)
+            self.save_compound(compound)
         return item
+
+    def _copy_in(self, source: Path, dest: Path, move: bool = False) -> bool:
+        """Copy a file or a whole folder (e.g. raw data) to `dest`, a new name. If the copy
+        fails (a path too long for Windows, a locked file, a full disk) the part already
+        copied is taken away again, so nothing unlisted is left in the compound's folder.
+
+        `move`: `source` is in the project's Trash (same disk), so it is renamed back
+        instead: instant, however large the folder, and OneDrive sees a move rather than a
+        new upload. If the rename fails (e.g. a file in use) it is copied as usual.
+        Returns whether it was moved."""
+        fileio.make_dirs(dest.parent)
+        if move:
+            try:
+                fileio.rename(source, dest)
+                return True
+            except OSError:
+                pass
+        try:
+            if source.is_dir():
+                fileio.copy_tree(source, dest)
+            else:
+                fileio.copy_file(source, dest)
+        except OSError as e:
+            # (deleted directly: the undo history already knows `dest` did not exist)
+            gone = _remove_partial_copy(dest)
+            if isinstance(e, shutil.Error) and e.args and isinstance(e.args[0], list):
+                errors = e.args[0]   # one (source, copy, why) for each file that failed
+                first = errors[0][2] if errors and len(errors[0]) == 3 else ""
+                text = (f"Could not copy {len(errors)} file(s) of {source.name}, so it was "
+                        f"not added. First problem: {first}")
+            else:
+                text = f"Could not copy {source.name}, so it was not added: {e.strerror or e}"
+            if not gone:   # (never hide the real error)
+                text += ("\n\nIt is not listed, but the part copied before it stopped could "
+                         f"not all be taken away again. Please delete it by hand:\n{dest}")
+            hint = fileio.path_length_warning(self.folder)
+            raise ProjectError(text + (f"\n\n{hint}" if hint else "")) from e
+        return False
 
     def remove_hrms_report(self, compound: Compound, name: str) -> None:
         """Move a report file (or folder) to the project Trash. A found m/z filled from it
@@ -2021,7 +2707,8 @@ class Project:
         self._check_writable()
         value = self._hrms_value(compound)
         items = value.get(ms_reports.REPORTS_KEY) or []
-        item = next((i for i in items if isinstance(i, dict) and i.get("file") == name), None)
+        # (through the checked list: a hand-edited "../structure.mol" never leaves hrms/)
+        item = next((i for i in ms_reports.report_items(compound) if i["file"] == name), None)
         if item is None:
             return
         path = self.hrms_report_path(compound, name)
@@ -2066,69 +2753,112 @@ class Project:
     def private_dir(self, compound: Compound) -> Path:
         return compound.folder / PRIVATE_DIR
 
-    def add_private_item(self, compound: Compound, source: Path, note: str = "") -> dict[str, str]:
-        """Copy any file or whole folder into the compound's private/ folder."""
+    def add_private_item(self, compound: Compound, source: Path, note: str = "",
+                         move: bool = False) -> dict[str, str]:
+        """Copy any file or whole folder into the compound's private/ folder. `move`: a
+        Trash restore, moved back rather than copied (see _copy_in)."""
         self._check_writable()
         source = Path(source)
         if not source.exists():
             raise ProjectError(f"Not found:\n{source}")
         dest = _unique_path(self.private_dir(compound) / safe_filename(source.name))
-        fileio.make_dirs(dest.parent)
-        if source.is_dir():
-            fileio.copy_tree(source, dest)
-        else:
-            fileio.copy_file(source, dest)
         item = {"file": dest.name, "kind": "folder" if source.is_dir() else "file", "note": note}
-        compound.values.setdefault("private_files", []).append(item)
-        self.save_compound(compound)
+        moved = self._copy_in(source, dest, move)
+        with _put_back_on_error(compound, "private_files", dest, source, moved):
+            compound.values.setdefault("private_files", []).append(item)
+            self.save_compound(compound)
         return item
 
     def remove_private_item(self, compound: Compound, name: str) -> None:
         self._check_writable()
         items = compound.values.get("private_files", [])
-        item = next((i for i in items if i.get("file") == name), None)
+        # (a plain name only: a hand-edited "../structure.mol" never leaves private/)
+        item = next((i for i in items if isinstance(i, dict) and i.get("file") == name
+                     and ms_reports.safe_report_name(name)), None)
         if item is None:
             return
-        items.remove(item)
-        self.save_compound(compound)
         path = self.private_dir(compound) / name
-        if path.exists():
+        if path.exists():   # Trash first: if it is open elsewhere, nothing changes
             self._move_to_trash(path, kind="compound_file", name=name,
                                 extra={"compound_id": compound.id, "field_key": "private_files",
                                        "item": path.name, "item_values": item,
                                        "compound_name": compound.name})
+        items.remove(item)
+        self.save_compound(compound)
 
     # ---- structure (SPEC §7.1 field 1)
 
     def structure_path(self, compound: Compound) -> Path:
         return compound.folder / STRUCTURE_FILE
 
-    def read_structure(self, compound: Compound):
-        """The compound's RDKit molecule, or None. Cached until structure.mol changes."""
+    def read_structure(self, compound: Compound, strict: bool = False):
+        """The compound's RDKit molecule, or None. Cached until structure.mol changes.
+
+        A structure.mol that can't be read just now (an online-only OneDrive file while
+        offline, or one open in another program) gives None, and is tried again next
+        time; `strict` raises the OSError instead, where "no structure" would be wrong
+        (compiling the SI, or linking it to a scheme box)."""
+        return self._structure_entry(compound, strict)[0]
+
+    def generic_structure_atoms(self, compound: Compound) -> list[str]:
+        """The generic atoms (R, X, *…) of a structure.mol that read_structure gives as None
+        for that reason (no formula or mass: e.g. a general structure for a scheme), so the
+        page can say why instead of showing "no structure"; [] otherwise."""
+        return list(self._structure_entry(compound)[1])
+
+    def structure_for_drawing(self, compound: Compound, strict: bool = False):
+        """The molecule to draw (a scheme box, a picture): read_structure's, or one with a
+        generic atom (R, X, *) that read_structure gives as None because it has no formula
+        or mass. None only when the compound has no structure that can be read. `strict`
+        as in read_structure."""
+        mol, _generic, drawn = self._structure_entry(compound, strict)
+        return mol if mol is not None else drawn
+
+    def _structure_entry(self, compound: Compound,
+                         strict: bool = False) -> tuple[Any, tuple[str, ...], Any]:
+        """(the molecule or None, the generic atoms that made it None, the molecule as
+        drawn: with its generic atoms), cached as read_structure says."""
         path = self.structure_path(compound)
         try:
             st = path.stat()
         except FileNotFoundError:
-            return None
+            return None, (), None
         stamp = (st.st_mtime_ns, st.st_size)  # changed by this program or e.g. a sync
         cached = self._structure_cache.get(path)
         if cached and cached[0] == stamp:
-            return cached[1]
+            return cached[1], cached[2], cached[3]
         try:
-            mol = chem.parse_structure(read_text(path))
+            text = read_text(path)
+        except OSError:
+            if strict:
+                raise
+            return None, (), None   # (not cached)
+        try:
+            mol = chem.parse_structure(text)
         except chem.ChemError:
             mol = None
-        self._structure_cache[path] = (stamp, mol)
-        return mol
+        generic: tuple[str, ...] = ()
+        drawn = mol
+        if mol is not None and chem.generic_atoms(mol):
+            # A generic atom (R, X, *): stored and drawn, but no formula or mass, so it is
+            # "no structure" for everything that needs one (structure_for_drawing has it).
+            generic, mol = tuple(chem.generic_atoms(mol)), None
+        self._structure_cache[path] = (stamp, mol, generic, drawn)
+        return mol, generic, drawn
 
-    def structure_info(self, compound: Compound) -> "chem.MolInfo | None":
-        mol = self.read_structure(compound)
+    def structure_info(self, compound: Compound,
+                       strict: bool = False) -> "chem.MolInfo | None":
+        mol = self.read_structure(compound, strict)
         return chem.mol_info(mol) if mol is not None else None
 
     def set_structure(self, compound: Compound, text: str, from_scheme: bool = False,
                       picture: bytes | None = None, vector: bytes | None = None,
                       vector_ext: str = "", picture_ext: str = ".png") -> list[str]:
         """Store a structure from SMILES / MOL / SDF text (raises chem.ChemError).
+
+        A structure with a generic atom (R, X, *) is stored too (e.g. a general structure
+        for a scheme): it is drawn, but has no formula or masses (read_structure gives
+        None; a warning says so).
 
         `picture` is ChemDraw's drawing of it (a PNG, or an SVG/PDF as `picture_ext` says),
         pasted together with the structure; `vector` is the EMF/PDF it was made from (kept
@@ -2140,8 +2870,17 @@ class Project:
         self._check_writable()
         mol = chem.parse_structure(text)
         path = self.structure_path(compound)
-        atomic_write_text(path, chem.mol_to_block(mol))
-        self._structure_cache.pop(path, None)
+        if path.exists() and self.structure_for_drawing(compound) is None:
+            # A structure.mol that can't be read at all (a damaged file) is still the
+            # user's: it goes to the Trash rather than being written over (SPEC §13b.5).
+            # A readable one, a generic structure (R, X) included, is overwritten like
+            # any structure (undo brings it back). (First: if it can't be moved, e.g.
+            # open elsewhere, nothing has changed yet.)
+            self._move_to_trash(path, kind="compound_file", name=f"structure of "
+                                f"{compound.name or 'unnamed compound'}",
+                                extra={"compound_id": compound.id, "field_key": "structure",
+                                       "item": path.name, "compound_name": compound.name})
+            self._structure_cache.pop(path, None)
         old = compound.values.get("structure") or {}
         if picture is not None:
             # ChemDraw's MOL block is drawn like the picture: its bonds cross-check the
@@ -2154,8 +2893,13 @@ class Project:
         elif old.get("image_override") and old.get("image_source") == "chemdraw":
             self._remove_image(compound, "structure_image")
             compound.values["structure"]["image_source"] = ""
+        # Written after the picture: if the old picture can't go to the Trash (open
+        # elsewhere), the structure is left unchanged too, not printed with that picture.
+        atomic_write_text(path, chem.mol_to_block(mol))
+        self._structure_cache.pop(path, None)
         # (_set_image/_remove_image may have replaced the dict: always look it up again.)
         compound.values.setdefault("structure", {})["from_scheme"] = from_scheme
+        self._sync_hrms_found(compound)
         self.save_compound(compound)
         return self.ensure_heteroatom_reports(compound)
 
@@ -2174,10 +2918,39 @@ class Project:
         self._check_writable()
         path = self.structure_path(compound)
         if path.exists():
+            extra = {"compound_id": compound.id, "field_key": "structure",
+                     "item": path.name, "compound_name": compound.name}
+            picture = self._chemdraw_picture_hashes(compound)
+            if picture:   # (the ChemDraw picture pasted with it stays: see the restore)
+                extra["chemdraw_picture"] = picture[0]
             self._move_to_trash(path, kind="compound_file", name=f"structure of "
-                                f"{compound.name or 'unnamed compound'}",
-                                extra={"compound_id": compound.id, "field_key": "structure",
-                                       "item": path.name, "compound_name": compound.name})
+                                f"{compound.name or 'unnamed compound'}", extra=extra)
+        if self._sync_hrms_found(compound):
+            self.save_compound(compound)
+
+    def _sync_hrms_found(self, compound: Compound) -> bool:
+        """Fill or clear a Found m/z that came from the HRMS reports after the expected ion
+        changed with the structure (SPEC §13n.3a), in the same save and undo step, so that
+        every saved state is complete. A typed value is kept. Returns whether it changed."""
+        if "hrms" in compound.field_keys and ms_reports.report_items(compound):
+            return bool(ms_reports.update_found(self, compound))
+        return False
+
+    def _chemdraw_picture_hashes(self, compound: Compound) -> list[str]:
+        """Fingerprints of the ChemDraw picture pasted with the structure ([] if none): of
+        its vector original first, which "Re-render pasted pictures" leaves as it is, then
+        of the picture itself (all that older versions kept)."""
+        if self.structure_picture_source(compound) != "chemdraw":
+            return []
+        path = self.structure_image_path(compound)
+        out = []
+        for file in (picture_source_path(path), path):
+            try:
+                if file is not None:
+                    out.append(hashlib.sha1(file.read_bytes()).hexdigest())
+            except OSError:
+                pass
+        return out
 
     def heteroatom_nuclei(self, info: "chem.MolInfo") -> list[str]:
         """NMR reports a structure calls for beyond ¹H/¹³C (SPEC §7.1 field 7, §13.3)."""
@@ -2192,7 +2965,10 @@ class Project:
 
     def ensure_heteroatom_reports(self, compound: Compound) -> list[str]:
         """Add empty ¹⁹F (and optionally ³¹P/¹¹B) reports the structure needs. Never removes."""
-        info = self.structure_info(compound)
+        try:
+            info = self.structure_info(compound)
+        except chem.ChemError:   # (e.g. a generic atom (R): no formula, so no extra reports;
+            return []            # the structure itself was already stored)
         if info is None or "nmr" not in compound.field_keys:
             return []
         reports = compound.values.setdefault("nmr", [])
@@ -2259,13 +3035,12 @@ class Project:
         path = self.structure_image_path(compound)
         measured = drawing_scale.picture_bond_pt(
             {k: v for k, v in value.items() if k != drawing_scale.OVERRIDE_KEY}, path)
-        own = None
-        if drawing_scale.OVERRIDE_KEY in value:
-            try:
-                own = max(0.0, float(value[drawing_scale.OVERRIDE_KEY]))
-            except (TypeError, ValueError):
-                own = None
-        return measured, own
+        # The typed value read exactly as printing reads it (a hand-edited true, NaN or
+        # out-of-range number shows what will really print).
+        typed_bond, typed = drawing_scale.picture_bond(
+            {drawing_scale.OVERRIDE_KEY: value.get(drawing_scale.OVERRIDE_KEY)}
+            if drawing_scale.OVERRIDE_KEY in value else {}, None)
+        return measured, ((typed_bond or 0.0) if typed else None)
 
     def set_structure_picture_bond(self, compound: Compound, own: float | None) -> None:
         """The user's own bond length for the structure picture (pt), 0 to print it at its
@@ -2283,17 +3058,17 @@ class Project:
         path = self._image_path(compound, slot)
         if path is None:
             return
+        if path.exists():   # Trash first: if it is open elsewhere, nothing changes
+            self._move_to_trash(path, kind="compound_file", name=path.name,
+                                extra={"compound_id": compound.id, "field_key": slot,
+                                       "item": path.name, "compound_name": compound.name},
+                                companions=_present(picture_source_path(path)))
         value_key, entry, _stem = self._IMAGE_SLOTS[slot]
         compound.values[value_key][entry] = ""
         if slot == "structure_image":
             for key in (drawing_scale.MEASURED_KEY, drawing_scale.OVERRIDE_KEY):
                 compound.values[value_key].pop(key, None)
         self.save_compound(compound)
-        if path.exists():
-            self._move_to_trash(path, kind="compound_file", name=path.name,
-                                extra={"compound_id": compound.id, "field_key": slot,
-                                       "item": path.name, "compound_name": compound.name},
-                                companions=_present(picture_source_path(path)))
 
     def structure_image_path(self, compound: Compound) -> Path | None:
         return self._image_path(compound, "structure_image")
@@ -2346,17 +3121,42 @@ class Project:
     # ------------------------------------------------------------------ references (§9.5)
 
     def _load_references(self) -> list[dict[str, Any]]:
+        self._references_unread = False
         try:
             raw = read_json(self.folder / REFERENCES_FILE, [])
-        except ValueError:
-            self.load_warnings.append(f"{REFERENCES_FILE} could not be read; the reference "
-                                      "list starts empty (the file was not changed).")
+        except (ValueError, OSError):
+            self._references_unread = True
+            self._read_failure(f"{REFERENCES_FILE} could not be read; the reference "
+                                      "list starts empty. A copy of the file (references."
+                                      "damaged-….json) is kept before the next change.")
             return []
         return [refs.clean(r) for r in raw if isinstance(r, dict)] if isinstance(raw, list) else []
 
     def save_references(self) -> None:
         self._check_writable()
-        atomic_write_json(self.folder / REFERENCES_FILE, self.references)
+        path = self.folder / REFERENCES_FILE
+        # (A list that started empty because the file could not be read at load: the file
+        # is kept even if it can be read now, e.g. once OneDrive has downloaded it.)
+        self._keep_damaged(path, list, always=self._references_unread)
+        atomic_write_json(path, self.references)
+        self._references_unread = False
+
+    def _keep_damaged(self, path: Path, kind: type, always: bool = False) -> None:
+        """Before overwriting a JSON file that can't be read (or doesn't hold a `kind`,
+        e.g. after a hand edit or a sync conflict), keep a copy of it next to it, so
+        nothing in it is lost. Checked at each write: nothing to keep in step with undo.
+        A file that can't be read just now (e.g. online-only while OneDrive is offline) is
+        not written over at all: ProjectError."""
+        try:
+            if isinstance(read_json(path, kind()), kind) and not (always and path.is_file()):
+                return
+        except ValueError:   # (includes a file that isn't UTF-8)
+            pass
+        except OSError as e:
+            raise _unreadable_now(path, e) from e
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        fileio.copy_file(path, _unique_path(
+            path.with_name(f"{path.stem}.damaged-{stamp}{path.suffix}")))
 
     # ------------------------------------------------------------------ spelling (§13k.1a)
 
@@ -2387,26 +3187,38 @@ class Project:
         ref = refs.clean(ref)
         while self.reference(ref["id"]) is not None:
             ref["id"] = new_id("r")
+        before = list(self.references)
         self.references.append(ref)
-        self.save_references()
+        self._save_references_or_undo(before)
         return ref
 
     def update_reference(self, ref: dict[str, Any]) -> None:
         self._check_writable()
         ref = refs.clean(ref)
+        before = list(self.references)
         for i, r in enumerate(self.references):
             if r["id"] == ref["id"]:
                 self.references[i] = ref
                 break
         else:
             self.references.append(ref)
-        self.save_references()
+        self._save_references_or_undo(before)
 
     def delete_reference(self, ref_id: str) -> None:
         """Remove a reference. Citations of it are left in the text and flagged."""
         self._check_writable()
-        self.references = [r for r in self.references if r["id"] != ref_id]
-        self.save_references()
+        before = list(self.references)
+        self.references[:] = [r for r in self.references if r["id"] != ref_id]
+        self._save_references_or_undo(before)
+
+    def _save_references_or_undo(self, before: list[dict[str, Any]]) -> None:
+        """Save the reference list; if that fails (e.g. references.json open elsewhere),
+        the list in memory goes back to `before`, so it never shows a change not saved."""
+        try:
+            self.save_references()
+        except BaseException:
+            self.references[:] = before
+            raise
 
     # ------------------------------------------------------------------ general procedures (§6.3.3)
 
@@ -2482,14 +3294,20 @@ class Project:
         except (KeyError, ProjectError):
             raise ProjectError("The section this general procedure belonged to no longer "
                                f"exists. Its text is still in the Trash folder:\n{item}") from None
-        gp = dict(entry.info.get("gp") or {})
-        if not gp.get("id") or self.general_procedure(gp["id"]) is not None:
+        if not item.exists():   # (e.g. its text was taken out of the Trash folder by hand)
+            raise ProjectError("This Trash item is empty: there is nothing to restore.")
+        gp = entry.info.get("gp")
+        gp = dict(gp) if isinstance(gp, dict) else {}
+        if not isinstance(gp.get("id"), str) or not gp["id"] \
+                or self.general_procedure(gp["id"]) is not None:
             gp["id"] = new_id("gp")
-        gps = self.general_procedures(section)
-        gps.insert(max(0, min(int(entry.info.get("index", len(gps))), len(gps))), gp)
+        index = _trash_index(entry.info, "index")
         dest = self._gp_text_path(section, gp["id"])
         fileio.make_dirs(dest.parent)
+        # The text is moved back first: if that fails, the section is left as it was.
         fileio.move(item, dest)
+        gps = self.general_procedures(section)
+        gps.insert(len(gps) if index is None else max(0, min(index, len(gps))), gp)
         self.save_section(section)
         return f"Restored “{gp.get('name', 'general procedure')}” to “{section.name}”."
 
@@ -2560,7 +3378,7 @@ class Project:
         if owner.key == GENERAL_OWNER:
             try:
                 data = read_json(self.front_folder / FRONT_DATA_FILE, {})
-            except ValueError:
+            except (ValueError, OSError):   # (warned at load; never written over unread)
                 data = {}
             return data if isinstance(data, dict) else {}
         return self.section(owner.key).data
@@ -2569,7 +3387,9 @@ class Project:
         self._check_writable()
         if owner.key == GENERAL_OWNER:
             fileio.make_dirs(self.front_folder)
-            atomic_write_json(self.front_folder / FRONT_DATA_FILE, data)
+            path = self.front_folder / FRONT_DATA_FILE
+            self._keep_damaged(path, dict)
+            atomic_write_json(path, data)
         else:
             self.save_section(self.section(owner.key))
 
@@ -2633,6 +3453,14 @@ class Project:
         `vector` only for a picture that really was drawn from it (a paste, or a copy of a
         figure that has one): a same-named .pdf next to a user's file is not its original."""
         self._check_writable()
+        if owner.key == GENERAL_OWNER:   # (before the picture is written: see _keep_damaged)
+            path = self.front_folder / FRONT_DATA_FILE
+            try:
+                read_json(path, {})
+            except ValueError:
+                pass   # (damaged: a copy is kept when it is written)
+            except OSError as e:
+                raise _unreadable_now(path, e) from e
         source, ext = self._check_picture(source, ext, FIGURE_EXTENSIONS)
         folder = owner.folder / SECTION_IMAGES_DIR
         fileio.make_dirs(folder)
@@ -2702,14 +3530,18 @@ class Project:
 
     def _restore_object(self, entry: TrashEntry, item: Path) -> str:
         """Put a figure or table back, as a paragraph at the end of its text."""
+        def text(key: str) -> str:   # (entry.json edited by hand: anything else counts as "")
+            value = entry.info.get(key, "")
+            return value if isinstance(value, str) else ""
+
         try:
-            owner = self.text_owner(entry.info.get("owner", ""))
+            owner = self.text_owner(text("owner"))
         except (KeyError, ProjectError):
             raise ProjectError(
                 f"“{entry.info.get('owner_name', '?')}”, where this {entry.kind} was, no longer "
                 f"exists. Restore it first. The file is still in the Trash folder:\n{item}"
             ) from None
-        item_id = entry.info.get("object_id", "")
+        item_id = text("object_id")
         # Its paragraph may still be in the text with nothing behind it (e.g. put back by
         # hand): then the picture or table just goes back under the same ID.
         in_text = bool(item_id) and any(
@@ -2721,7 +3553,7 @@ class Project:
             item_id = new_id("f" if entry.kind == "figure" else "t")   # (the ID is in use again)
         if entry.kind == "figure":
             self.add_figure(owner, source=item, vector=_trash_companion(entry),
-                            label=entry.info.get("label", ""), figure_id=item_id,
+                            label=text("label"), figure_id=item_id,
                             width=figure_width_cm(entry.info))
         else:
             table = self._load_table_file(item) or Table.new()
@@ -2907,21 +3739,39 @@ class Project:
 
     def save_snapshot(self, label: str = "") -> Path:
         """Zip the project (minus build output, lock and earlier snapshots)."""
+        self._check_writable()
         stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         name = f"{stamp}_{slugify(label)}" if label.strip() else stamp
         dest = self.folder / SNAPSHOTS_DIR / f"{name}.zip"
         fileio.make_dirs(dest.parent)
         skip_top = {BUILD_DIR, SNAPSHOTS_DIR, lockmod.LOCK_NAME}
         tmp = dest.with_suffix(".zip.partial")
-        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as zf:
-            for path in sorted(self.folder.rglob("*")):
-                rel = path.relative_to(self.folder)
-                if rel.parts[0] in skip_top or path.name.startswith(".tmp-"):
-                    continue
-                if path.is_file():
-                    zf.write(path, Path(self.folder.name) / rel)
-        tmp.replace(dest)
+        try:
+            # strict_timestamps=False: a file dated before 1980 (e.g. from an instrument PC
+            # without a clock) is stored with the earliest date a zip allows, not refused.
+            with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as zf:
+                for path in sorted(self.folder.rglob("*")):
+                    rel = path.relative_to(self.folder)
+                    if rel.parts[0] in skip_top or path.name.startswith(".tmp-"):
+                        continue
+                    if path.is_file():
+                        # (already-compressed files are stored as they are: much faster)
+                        kind = (zipfile.ZIP_STORED if path.suffix.lower() in _STORED_SUFFIXES
+                                else None)
+                        zf.write(path, Path(self.folder.name) / rel, compress_type=kind)
+            tmp.replace(dest)
+        except BaseException:
+            try:
+                tmp.unlink(missing_ok=True)   # no half-written zip left behind
+            except OSError:
+                pass   # (never hide the real error)
+            raise
         return dest
+
+
+# Files a snapshot stores without compressing them again (they are compressed already).
+_STORED_SUFFIXES = {".pdf", ".png", ".jpg", ".jpeg", ".gif", ".zip", ".gz", ".7z",
+                    ".docx", ".xlsx", ".pptx"}
 
 
 # An older picture paragraph (core/markup.py), after its alignment if it has one.
@@ -2932,9 +3782,36 @@ def _present(*paths: Path | None) -> tuple[Path, ...]:
     return tuple(p for p in paths if p is not None)
 
 
+def _trash_index(info: dict, key: str = "original_index") -> int | None:
+    """The position saved in a Trash entry's description, or None (put it back at the
+    end) if entry.json was edited into something that is not a whole number."""
+    try:
+        return int(info.get(key))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _trash_damaged(entry: TrashEntry) -> ProjectError:
+    """The error for a Trash item whose description (entry.json) was edited into something
+    that cannot be used: nothing is moved, and its files stay in the Trash."""
+    return ProjectError(
+        "This item's description in the Trash is damaged, so it cannot be put back "
+        "automatically. Its files are still in the Trash folder:\n" + str(entry.folder))
+
+
+def _trash_names(entry: TrashEntry, key: str) -> list[str]:
+    """The plain file or folder names listed under `key` in a Trash entry's description.
+    Anything else (a hand edit: a number, a path such as "../x") is left out, so it is
+    never used as a path; files it named stay in the Trash and are reported there."""
+    value = entry.info.get(key)
+    if not isinstance(value, list):
+        return []
+    return [n for n in value if isinstance(n, str) and ms_reports.safe_report_name(n)]
+
+
 def _trash_companion(entry: TrashEntry) -> Path | None:
     """The vector original that went to the Trash together with a picture, if any."""
-    for name in entry.info.get("companions", []):
+    for name in _trash_names(entry, "companions"):
         path = entry.folder / name
         if path.suffix.lower() in VECTOR_EXTENSIONS and path.exists():
             return path
@@ -2973,6 +3850,205 @@ def _unique_picture_path(folder: Path, stem: str, ext: str) -> Path:
                    for e in dict.fromkeys((ext.lower(), *PICTURE_EXTENSIONS))):
             return folder / f"{name}{ext}"
         n += 1
+
+
+def _set_aside(data: dict, key: str, where: str, warnings: list[str]) -> None:
+    """A value of the wrong kind (a hand edit, or another program) is put aside under
+    "<key> (could not be read)", so it is not used but is never lost from the file."""
+    value = data.pop(key)
+    if value is None:
+        return
+    data[f"{key} (could not be read)"] = value
+    warnings.append(f"{where}: “{key}” is not in the expected form, so it is ignored. It is "
+                    f"kept in the file as “{key} (could not be read)”.")
+
+
+def _clean_section_data(data: dict, where: str, warnings: list[str]) -> dict:
+    """section.json with values of the wrong kind (e.g. an ID table typed by hand as
+    numbers) made usable, in memory only (nothing is written here)."""
+    for key in ("id", "name", "type"):
+        if data.get(key) is not None and not isinstance(data[key], str):
+            data[key] = str(data[key])
+    table = data.get("id_table")
+    if isinstance(table, list):   # (IDs are always text, as set_id_table stores them)
+        data["id_table"] = ["" if v is None else str(v).strip() for v in table]
+    elif "id_table" in data:
+        _set_aside(data, "id_table", where, warnings)
+    if "compound_order" in data:
+        order = data["compound_order"]
+        data["compound_order"] = [i for i in order if isinstance(i, str)] \
+            if isinstance(order, list) else []
+    _keep_entries(data, "default_fields", where, warnings)
+    return data
+
+
+def _keep_entries(data: dict, key: str, where: str, warnings: list[str]) -> None:
+    """data[key] should be a list of {"key": ...}: anything else is set aside."""
+    if key not in data:
+        return
+    value = data[key]
+    good = [e for e in value if isinstance(e, dict) and isinstance(e.get("key"), str)] \
+        if isinstance(value, list) else None
+    if good is None or len(good) != len(value):
+        _set_aside(data, key, where, warnings)
+        if good is not None:
+            data[key] = good
+
+
+# What each kind of field stores in compound.json "values" (other kinds: left alone).
+_VALUE_TYPES = {"parts": dict, "citations": dict, "structure": dict,
+                "nmr": list, "attachments": list, "private": list}
+
+
+def _clean_compound_data(data: dict, where: str, warnings: list[str]) -> dict:
+    """compound.json with values of the wrong kind made usable, in memory only: such a
+    value is set aside (see _set_aside), never thrown away."""
+    for key in ("values", "flags", "dismissed"):
+        if key in data and not isinstance(data[key], dict):
+            _set_aside(data, key, where, warnings)
+    _keep_entries(data, "fields", where, warnings)
+    flags = data.get("flags")
+    if isinstance(flags, dict) and not all(isinstance(v, dict) for v in flags.values()):
+        good = {k: v for k, v in flags.items() if isinstance(v, dict)}
+        _set_aside(data, "flags", where, warnings)
+        data["flags"] = good
+    values = data.get("values")
+    if not isinstance(values, dict):
+        return data
+    # (custom fields are defined by their entry in "fields")
+    custom = {e["key"]: F.field_def(e) for e in data.get("fields") or []
+              if e["key"] not in F.ALL_FIELDS and isinstance(e.get("custom"), dict)}
+    for key, value in list(values.items()):
+        defn = F.ALL_FIELDS.get(key) or custom.get(key)
+        wanted = dict if key == "procedure" else _VALUE_TYPES.get(defn.kind) if defn else None
+        if wanted is None or value is None:
+            continue
+        if wanted is dict and isinstance(value, (str, int, float)) and not isinstance(value, bool) \
+                and defn.kind == "parts" and any(p.key == "text" for p in defn.parts):
+            values[key] = {"text": str(value)}   # (e.g. "name": "Ethyl 2-methylfuran...")
+        elif not isinstance(value, wanted):
+            _set_aside(values, key, where, warnings)
+        elif wanted is list and not all(isinstance(v, dict) for v in value):
+            _set_aside(values, key, where, warnings)
+            values[key] = [v for v in value if isinstance(v, dict)]
+        # A part left empty as null (a hand edit) gets its default, as when it is missing.
+        if defn.kind == "parts" and isinstance(values.get(key), dict):
+            _drop_nulls(values[key], defn.parts)
+        elif defn.kind == "attachments" and isinstance(values.get(key), list):
+            for item in values[key]:
+                _drop_nulls(item, defn.item_parts)
+    return data
+
+
+def _drop_nulls(value: dict, parts) -> None:
+    for part in parts:
+        if part.key in value and value[part.key] is None:
+            del value[part.key]
+
+
+def _conflict_copies(folder: Path, only: tuple[str, ...] | None = None) -> list[Path]:
+    """Files in `folder` that are a sync program's second version of a program file next
+    to them: "compound-LAPTOP.json" or "compound (conflicted copy).json" beside
+    "compound.json" (likewise .txt and .mol files; `only`: just these program files)."""
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        return []
+    own = [n for n in names if os.path.splitext(n)[1].lower() in (".json", ".txt", ".mol")
+           and (only is None or n in only)]
+    out = []
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        for base in own:
+            base_stem, base_ext = os.path.splitext(base)
+            if name != base and ext.lower() == base_ext.lower() \
+                    and stem.lower().startswith((base_stem.lower() + "-",
+                                                 base_stem.lower() + " (")):
+                out.append(Path(folder) / name)
+                break
+    return out
+
+
+@contextmanager
+def _put_back_on_error(compound: Compound, key: str, dest: Path, source: Path, moved: bool):
+    """If listing a file or folder just added to a compound fails (e.g. compound.json
+    can't be saved), nothing is left half-done: the compound's `key` value in memory is
+    put back as it was, so it still matches compound.json (a later save does not list a
+    file that is not there); an item moved out of the Trash goes back into the Trash, and
+    a copy is taken away again."""
+    had = key in compound.values
+    original = compound.values.get(key)
+    before = copy.deepcopy(original)
+    try:
+        yield
+    except BaseException:
+        if not had:
+            compound.values.pop(key, None)
+        elif isinstance(original, dict) and isinstance(before, dict):
+            original.clear()   # (in place: a page showing this value keeps the same one)
+            original.update(before)
+            compound.values[key] = original
+        elif isinstance(original, list) and isinstance(before, list):
+            original[:] = before
+            compound.values[key] = original
+        else:
+            compound.values[key] = before
+        if moved:
+            try:
+                fileio.rename(dest, source)
+            except OSError:
+                pass   # (still in the undo history)
+        else:
+            try:
+                _remove_partial_copy(dest)
+            except OSError:
+                pass   # (an unlisted copy at worst; the real error is raised below)
+        raise
+
+
+def _trashed_json(folder: Path, json_name: str) -> dict:
+    """The JSON file of an item still in the Trash, read before anything is moved back:
+    one that holds something else (a hand edit) counts as empty, and one that can't be
+    read stops the restore while everything is still in the Trash."""
+    try:
+        data = read_json(folder / json_name, {})
+    except (ValueError, OSError) as e:
+        raise ProjectError(
+            f"Cannot restore: {folder.name}/{json_name} could not be read (it may be damaged, "
+            "or an online-only OneDrive file while this computer is offline). Nothing was "
+            f"restored; repair it, then try again. It is in the Trash folder:\n{folder}"
+        ) from e
+    return data if isinstance(data, dict) else {}
+
+
+def _unreadable_now(path: Path, error: OSError) -> ProjectError:
+    return ProjectError(
+        f"{path.name} can't be read just now (it may be an online-only OneDrive file while "
+        "this computer is offline, or open in another program), so nothing was changed. "
+        f"Try again once it can be read.\n\n({error.strerror or error})")
+
+
+def _remove_partial_copy(dest: Path) -> bool:
+    """Take away a copy that stopped part-way, including read-only files (instrument raw
+    data often is; Windows won't delete those as they are). Returns whether it is gone."""
+    def writable_then_retry(func, path, _error):
+        try:
+            os.chmod(path, os.stat(path).st_mode | stat.S_IWRITE)
+            func(path)
+        except OSError:
+            pass   # (reported below: the copy is still there)
+
+    if dest.is_dir() and not dest.is_symlink():
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(dest, onexc=writable_then_retry)
+        else:
+            shutil.rmtree(dest, onerror=writable_then_retry)
+    else:
+        try:
+            dest.unlink(missing_ok=True)
+        except OSError as e:
+            writable_then_retry(lambda p: Path(p).unlink(missing_ok=True), dest, e)
+    return not os.path.lexists(dest)
 
 
 def _unique_path(path: Path, reserved: set[str] = frozenset()) -> Path:

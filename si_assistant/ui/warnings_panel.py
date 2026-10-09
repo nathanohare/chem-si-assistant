@@ -4,15 +4,18 @@ group of their own. Double-click to go there; dismiss or restore warnings."""
 
 from __future__ import annotations
 
+import copy
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QBrush, QColor
-from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QInputDialog, QLabel, QMenu, QPushButton,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QInputDialog, QLabel, QMenu,
+                               QMessageBox, QPushButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from ..core import checks
 from ..core import fields as F
 from ..core import manuscript
-from ..core.project import Project
+from ..core.project import Project, ProjectError
 
 ROLE = Qt.ItemDataRole.UserRole  # (kind, compound id, field key, warning key); kind
 #                                  "ms"/"ms_dismissed" for the Manuscript check's findings
@@ -33,6 +36,21 @@ def ask_reason(parent: QWidget, message: str) -> str | None:
         parent, "Dismiss warning",
         f"{message}\n\nWhy is this OK? (optional — saved with the project)")
     return reason if ok else None
+
+
+def _dismissed_copy(compound):
+    """The compound's dismissed warnings as they are now (None: it has none)."""
+    return copy.deepcopy(compound.data.get("dismissed"))
+
+
+def _put_back_dismissed(compound, before) -> None:
+    """After a dismissal or restore that could not be saved: the compound in memory is put
+    back as it was, so it matches its file (the next save of the compound, e.g. typing on
+    its page, would otherwise write what the user was told had not been done)."""
+    if before is None:
+        compound.data.pop("dismissed", None)
+    else:
+        compound.data["dismissed"] = before
 
 
 class WarningsPanel(QWidget):
@@ -82,6 +100,19 @@ class WarningsPanel(QWidget):
         self.refresh()
 
     def refresh(self) -> None:
+        """Check everything again and rebuild the list."""
+        self._rebuild()
+
+    def show_computed(self, project: Project | None, report, computed: dict,
+                      labels=None) -> None:
+        """Rebuild the list from the warnings the main window has just worked out for its
+        tree ({compound id: checks.all_warnings}, with the ID report `report` and the
+        labels `labels`), so they are not checked a second time. A compound missing from
+        `computed` is checked here."""
+        self.project = project
+        self._rebuild(report, computed, labels)
+
+    def _rebuild(self, report=None, computed: dict | None = None, labels=None) -> None:
         self.tree.clear()
         self._warnings = {}
         self._ms = {}
@@ -89,11 +120,16 @@ class WarningsPanel(QWidget):
             self.summary.setText("")
             self._update_buttons()
             return
-        report = self.project.id_report()
+        if report is None:
+            report = self.project.id_report()
+        if labels is None:
+            from ..core.labels import compute
+            labels = compute(self.project)   # (worked out once for every check below)
+        computed = computed or {}
         total_w = total_f = 0
         show_dismissed = self.show_dismissed.isChecked()
         # Not about one compound: labels used twice, deleted items mentioned in texts.
-        project_items = checks.project_warnings(self.project)
+        project_items = checks.project_warnings(self.project, labels)
         if project_items:
             group = QTreeWidgetItem([f"Figures, tables, schemes and texts    ⚠ "
                                      f"{len(project_items)}"])
@@ -116,8 +152,12 @@ class WarningsPanel(QWidget):
         for section in self.project.data_sections():
             sec_item = None
             for c in section.compounds:
-                active = checks.active_warnings(self.project, c, report)
-                dismissed = checks.dismissed_warnings(self.project, c, report) if show_dismissed else []
+                every = computed.get(c.id)
+                if every is None:
+                    every = checks.all_warnings(self.project, c, report, labels)
+                active = [w for w in every if not checks.is_dismissed(c, w)]
+                dismissed = ([(w, c.data["dismissed"][w.key]) for w in every
+                              if checks.is_dismissed(c, w)] if show_dismissed else [])
                 flags = list(c.flags.items())
                 if not (active or dismissed or flags):
                     continue
@@ -180,7 +220,8 @@ class WarningsPanel(QWidget):
             self.tree.addTopLevelItem(group)
             return 0
         problems = [f for f in result.findings if f.status == manuscript.PROBLEM]
-        gone = [f for f in result.findings if f.status == manuscript.DISMISSED]             if show_dismissed else []
+        gone = ([f for f in result.findings if f.status == manuscript.DISMISSED]
+                if show_dismissed else [])
         if not problems and not gone:
             return 0
         group = QTreeWidgetItem([f"Manuscript    ⚠ {len(problems)}"])
@@ -236,9 +277,15 @@ class WarningsPanel(QWidget):
             reason = ask_reason(self, finding.message) if finding is not None else None
             if reason is None:
                 return
-            with self.project.undo_step("Dismiss a manuscript warning",
-                                        where=[("manuscript", "manuscript")]):
-                manuscript.dismiss(self.project, finding, reason)
+            try:
+                with self.project.undo_step("Dismiss a manuscript warning",
+                                            where=[("manuscript", "manuscript")]):
+                    manuscript.dismiss(self.project, finding, reason)
+            except (OSError, ProjectError) as e:
+                QMessageBox.warning(self, "Dismiss", "The dismissal could not be saved "
+                                    f"(manuscript/{manuscript.DISMISSED_FILE} may be open in "
+                                    f"another program, or offline):\n{e}")
+                return
             self.refresh()
             self.changed.emit()
             return
@@ -250,25 +297,47 @@ class WarningsPanel(QWidget):
         reason = ask_reason(self, w.message)
         if reason is None:
             return
-        with self.project.undo_step("Dismiss a warning", where=[("compound", data[1])]):
-            self.project.dismiss_warning(self.project.compound(data[1]), w, reason)
+        compound = self.project.compound(data[1])
+        before = _dismissed_copy(compound)
+        try:
+            with self.project.undo_step("Dismiss a warning", where=[("compound", data[1])]):
+                self.project.dismiss_warning(compound, w, reason)
+        except (OSError, ProjectError) as e:
+            _put_back_dismissed(compound, before)   # (not saved: not done either)
+            QMessageBox.warning(self, "Dismiss", "The dismissal could not be saved (the "
+                                f"compound's file may be open in another program):\n{e}")
+            return
         self.refresh()
         self.changed.emit()
 
     def _restore_selected(self) -> None:
         data = self._selected()
         if data and data[0] == "ms_dismissed" and self.project is not None:
-            with self.project.undo_step("Restore a manuscript warning",
-                                        where=[("manuscript", "manuscript")]):
-                manuscript.restore(self.project, data[3])
+            try:
+                with self.project.undo_step("Restore a manuscript warning",
+                                            where=[("manuscript", "manuscript")]):
+                    manuscript.restore(self.project, data[3])
+            except (OSError, ProjectError) as e:
+                QMessageBox.warning(self, "Restore", "The warning could not be restored "
+                                    f"(manuscript/{manuscript.DISMISSED_FILE} may be open in "
+                                    f"another program, or offline):\n{e}")
+                return
             self.refresh()
             self.changed.emit()
             return
         if not data or data[0] != "dismissed" or self.project is None:
             return
-        with self.project.undo_step("Restore a dismissed warning",
-                                    where=[("compound", data[1])]):
-            self.project.restore_warning(self.project.compound(data[1]), data[3])
+        compound = self.project.compound(data[1])
+        before = _dismissed_copy(compound)
+        try:
+            with self.project.undo_step("Restore a dismissed warning",
+                                        where=[("compound", data[1])]):
+                self.project.restore_warning(compound, data[3])
+        except (OSError, ProjectError) as e:
+            _put_back_dismissed(compound, before)   # (not saved: not done either)
+            QMessageBox.warning(self, "Restore", "The warning could not be restored (the "
+                                f"compound's file may be open in another program):\n{e}")
+            return
         self.refresh()
         self.changed.emit()
 

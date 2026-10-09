@@ -20,7 +20,10 @@ undoes it); typing is saved after a short pause.
 
 from __future__ import annotations
 
+import contextlib
+import copy
 from pathlib import Path
+from typing import Callable
 
 from PySide6.QtCore import QPointF, QRectF, QSize, QSizeF, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QFontMetricsF, QPainter, QPalette, QPen,
@@ -34,13 +37,13 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox,
 from ..core import chem
 from ..core import drawing_scale
 from ..core import scheme_editor as se
-from ..core.project import PICTURE_FILE_EXTENSIONS, ProjectError
+from ..core.project import PICTURE_FILE_EXTENSIONS, BoxCopyFailed, ProjectError
 from .rich_text import (ALIGN_SHOWN, MARKUP_MIME, PickerDialog, RichTextEditor, _is_clipboard,
                         alignment_icon)
 from .structure_widgets import (HIGHLIGHT, STRUCTURE_FILE_EXTENSIONS, PasteTargetMixin,
                                 PictureScaleDialog, clipboard_picture_for,
-                                clipboard_structure_text, drawing_settings, mol_pixmap,
-                                picture_pixmap, paste_key)
+                                clipboard_structure_text, copy_key, drawing_settings,
+                                mol_pixmap, picture_pixmap, paste_key)
 
 SCREEN_PX_PER_IN = 90.0      # structures are shown at about their printed size
 MAX_BOX = QSize(260, 200)    # … but no bigger than this on screen
@@ -260,7 +263,9 @@ class BoxCanvas(QWidget):
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if self._drag is not None:
             self._drag = None
-            self.label_moved.emit(self.offset.x(), self.offset.y())
+            # (a plain click on the ID only selects the box: nothing to save)
+            if self.offset != self._start:
+                self.label_moved.emit(self.offset.x(), self.offset.y())
         super().mouseReleaseEvent(event)
 
 
@@ -427,7 +432,7 @@ class BoxWidget(PasteTargetMixin, QFrame):
                                        "follows renumbering). Clear it with right-click ▸ "
                                        "Remove the ID label.")
         else:
-            self.label_edit.setText(text)
+            self.label_edit.setText(c.label)   # (as printed: no markup escapes)
             self.label_edit.setReadOnly(self.editor.locked or self.project.read_only)
             self.label_edit.setStyleSheet("")
         self.label_edit.blockSignals(False)
@@ -494,7 +499,9 @@ class BoxWidget(PasteTargetMixin, QFrame):
                 sub = menu.addMenu("Show a compound of this page")
                 report = self.project.id_report()
                 for c in free:
-                    sub.addAction(f"{report.display_id(c.id)}  {c.name or '(unnamed)'}",
+                    # ('&&': a name like "R&D" shows its "&", not an Alt+ shortcut)
+                    name = (c.name or '(unnamed)').replace('&', '&&')
+                    sub.addAction(f"{report.display_id(c.id)}  {name}",
                                   lambda cid=c.id: self.editor.link_existing(self.box_id, cid))
         menu.addSeparator()
         menu.addAction("Remove this box…", self.remove)
@@ -514,7 +521,7 @@ class BoxWidget(PasteTargetMixin, QFrame):
         picture = clipboard_picture_for(self.project)
         if picture is None:
             self.editor.say("⚠ The clipboard has no structure or picture. Copy the structure "
-                            "in ChemDraw (Ctrl+C) first, or type SMILES (right-click).")
+                            f"in ChemDraw ({copy_key()}) first, or type SMILES (right-click).")
             return
         self.editor.act("Paste a picture into the scheme",
                         lambda: se.set_box_picture(self.project, self.scheme, self.box_id,
@@ -563,8 +570,11 @@ class BoxWidget(PasteTargetMixin, QFrame):
             measured = drawing_scale.picture_bond_pt(
                 {k: v for k, v in box.items() if k != drawing_scale.OVERRIDE_KEY},
                 view.picture)
-            own = box.get(drawing_scale.OVERRIDE_KEY)
-            own = float(own) if isinstance(own, (int, float)) else None
+            # (the typed value read exactly as printing reads it, as for compounds)
+            bond, typed = drawing_scale.picture_bond(
+                {drawing_scale.OVERRIDE_KEY: box[drawing_scale.OVERRIDE_KEY]}
+                if drawing_scale.OVERRIDE_KEY in box else {}, None)
+            own = (bond or 0.0) if typed else None
         dialog = PictureScaleDialog(self, self.project, compound, bond=(measured, own))
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return
@@ -593,7 +603,11 @@ class BoxWidget(PasteTargetMixin, QFrame):
             stored = str(self.box.get("label") or "")
         except KeyError:   # (the box has gone, e.g. undone)
             return
-        if text != stored:
+        # (compared with the text the field showed, not the stored markup: leaving the
+        # field unchanged never rewrites a label, or strips its formatting)
+        from ..core import links
+        shown = links.plain_text(self.project, stored) if stored else ""
+        if text != shown:
             # (typed "@": the stored text is escaped so it prints as typed)
             from ..core.markup import Paragraph, Run, serialize
             self._saving = True
@@ -731,9 +745,10 @@ class InlineStructures:
         entry = se.inline_entry(editor.scheme, sid)
         measured = drawing_scale.picture_bond_pt(
             {k: v for k, v in entry.items() if k != drawing_scale.OVERRIDE_KEY}, picture)
-        own = entry.get(drawing_scale.OVERRIDE_KEY)
-        own = float(own) if isinstance(own, (int, float)) and not isinstance(own, bool) \
-            else None
+        bond, typed = drawing_scale.picture_bond(
+            {drawing_scale.OVERRIDE_KEY: entry[drawing_scale.OVERRIDE_KEY]}
+            if drawing_scale.OVERRIDE_KEY in entry else {}, None)
+        own = (bond or 0.0) if typed else None
         dialog = PictureScaleDialog(parent or editor, editor.project, None,
                                     bond=(measured, own))
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -745,6 +760,15 @@ class InlineStructures:
     def export(self, sid: str) -> dict | None:
         """Its files, for copying conditions into another scheme (rich_text copy)."""
         return se.export_inline(self.editor.scheme, sid)
+
+    def pasting(self, count: int):
+        """One Edit ▸ Undo step for all the structures of pasted conditions (the adopt()
+        calls inside join it), with the text's autosave that follows."""
+        project = self.editor.project
+        if project.read_only:
+            return contextlib.nullcontext()
+        return project.undo_step("Paste conditions with a structure" if count == 1
+                                 else "Paste conditions with structures", then_merge=True)
 
     def adopt(self, sid: str, info: dict | None) -> str | None:
         """A structure in pasted conditions: kept if it is this scheme's, else its files
@@ -873,7 +897,7 @@ class ConditionsBox(QWidget):
         source = QGuiApplication.clipboard().mimeData()
         editor = self.step_widget.editor
         if source is None or not editor.inline.wants(source):
-            editor.say("⚠ The clipboard has no structure. Copy it in ChemDraw (Ctrl+C) "
+            editor.say(f"⚠ The clipboard has no structure. Copy it in ChemDraw ({copy_key()}) "
                        "first.")
             return
         sid = editor.inline.paste(source)
@@ -928,11 +952,17 @@ class StepWidget(QFrame):
         layout.addWidget(self.add_btn, 0, Qt.AlignmentFlag.AlignLeft)
         layout.addStretch()
         self._timers = {}
+        # Conditions whose save failed (scheme.json held, e.g. by OneDrive): kept in their
+        # box and tried again on flush. _unsaved (a bool) tells the main window, which
+        # then asks before the page is closed.
+        self._failed: set[str] = set()
+        self._unsaved = False
+        self._said: dict[str, str] = {}   # the conditions whose failed save was said
         for box in (self.top, self.bottom):
             timer = QTimer(self)
             timer.setSingleShot(True)
             timer.setInterval(AUTOSAVE_MS)
-            timer.timeout.connect(lambda b=box: self.save(b))
+            timer.timeout.connect(lambda b=box: self._autosave(b))
             box.changed.connect(timer.start)
             self._timers[box.which] = timer
         self.refresh_yields()
@@ -947,38 +977,74 @@ class StepWidget(QFrame):
         if editor.layout_values()["yields"] != "conditions":
             self.yields_note.hide()
             return
-        report = editor.project.id_report()
-        parts = []
-        boxes = self.step["products"]
-        for box in boxes:
-            y = se.box_yield(editor.project, editor.scheme, box)
-            if not y:
-                continue
-            compound = se.box_compound(editor.project, editor.scheme, box)
-            label = report.display_id(compound.id) if compound is not None else ""
-            parts.append(y + (f" ({label})" if label and len(boxes) > 1 else ""))
+        from ..core import links
+        parts = [y + (f" ({links.plain_text(editor.project, label)})" if label else "")
+                 for y, label in se.conditions_yield_parts(editor.project, editor.scheme,
+                                                           self.step)]
         self.yields_note.setText(", ".join(parts))
         self.yields_note.setVisible(bool(parts))
 
+    def _mark(self, which: str, failed: bool) -> None:
+        if failed:
+            self._failed.add(which)
+        else:
+            self._failed.discard(which)
+        self._unsaved = bool(self._failed)
+
     def save(self, box: ConditionsBox) -> None:
+        """Save the conditions typed in `box`. Raises ProjectError/OSError when scheme.json
+        can't be saved (e.g. held): the step in memory is then left as it was (the typing
+        stays in the box) and the box is tried again on flush."""
         self._timers[box.which].stop()
         editor = self.editor
-        if editor.project.read_only:
+        if editor.project.read_only or editor.locked:   # (a locked scheme stays as it is)
             return
         text = box.text.markup()
         try:
             if text == str(self.step.get(box.which) or ""):
+                self._mark(box.which, False)
                 return
         except KeyError:   # (the step has gone, e.g. undone)
+            self._mark(box.which, False)
             return
-        with editor.project.autosave():   # (typing: merged into one undo step)
-            se.set_conditions(editor.project, editor.scheme, self.step_id, box.which, text)
+        try:
+            with editor.project.autosave():   # (typing: merged into one undo step)
+                se.set_conditions(editor.project, editor.scheme, self.step_id, box.which,
+                                  text)
+        except (ProjectError, OSError):
+            self._mark(box.which, True)
+            raise
+        self._mark(box.which, False)
         editor.saved.emit("Saved")
 
+    def _autosave(self, box: ConditionsBox) -> None:
+        """The autosave a moment after typing: a failed save is said, not raised (it would
+        reach the crash reporter from the timer)."""
+        try:
+            self.save(box)
+        except (ProjectError, OSError) as e:
+            self._said[box.which] = box.text.markup()   # (not said again on leaving)
+            QMessageBox.warning(self, "Could not save", f"{e}\n\nThe conditions are still in "
+                                "their box; saving them is tried again with your next change "
+                                "or when you leave the page.")
+
     def flush(self) -> None:
+        """Save conditions still waiting (or whose save failed). Raises ProjectError/
+        OSError if one can't be saved (the scheme page and the main window say so)."""
+        failed = None
         for box in (self.top, self.bottom):
-            if self._timers[box.which].isActive():
-                self.save(box)
+            if self._timers[box.which].isActive() or box.which in self._failed:
+                try:
+                    self.save(box)
+                except (ProjectError, OSError) as e:
+                    failed = failed or e
+        if failed is not None:
+            raise failed
+
+    def failures_said(self) -> bool:
+        """Every box whose save failed was said, with nothing typed in it since."""
+        return all(self._said.get(box.which) == box.text.markup()
+                   for box in (self.top, self.bottom) if box.which in self._failed)
 
 
 # ---------------------------------------------------------------------- the editor
@@ -1012,6 +1078,7 @@ class SchemeEditorWidget(QWidget):
     message = Signal(str)
     height_changed = Signal()         # the strip's content got taller or shorter
     layout_changed = Signal()         # its Layout… was changed (e.g. label and caption)
+    read_back = Signal()              # a change failed part-way: read the project back
 
     def __init__(self, project, scheme, parent: QWidget | None = None,
                  own_bar: bool = True):
@@ -1025,6 +1092,11 @@ class SchemeEditorWidget(QWidget):
         self.inline = InlineStructures(self)
         self.boxes: list[BoxWidget] = []
         self.steps: list[StepWidget] = []
+        # Called before each change (the scheme page saves its name, label and compound
+        # tab's typing first)
+        self.before_change: Callable[[], None] | None = None
+        # The last act() was stopped because before_change failed (nothing was changed)
+        self.blocked = False
 
         self.add_sm_btn = QPushButton("+ Starting material", self)
         self.add_sm_btn.setToolTip("Add another starting material (they are joined by “+”)")
@@ -1088,6 +1160,11 @@ class SchemeEditorWidget(QWidget):
         keep = next(((b.box_id, name) for b in self.boxes
                      for name in ("label_edit", "yield_edit")
                      if focus is not None and focus is getattr(b, name)), None)
+        # Conditions typed but not saved yet (waiting, or their save failed: e.g.
+        # scheme.json held) are kept in the new boxes, still to be saved.
+        waiting = {(s.step_id, box.which): box.text.markup()
+                   for s in self.steps for box in (s.top, s.bottom)
+                   if s._timers[box.which].isActive() or box.which in s._failed}
         while self.strip_layout.count():
             item = self.strip_layout.takeAt(0)
             w = item.widget()
@@ -1115,6 +1192,11 @@ class SchemeEditorWidget(QWidget):
         add_boxes(data["starting"], se.START)
         for n, step in enumerate(data["steps"], start=1):
             w = StepWidget(self, step, n)
+            for box in (w.top, w.bottom):
+                text = waiting.get((w.step_id, box.which))
+                if text is not None and text != str(step.get(box.which) or ""):
+                    box.text.set_markup(text)
+                    w._mark(box.which, True)   # (saved with the next flush)
             self.steps.append(w)
             self.strip_layout.addWidget(w, 0, Qt.AlignmentFlag.AlignTop)
             add_boxes(step["products"], step["id"])
@@ -1202,8 +1284,16 @@ class SchemeEditorWidget(QWidget):
             self.height_changed.emit()
 
     def flush(self) -> None:
+        """Save typing still waiting. Raises ProjectError/OSError when conditions can't be
+        saved (kept in their boxes, tried again next time; every step is tried)."""
+        failed = None
         for s in self.steps:
-            s.flush()
+            try:
+                s.flush()
+            except (ProjectError, OSError) as e:
+                failed = failed or e
+        if failed is not None:
+            raise failed
         for w in self.boxes:
             if w.label_edit.hasFocus():
                 w._label_typed()
@@ -1213,8 +1303,15 @@ class SchemeEditorWidget(QWidget):
     def set_locked(self, locked: bool) -> None:
         if self.project.read_only:
             return
-        self.flush()
-        se.set_locked(self.project, self.scheme, locked)
+        try:
+            self.flush()
+            se.set_locked(self.project, self.scheme, locked)   # (put back if not saved)
+        except (ProjectError, OSError) as e:
+            # (scheme.json is held, e.g. by OneDrive: the editor stays as it is)
+            QMessageBox.warning(self, "Could not save the scheme", f"{e}\n\nThe scheme was "
+                                f"not {'locked' if locked else 'unlocked'}: try again in a "
+                                "moment.")
+            return
         self.locked = locked
         self.rebuild()
         self.saved.emit("Scheme saved" if locked else "Scheme unlocked for editing")
@@ -1224,10 +1321,46 @@ class SchemeEditorWidget(QWidget):
     def act(self, label: str, fn, message: str = "Saved", rebuild: bool = True,
             compounds: bool = False, show: str = "") -> bool:
         """Do one change as one Edit ▸ Undo step; then show the scheme again."""
+        self.blocked = False
         if self.project.read_only:
             return False
-        self.flush()
+        try:
+            self.flush()
+        except (ProjectError, OSError) as e:
+            # (conditions typed could not be saved, e.g. scheme.json is held: they stay in
+            # their box, also when it is rebuilt; nothing is changed)
+            self.blocked = True
+            self.say(f"⚠ The conditions typed could not be saved yet ({e}). Nothing was "
+                     "changed in the scheme: try again in a moment.")
+            if rebuild:
+                self.rebuild()   # (a tick or a dragged ID shows the scheme as it still is)
+            return False
+        if self.blocked:
+            # (a typed ID label or yield saved just above was stopped by the compound tab,
+            # which can't be saved yet: so is this change, without waiting on it again)
+            if rebuild:
+                self.rebuild()
+            return False
+        if self.before_change is not None:
+            # (typing on the compound tab below is saved as its own undo step first: the
+            # change may rebuild that tab, or send its compound to the Trash)
+            try:
+                self.before_change()
+            except (ProjectError, OSError) as e:
+                # (its file is held, e.g. by OneDrive or a virus scanner: the typing stays
+                # waiting (on the compound tab, or in the scheme page's Name or Label box),
+                # and the scheme is left as it is so it isn't lost)
+                self.blocked = True
+                self.say(f"⚠ The typing on this page (the scheme's name or label, or the "
+                         f"compound page below) could not be saved yet ({e}). Nothing was "
+                         "changed in the scheme: try again in a moment.")
+                if rebuild:
+                    # (a tick, a dragged ID or a typed label shows the scheme as it still is)
+                    self.rebuild()
+                return False
         ok = True
+        # (the scheme as it was: put back if the change can't be saved)
+        before = copy.deepcopy(self.scheme.data), list(self.scheme.children)
         try:
             with self.project.undo_step(f"{label} “{self.scheme.name}”"):
                 fn()
@@ -1237,14 +1370,30 @@ class SchemeEditorWidget(QWidget):
         except se.SchemeEditorError as e:
             self.say(f"⚠ {e}")
             ok = False
-        except (ProjectError, OSError, KeyError) as e:
+        except KeyError as e:
             QMessageBox.warning(self, "Could not change the scheme", str(e))
+            ok = False
+        except BoxCopyFailed as e:
+            # (done, and saved: the compound is in the Trash, only its box is left empty)
+            QMessageBox.warning(self, "Scheme box left empty", str(e))
+        except (ProjectError, OSError) as e:
+            # A file could not be saved (e.g. held by OneDrive): the change was made in
+            # memory first, so it is taken back there (it would show as done, and the next
+            # save of the scheme would write it unseen). It may have saved some files
+            # before failing (e.g. a new compound's): the project is then read back from
+            # its files (read_back; the main window does it), so memory matches them.
+            self.scheme.data.clear()
+            self.scheme.data.update(before[0])
+            self.scheme.children[:] = before[1]
+            QMessageBox.warning(self, "Could not change the scheme", str(e))
+            self.read_back.emit()
             ok = False
         if ok:
             self.say("")
         if rebuild:
             self.rebuild()
-        self.saved.emit(message)
+        if ok:
+            self.saved.emit(message)
         if compounds:
             self.compounds_changed.emit(show)
         return ok
@@ -1267,7 +1416,7 @@ class SchemeEditorWidget(QWidget):
             made["c"] = se.link_new_compound(self.project, self.scheme, box_id)
         if self.act("Mark a product as a compound in", do):
             self.compounds_changed.emit(made["c"].id)
-        else:
+        elif not self.blocked:   # (blocked by the compound tab: nothing was changed)
             self.compounds_changed.emit("")
 
     def link_existing(self, box_id: str, compound_id: str) -> None:

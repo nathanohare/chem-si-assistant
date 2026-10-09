@@ -1,0 +1,9 @@
+**About this example.** This example was made for Chem SI Assistant. The compounds and their NMR data, R_{f} values and physical states are from the cited literature; the spectra are simulated from those data. The procedures, the optimization study (Table S1), the yields, masses and HRMS found values are invented for illustration. Nothing here is a measurement.
+## General methods
+Unless otherwise noted, reactions were carried out under air in oven-dried glassware with magnetic stirring. Reagents and solvents were purchased from commercial suppliers and used as received. Reactions were monitored by thin-layer chromatography (TLC) on silica gel 60 F_{254} plates (visualized with UV light, 254 nm, and KMnO_{4} stain). Flash column chromatography was performed on silica gel (40–63 µm).@cite{r-3e32d107} The reduction conditions were optimized as shown in @{t-1ece4eb2}.
+## NMR spectroscopy
+^{1}H, ^{13}C{^{1}H} and ^{19}F{^{1}H} NMR spectra were recorded at 298 K in CDCl_{3} on 400, 500 and 600 MHz spectrometers (^{1}H frequencies; ^{13}C at 126 and 150 MHz, ^{19}F at 376 MHz). Chemical shifts (δ) are given in ppm, referenced to the residual solvent signals (CHCl_{3}: δ_{H} 7.26; CDCl_{3}: δ_{C} 77.16)@cite{r-b0bc2a90} and, for ^{19}F, to external CFCl_{3} (δ_{F} 0.00). Multiplicities are given as s (singlet), d (doublet), q (quartet), qd (quartet of doublets), m (multiplet) and br (broad); coupling constants (*J*) are given in Hz.
+## Mass spectrometry
+High-resolution mass spectra (HRMS) were recorded with electrospray ionization (ESI) in positive-ion mode; the [M+Na]^{+} ions are reported.
+## Abbreviations
+Ac_{2}O, acetic anhydride; DMAP, 4-(dimethylamino)pyridine; rt, room temperature.

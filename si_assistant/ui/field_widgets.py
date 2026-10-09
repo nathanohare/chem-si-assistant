@@ -9,6 +9,7 @@ Every editor:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QCompleter, QFileDialog,
 
 from ..core import fields as F
 from ..core.ids import new_id
+from ..core.labels import is_inline_figure
 from ..core.project import ATTACHMENT_EXTENSIONS, Compound, Project, ProjectError
 from .rich_text import RichTextEditor
 
@@ -36,14 +38,20 @@ class FieldEditor(QWidget):
     changed = Signal()
 
     def __init__(self, project: Project, compound: Compound, defn: F.FieldDef,
-                 before_write: Callable[[], None], parent: QWidget | None = None):
+                 before_write: Callable[[], bool | None], parent: QWidget | None = None):
         super().__init__(parent)
         self.project = project
         self.compound = compound
         self.defn = defn
         # Called before any operation that saves compound.json itself (e.g. adding a
-        # file), so on-screen edits elsewhere on the page are stored first.
+        # file), so on-screen edits elsewhere on the page are stored first. It gives False
+        # when they could not be saved (it says so): the operation then does not go on.
         self.before_write = before_write
+
+    def saved_first(self) -> bool:
+        """before_write(): False if typing on the page could not be saved, so the action
+        should stop (it may rebuild the page from the saved files and lose that typing)."""
+        return self.before_write() is not False
 
     def store(self) -> None:
         raise NotImplementedError
@@ -156,19 +164,27 @@ def connect_changed(widget: QWidget, slot) -> None:
         widget.textEdited.connect(slot)
 
 
+PURIFICATION_SENTENCE_TIP = ("Printed at the end of the experimental procedure. Leave empty "
+                              "for the sentence shown in grey (made from the boxes above), or "
+                              "type your own.")
+
+
 class PartsEditor(FieldEditor):
     PER_ROW = 4
     # Fields whose parts are wide (labels and drop-downs) have fewer per row, so the page
     # fits beside the live preview at 1200 × 800 (ee: value and method, column and
     # eluent, flow and λ, the two retention times).
     PER_ROW_BY_FIELD = {"ee": 2, "purification": 3}
+    # A box holding a value typed over an automatic one (the HRMS and EA formulas).
+    MANUAL_STYLE = "QLineEdit { background: rgba(47, 128, 237, 45); }"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         grid = QGridLayout(self)
         grid.setContentsMargins(0, 0, 0, 0)
         self.widgets: dict[str, QWidget] = {}
-        value = self.compound.values.get(self.defn.key) or {}
+        value = self.compound.values.get(self.defn.key)
+        value = value if isinstance(value, dict) else {}   # (a hand-edited compound.json)
         self.per_row = self.PER_ROW_BY_FIELD.get(self.defn.key, self.PER_ROW)
         for i, part in enumerate(self.defn.parts):
             cell = QHBoxLayout()
@@ -187,7 +203,7 @@ class PartsEditor(FieldEditor):
             if part.learn and part.kind == "combo":
                 w.setToolTip("Pick from the list or type your own. The list also offers what "
                              "other compounds in this project use.")
-            set_part_value(w, part, str(value.get(part.key, part.default)))
+            set_part_value(w, part, F.part_text(value.get(part.key, part.default)))
             connect_changed(w, lambda *_: self.changed.emit())
             if self.defn.key == "ee" and part.key == "value" and isinstance(w, QLineEdit):
                 # "99%" -> "99% ee", "97:3" -> "97:3 er" when the box is left (SPEC §13l.12a).
@@ -199,9 +215,7 @@ class PartsEditor(FieldEditor):
             if self.defn.key == "purification" and part.key == "sentence":
                 # Its own line, the whole width: the sentence printed at the end of the
                 # procedure, shown greyed while automatic (SPEC §13q.2).
-                w.setToolTip("Printed at the end of the experimental procedure. Leave empty "
-                             "for the sentence shown in grey (made from the boxes above), or "
-                             "type your own.")
+                w.setToolTip(PURIFICATION_SENTENCE_TIP)
                 grid.addLayout(cell, i // self.per_row, 0, 1, self.per_row)
                 continue
             grid.addLayout(cell, i // self.per_row, i % self.per_row)
@@ -216,17 +230,65 @@ class PartsEditor(FieldEditor):
         if self.defn.key == "purification":
             self.changed.connect(self._show_purification)
             self._show_purification()
+        if self.defn.key == "ea":
+            self.changed.connect(self._show_ea_formula)
+            self._show_ea_formula()
 
     def _show_purification(self) -> None:
-        """The Purification field's "Printed as" box shows the automatic sentence."""
+        """The Purification field's "Printed as" box shows the automatic sentence, or, when
+        the chosen general procedure places {purification} itself, that its text is not
+        printed (as the compiler does; SPEC §13q.2). The box stays editable."""
         from ..core import procedures
         box = self.widgets.get("sentence")
         if not isinstance(box, QLineEdit):
             return
         text = procedures.purification_text_of(
             {k: get_part_value(w) for k, w in self.widgets.items()})
+        gp = self.project.compound_gp(self.compound)
+        if procedures.uses_purification(gp):
+            # What the general procedure prints for {purification}: the value typed in its
+            # box on this page, else the method etc. above.
+            typed = {procedures.key(k): str(v).strip() for k, v in
+                     (self.project.gp_choice(self.compound).get("values") or {}).items()
+                     if isinstance(v, str) and v.strip()}.get("purification", "")
+            if typed:
+                text = "".join(r.text for r in procedures.value_runs(typed))
+            name = str(gp.get("name") or "").strip()
+            who = f"“{name}”" if name else "the general procedure"
+            box.setPlaceholderText(f"not used: {who} places “{text}” itself" if text else
+                                   f"not used: {who} places {{purification}} itself")
+            box.setToolTip(
+                f"Not printed: {who} places {{purification}} in its compound sentence "
+                "itself, so text typed here does not reach the SI. To print your own "
+                "wording, type it in the {purification} box under the general procedure "
+                "(Experimental procedure field), or take {purification} out of the general "
+                "procedure's sentence.")
+            return
         box.setPlaceholderText(f"{procedures.PURIFICATION_START}{text}." if text
                                else "automatic (choose a method above)")
+        box.setToolTip(PURIFICATION_SENTENCE_TIP)
+
+    def _show_ea_formula(self) -> None:
+        """The Elemental analysis field's Formula box shows the structure's formula, which
+        is printed while the box is empty; a typed one (e.g. a solvate) is highlighted.
+        Also called when the structure changes."""
+        box = self.widgets.get("formula")
+        if not isinstance(box, QLineEdit):
+            return
+        from ..core import chem
+        from .structure_widgets import formula_plain
+        try:
+            info = self.project.structure_info(self.compound)
+        except chem.ChemError:
+            info = None
+        generic = (self.project.generic_structure_atoms(self.compound) if info is None
+                   else [])
+        box.setPlaceholderText(f"auto: {formula_plain(info.formula)}" if info is not None
+                               else f"generic atom ({', '.join(generic)}): type the formula"
+                               if generic else "e.g. C12H15NO·0.25H2O")
+        box.setToolTip("Type the formula the values were calculated for, e.g. a solvate; "
+                       "leave empty to use the structure.")
+        box.setStyleSheet(self.MANUAL_STYLE if box.text().strip() else "")
 
     def _ee_unit(self, edit: QLineEdit) -> None:
         """Add " ee" to a bare percentage and " er" to a bare ratio. The result is in the
@@ -298,7 +360,8 @@ class RichTextFieldEditor(FieldEditor):
                 self, "Replace text", "Replace the current SI text with the generated text?"
         ) != QMessageBox.StandardButton.Yes:
             return
-        self.before_write()  # the generated text must reflect what's on screen now
+        if not self.saved_first():  # the generated text must reflect what's on screen now
+            return
         paragraphs = generated_paragraphs(self.project, self.compound,
                                           bool(self.project.settings.get("format_text", True)))
         self.editor.set_markup(serialize(paragraphs))
@@ -343,15 +406,15 @@ class NmrReportRow(QFrame):
         for n in F.NUCLEI:
             self.nucleus.addItem(F.nucleus_label(n), n)
         self.nucleus.setMaximumWidth(90)
-        set_part_value(self.nucleus, F.Part("nucleus"), report.get("nucleus", "1H"))
-        self.label = QLineEdit(report.get("label", ""))
+        set_part_value(self.nucleus, F.Part("nucleus"), F.part_text(report.get("nucleus", "1H")))
+        self.label = QLineEdit(F.part_text(report.get("label", "")))
         self.label.setPlaceholderText("label (optional), e.g. major rotamer")
         remove = QToolButton()
         remove.setText("✕")
         remove.setToolTip("Remove this report")
         remove.clicked.connect(lambda: self.remove_requested.emit(self))
         self.text = RichTextEditor(self, headings=False, height=70, links=False)
-        self.text.set_markup(report.get("text", ""))
+        self.text.set_markup(F.part_text(report.get("text", "")))
 
         top = QHBoxLayout()
         top.addWidget(QLabel("Nucleus"))
@@ -378,8 +441,10 @@ class NmrEditor(FieldEditor):
         self.rows_layout = QVBoxLayout()
         self.rows_layout.setContentsMargins(0, 0, 0, 0)
         self.rows: list[NmrReportRow] = []
-        for report in self.compound.values.get(self.defn.key) or []:
-            self._add_row(report)
+        reports = self.compound.values.get(self.defn.key)
+        for report in reports if isinstance(reports, list) else []:
+            if isinstance(report, dict):   # (a hand-edited compound.json)
+                self._add_row(report)
 
         add = QToolButton()
         add.setText("+ Add report")
@@ -516,13 +581,14 @@ class AttachmentsEditor(FieldEditor):
                 inner.deleteLater()
         self.row_widgets = []
         labels = None
-        if any(p.key == "label" for p in self.defn.item_parts):
+        if self.has_labels():
             from ..core.labels import compute
             labels = compute(self.project)   # the automatic labels of inline files
-        inline_index = 0
-        for r, item in enumerate(self.compound.values.get(self.defn.key) or []):
-            name = item.get("file", "")
-            link = QPushButton(name)
+        inline_index = self._inline_offset()
+        for r, item in enumerate(self._items()):
+            name = F.part_text(item.get("file", ""))
+            # (A "&" in the button text would make the next letter an Alt+ shortcut.)
+            link = QPushButton(name.replace("&", "&&"))
             link.setFlat(True)
             link.setStyleSheet("text-align: left; text-decoration: underline;")
             link.setToolTip(f"{name}\nOpen in the default viewer")
@@ -532,7 +598,7 @@ class AttachmentsEditor(FieldEditor):
             # off on narrow pages, and shown whole in the tooltip.)
             link.setMinimumWidth(80)
             if not self.project.attachment_path(self.compound, self.defn.key, name).exists():
-                link.setText(f"⚠ {name} (missing)")
+                link.setText(f"⚠ {name.replace('&', '&&')} (missing)")
             # Each file takes two lines: the file name with its choices and ✕, then its
             # text boxes underneath, so the field fits next to the live preview.
             top, below = 2 * r, 2 * r + 1
@@ -540,7 +606,7 @@ class AttachmentsEditor(FieldEditor):
             texts.setContentsMargins(16, 0, 0, 6)
             self.rows_layout.addWidget(link, top, 0)
             widgets = {}
-            inline = item.get("placement", "inline") == "inline"
+            inline = is_inline_figure(item)   # (takes a figure number, as labels.compute)
             column = 1
             for part in self.defn.item_parts:
                 w = make_part_widget(part)
@@ -550,19 +616,14 @@ class AttachmentsEditor(FieldEditor):
                     # it is in the tooltip); the boxes share the line's width.
                     w.setMinimumWidth(min(150, w.fontMetrics().horizontalAdvance(
                         part.label) + 16))
-                set_part_value(w, part, str(item.get(part.key, part.default)))
+                set_part_value(w, part, F.part_text(item.get(part.key, part.default)))
                 w.setToolTip(part.label)
                 if part.key == "label":   # SPEC §13k.5a: the figure label of an inline file
                     found = labels.at(self.compound.id, inline_index) if (
                         labels is not None and inline) else None
-                    w.setPlaceholderText(f"{found.auto} (automatic)" if found
-                                         else "(label: only for inline files)")
+                    self._label_hint(w, found, labels)
                     w.setToolTip("The figure label printed with this file when it is shown "
                                  "inline. Leave empty to number it automatically.")
-                    w.setMinimumWidth(min(180, w.fontMetrics().horizontalAdvance(
-                        w.placeholderText() + "MM") + 16))
-                    if found is not None and labels.is_duplicate(found.label):
-                        w.setStyleSheet("QLineEdit { color: #d35400; }")
                 connect_changed(w, lambda *_: self.changed.emit())
                 if part.kind == "text":
                     texts.addWidget(w, 1)
@@ -582,6 +643,56 @@ class AttachmentsEditor(FieldEditor):
         self.rows_layout.setColumnStretch(0, 1)
         self.refresh_view_button()
 
+    def _items(self) -> list[dict]:
+        """The field's files (a hand-edited entry that is not a file is left out)."""
+        value = self.compound.values.get(self.defn.key)
+        return [i for i in value if isinstance(i, dict)] if isinstance(value, list) else []
+
+    def has_labels(self) -> bool:
+        """Whether the files have a figure label (not the Spectra field)."""
+        return any(p.key == "label" for p in self.defn.item_parts)
+
+    def _inline_offset(self) -> int:
+        """How many of the compound's inline files come before this field's. Inline files
+        are numbered in one run across all its file fields except Spectra, in field order,
+        as labels.compute (inline_files) and the compiler do."""
+        n = 0
+        for defn in self.project.field_defs(self.compound):
+            if defn.key == self.defn.key:
+                break
+            if defn.kind != "attachments" or defn.key == "spectra":
+                continue
+            items = self.compound.values.get(defn.key)
+            n += sum(1 for i in (items if isinstance(items, list) else [])
+                     if is_inline_figure(i))
+        return n
+
+    def _label_hint(self, w: QLineEdit, found, labels) -> None:
+        """The automatic label shown in a file's empty Label box ("Figure S3 (automatic)"),
+        orange when another item prints with the same label."""
+        w.setPlaceholderText(f"{found.auto} (automatic)" if found
+                             else "(label: only for inline files)")
+        w.setMinimumWidth(min(180, w.fontMetrics().horizontalAdvance(
+            w.placeholderText() + "MM") + 16))
+        duplicate = found is not None and labels is not None and labels.is_duplicate(found.label)
+        w.setStyleSheet("QLineEdit { color: #d35400; }" if duplicate else "")
+
+    def refresh_labels(self, labels) -> None:
+        """A placement or a label changed (here or in another file field of the page):
+        update the automatic labels shown, without rebuilding the rows (so focus and
+        typing are kept). `labels` is labels.compute(project), worked out after the save."""
+        if not self.has_labels():
+            return
+        by_file = {F.part_text(i.get("file", "")): i for i in self._items()}
+        inline_index = self._inline_offset()   # (numbered as in _build_rows)
+        for name, widgets in self.row_widgets:
+            inline = is_inline_figure(by_file.get(name))
+            w = widgets.get("label")
+            if isinstance(w, QLineEdit):
+                self._label_hint(w, labels.at(self.compound.id, inline_index) if inline
+                                 else None, labels)
+            inline_index += 1 if inline else 0
+
     def refresh_view_button(self) -> None:
         """"View spectra page": enabled when anything of this compound is printed in the
         Spectra section (its Spectra field, or Additional files set to "Spectra section");
@@ -592,9 +703,8 @@ class AttachmentsEditor(FieldEditor):
         has = bool(spectra_mod.spectrum_items(self.project, self.compound))
         section = self.project.spectra_section is not None
         if self.defn.key != "spectra":
-            self.view_btn.setVisible(any(
-                isinstance(i, dict) and i.get("placement") == "appendix"
-                for i in self.compound.values.get(self.defn.key) or []))
+            self.view_btn.setVisible(any(i.get("placement") == "appendix"
+                                         for i in self._items()))
         self.view_btn.setEnabled(has and section)
         self.view_btn.setToolTip(
             "Show how this compound's spectra are laid out in the Spectra section: drag "
@@ -605,8 +715,10 @@ class AttachmentsEditor(FieldEditor):
             "opened for editing)")
 
     def store(self) -> None:
-        items = self.compound.values.get(self.defn.key) or []
-        by_file = {i.get("file"): i for i in items}
+        items = self._items()
+        # (Keyed by the name shown, as the rows are: a hand-edited file name that is a
+        # number, e.g. 7, is shown as "7" and its boxes must still be stored.)
+        by_file = {F.part_text(i.get("file", "")): i for i in items}
         for name, widgets in self.row_widgets:
             if name in by_file:
                 by_file[name].update({k: get_part_value(w) for k, w in widgets.items()})
@@ -628,12 +740,13 @@ class AttachmentsEditor(FieldEditor):
     def add_files(self, paths: list[Path]) -> None:
         if not paths:
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         errors = []
         names = paths[0].name if len(paths) == 1 else f"{len(paths)} files"
         with self.undo_step(f"Add {names} to {self.shown_id()} ▸ {self.defn.label}"):
             for path in paths:
-                guess = ({"type": guess_spectrum_type(path.name)}
+                guess = ({"type": guess_spectrum_type(path.name, self.shown_id())}
                          if self.defn.key == "spectra" else None)
                 try:
                     self.project.attach_compound_file(self.compound, self.defn.key, path, guess)
@@ -649,7 +762,8 @@ class AttachmentsEditor(FieldEditor):
                                 f"Remove {name}? It will be moved to the project Trash."
                                 ) != QMessageBox.StandardButton.Yes:
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         try:
             with self.undo_step(f"Remove {name} from {self.shown_id()} ▸ {self.defn.label}"):
                 self.project.remove_compound_file(self.compound, self.defn.key, name)
@@ -711,10 +825,12 @@ class PrivateFilesEditor(FieldEditor):
             if item.widget():
                 item.widget().deleteLater()
         self.notes = {}
-        for r, item in enumerate(self.compound.values.get(self.defn.key) or []):
-            name = item.get("file", "")
+        items = self.compound.values.get(self.defn.key)
+        items = [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+        for r, item in enumerate(items):
+            name = F.part_text(item.get("file", ""))
             icon = "📁" if item.get("kind") == "folder" else "📄"
-            link = QPushButton(f"{icon} {name}")
+            link = QPushButton(f"{icon} {name.replace('&', '&&')}")   # (no Alt+ shortcut)
             link.setFlat(True)
             link.setStyleSheet("text-align: left; text-decoration: underline;")
             link.setToolTip("Open")
@@ -722,8 +838,8 @@ class PrivateFilesEditor(FieldEditor):
             link.clicked.connect(lambda _=False, n=name: QDesktopServices.openUrl(
                 QUrl.fromLocalFile(str(self.project.private_dir(self.compound) / n))))
             if not (self.project.private_dir(self.compound) / name).exists():
-                link.setText(f"⚠ {name} (missing)")
-            note = QLineEdit(item.get("note", ""))
+                link.setText(f"⚠ {name.replace('&', '&&')} (missing)")
+            note = QLineEdit(F.part_text(item.get("note", "")))
             note.setPlaceholderText("note (optional)")
             note.textEdited.connect(lambda *_: self.changed.emit())
             remove = QToolButton()
@@ -738,14 +854,17 @@ class PrivateFilesEditor(FieldEditor):
         self.rows_layout.setColumnStretch(1, 1)
 
     def store(self) -> None:
-        for item in self.compound.values.get(self.defn.key) or []:
-            if item.get("file") in self.notes:
-                item["note"] = self.notes[item["file"]].text().strip()
+        items = self.compound.values.get(self.defn.key)
+        for item in items if isinstance(items, list) else []:
+            name = F.part_text(item.get("file", "")) if isinstance(item, dict) else ""
+            if name in self.notes:   # (keyed by the name shown, as in _build_rows)
+                item["note"] = self.notes[name].text().strip()
 
     def add_paths(self, paths: list[Path]) -> None:
         if not paths:
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         errors = []
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)  # folders can be large
         names = paths[0].name if len(paths) == 1 else f"{len(paths)} items"
@@ -773,14 +892,28 @@ class PrivateFilesEditor(FieldEditor):
 
     def _open_dir(self) -> None:
         folder = self.project.private_dir(self.compound)
-        folder.mkdir(parents=True, exist_ok=True)
+        if not folder.is_dir():
+            if self.project.read_only:
+                # Nothing is written into a project open read-only (e.g. a colleague has it).
+                QMessageBox.information(self, "Open storage folder",
+                                        "Nothing is stored with this compound yet.")
+                return
+            try:
+                # Plain mkdir on purpose: the undo journal ignores an empty folder (through
+                # fileio it would make an undo step of its own and clear Redo). No parents:
+                # a compound folder deleted on another computer is not made again.
+                folder.mkdir(exist_ok=True)
+            except OSError as e:
+                QMessageBox.warning(self, "Could not open the storage folder", str(e))
+                return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
     def _remove(self, name: str) -> None:
         if QMessageBox.question(self, "Remove", f"Remove {name}? It will be moved to the "
                                 "project Trash.") != QMessageBox.StandardButton.Yes:
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         try:
             with self.undo_step(f"Remove {name} from {self.shown_id()}"):
                 self.project.remove_private_item(self.compound, name)
@@ -799,15 +932,58 @@ class PrivateFilesEditor(FieldEditor):
             self.add_paths(paths)
 
 
-def guess_spectrum_type(file_name: str) -> str:
-    """Guess the spectrum type from a file name like "3a_13C.pdf" or "3a-HSQC.pdf"."""
-    name = file_name.lower().replace(" ", "")
+# Whole words of a spectrum file's name that give its type: methods first (a 2D file often
+# names its nuclei too, "3a_HMBC_1H-13C"), then nuclei.
+_METHOD_WORDS = {"hsqc": "2D NMR", "hmbc": "2D NMR", "hmqc": "2D NMR", "cosy": "2D NMR",
+                 "tocsy": "2D NMR", "noesy": "2D NMR", "roesy": "2D NMR",
+                 "hplc": "HPLC/SFC", "sfc": "HPLC/SFC", "ir": "IR", "ftir": "IR"}
+_NUCLEUS_WORDS = {"13c": "13C", "carbon": "13C", "19f": "19F", "31p": "31P", "11b": "11B",
+                  "1h": "1H", "proton": "1H"}
+_NUCLEUS_ORDER = ("13C", "19F", "31P", "11B", "1H")   # 13C(1H)…: the other nucleus wins
+_GROUP = r"[(\[{][^)\]}]*[)\]}]"                        # (1H), [1H] or {1H}
+
+
+def guess_spectrum_type(file_name: str, compound_id: str = "") -> str:
+    """Guess the spectrum type from a file name like "3a_13C.pdf", "3a-HSQC.pdf" or
+    "3a_13C{1H}.pdf". Compound IDs such as 13c, 19f or 11b look like nuclei, so whole words
+    of the name are matched: a method word (HSQC, HPLC, IR…) wins. A nucleus in brackets or
+    followed by "decoupled"/"dec" ({1H}, (1H), [1H], 1H-decoupled, proton decoupled) is the
+    decoupled one, not the type. Of the other nucleus words, a word that is the compound's
+    shown ID is passed over (when another word names a nucleus); then 13C, 19F, 31P or 11B
+    wins over 1H, as in "3a_13C-1H.pdf". With no ID known, the last nucleus word is taken,
+    as the type usually follows the ID ("13c_1H.pdf" is ¹H). Only a guess: the type can be
+    changed on the page."""
+    words, depth = [], 0   # (word, inside brackets)
+    for token in re.findall(r"[0-9a-z]+|[(\[{)\]}]", Path(file_name).stem.lower()):
+        if token in "([{":
+            depth += 1
+        elif token in ")]}":
+            depth = max(depth - 1, 0)
+        else:
+            words.append((token, depth > 0))
+    for w, _grouped in words:
+        if w in _METHOD_WORDS:
+            return _METHOD_WORDS[w]
+    observed, decoupled = [], []
+    for i, (w, grouped) in enumerate(words):
+        if w in _NUCLEUS_WORDS:
+            note = grouped or (i + 1 < len(words) and words[i + 1][0].startswith("dec"))
+            (decoupled if note else observed).append(w)
+    own = compound_id.strip().lower()
+    nuclei = [_NUCLEUS_WORDS[w] for w in observed if w != own] or \
+        [_NUCLEUS_WORDS[w] for w in observed]
+    if nuclei:
+        return min(nuclei, key=_NUCLEUS_ORDER.index) if own else nuclei[-1]
+    # No separators (e.g. "3a_13CNMR.pdf"): look for the words inside the name.
+    name = re.sub(_GROUP, "", file_name.lower()).replace(" ", "")
     for key, words in (("13C", ("13c", "carbon")), ("19F", ("19f",)), ("31P", ("31p",)),
                        ("11B", ("11b",)), ("2D NMR", ("hsqc", "hmbc", "cosy", "noesy", "roesy")),
                        ("HPLC/SFC", ("hplc", "sfc")), ("IR", ("_ir", "-ir", "ftir")),
                        ("1H", ("1h", "proton"))):
         if any(w in name for w in words):
             return key
+    if decoupled:   # only a nucleus in brackets, e.g. "3a (13C).pdf"
+        return _NUCLEUS_WORDS[decoupled[0]]
     return "1H"
 
 
@@ -858,10 +1034,11 @@ class FieldBox(QFrame):
     SPACING = 3              # between the title line, warnings and the editor
 
     def __init__(self, project: Project, compound: Compound, defn: F.FieldDef, required: bool,
-                 before_write: Callable[[], None], parent: QWidget | None = None):
+                 before_write: Callable[[], bool | None], parent: QWidget | None = None):
         super().__init__(parent)
         self.project = project
         self.warnings: list = []
+        self.editor_warnings: list = []   # (set_warnings' in_editor)
         self.compound = compound
         self.defn = defn
         self.required = required
@@ -948,11 +1125,14 @@ class FieldBox(QFrame):
             filled, text = False, ""
         icon = "✔" if filled else ("✖" if self.required else "○")
         flag = "  ⚑" if self.flag_btn.isChecked() else ""
-        flag += "  ⚠" if self.warnings else ""
+        flag += "  ⚠" if self.warnings or self.editor_warnings else ""
         self.summary.setText(f"{icon} {text or ('empty' if not filled else '')}{flag}")
 
-    def set_warnings(self, warnings: list) -> None:
-        """Show the automatic warnings about this field, each with a Dismiss button."""
+    def set_warnings(self, warnings: list, in_editor: list = ()) -> None:
+        """Show the automatic warnings about this field, each with a Dismiss button.
+        `in_editor`: warnings the field's editor already says in its own words (not listed
+        again, but still marked ⚠ on the one-line summary while the field is collapsed)."""
+        self.editor_warnings = list(in_editor)
         self.warnings = list(warnings)
         while self.warn_layout.count():
             item = self.warn_layout.takeAt(0)

@@ -1,0 +1,179 @@
+{
+  "id": "t-1ece4eb2",
+  "label": "",
+  "header_rows": 1,
+  "columns": [
+    "center",
+    "center",
+    "center",
+    "center",
+    "center",
+    "center"
+  ],
+  "rows": [
+    [
+      {
+        "text": "Entry^{a}"
+      },
+      {
+        "text": "Reductant (equiv)"
+      },
+      {
+        "text": "Solvent"
+      },
+      {
+        "text": "Temperature"
+      },
+      {
+        "text": "Time"
+      },
+      {
+        "text": "**@{c-ad564675}** (%)^{b}"
+      }
+    ],
+    [
+      {
+        "text": "**1**"
+      },
+      {
+        "text": "NaBH_{4} (1.5)"
+      },
+      {
+        "text": "MeOH"
+      },
+      {
+        "text": "0 °C"
+      },
+      {
+        "text": "30 min"
+      },
+      {
+        "text": "**95**"
+      }
+    ],
+    [
+      {
+        "text": "2"
+      },
+      {
+        "text": "NaBH_{4} (1.0)"
+      },
+      {
+        "text": "MeOH"
+      },
+      {
+        "text": "0 °C"
+      },
+      {
+        "text": "30 min"
+      },
+      {
+        "text": "81"
+      }
+    ],
+    [
+      {
+        "text": "3"
+      },
+      {
+        "text": "NaBH_{4} (1.5)"
+      },
+      {
+        "text": "EtOH"
+      },
+      {
+        "text": "0 °C"
+      },
+      {
+        "text": "30 min"
+      },
+      {
+        "text": "90"
+      }
+    ],
+    [
+      {
+        "text": "4"
+      },
+      {
+        "text": "NaBH_{4} (1.5)"
+      },
+      {
+        "text": "THF"
+      },
+      {
+        "text": "0 °C"
+      },
+      {
+        "text": "30 min"
+      },
+      {
+        "text": "23"
+      }
+    ],
+    [
+      {
+        "text": "5"
+      },
+      {
+        "text": "NaBH_{4} (1.5)"
+      },
+      {
+        "text": "MeOH"
+      },
+      {
+        "text": "rt"
+      },
+      {
+        "text": "30 min"
+      },
+      {
+        "text": "91"
+      }
+    ],
+    [
+      {
+        "text": "6"
+      },
+      {
+        "text": "LiBH_{4} (1.5)"
+      },
+      {
+        "text": "THF"
+      },
+      {
+        "text": "0 °C"
+      },
+      {
+        "text": "1 h"
+      },
+      {
+        "text": "88"
+      }
+    ],
+    [
+      {
+        "text": "7"
+      },
+      {
+        "text": "NaBH(OAc)_{3} (1.5)"
+      },
+      {
+        "text": "CH_{2}Cl_{2}"
+      },
+      {
+        "text": "rt"
+      },
+      {
+        "text": "24 h"
+      },
+      {
+        "text": "<5"
+      }
+    ]
+  ],
+  "footnotes": [
+    "^{a} Reaction conditions: 4′-bromoacetophenone (0.50 mmol), reductant, solvent (2.5 mL).",
+    "^{b} Isolated yield."
+  ]
+}

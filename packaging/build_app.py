@@ -135,6 +135,9 @@ def data_files(root: Path = ROOT) -> list[tuple[str, str]]:
     pairs = [(str(pkg / "styles" / "*.typ"), "si_assistant/styles"),
              (str(pkg / "data" / "*.txt"), "si_assistant/data"),
              (str(pkg / "icons" / "*"), "si_assistant/icons"),
+             # The example project (Help ▸ Open example project…): a whole folder, copied
+             # as it is (tools/make_example_project.py makes it).
+             (str(pkg / "example"), "si_assistant/example"),
              (str(root / "LICENSE"), "."),
              (str(root / "THIRD_PARTY_NOTICES.md"), "."),
              (str(root / "docs" / "user-guide.md"), "docs")]
@@ -161,6 +164,8 @@ QT_EXCLUDES = ["PySide6.QtQml", "PySide6.QtQuick", "PySide6.QtQuickWidgets",
 #  * QML plugins (the program has no QML).
 # (Qt's folders are PySide6/… on Windows, PySide6/Qt/… on macOS and Linux; on macOS Qt
 # WebEngine is QtWebEngineCore.framework.)
+EXAMPLE_LEFTOVERS = re.compile(
+    r"(^|/)si_assistant/example/(.*/)?((build|trash|snapshots)/|[^/]*\.lock$|\.tmp-[^/]*$)")
 _DROP = (re.compile(r"(^|/)(lib)?Qt6?(WebEngine|WebChannel|WebSockets|Positioning)[^/]*$"),
          re.compile(r"(^|/)Qt(WebEngine|WebChannel|Positioning)[^/]*\.framework/"),
          re.compile(r"(^|/)QtWebEngineProcess[^/]*$"),
@@ -169,7 +174,11 @@ _DROP = (re.compile(r"(^|/)(lib)?Qt6?(WebEngine|WebChannel|WebSockets|Positionin
          re.compile(r"(^|/)PySide6/(Qt/)?resources/(icudtl\.dat|v8_context_snapshot[^/]*)$"),
          re.compile(r"(^|/)PySide6/(Qt/)?translations/[^/]+\.qm$"),
          re.compile(r"(^|/)PySide6/(Qt/)?qml/"),
-         re.compile(r"(^|/)PySide6/(Qt/)?plugins/qmltooling/"))
+         re.compile(r"(^|/)PySide6/(Qt/)?plugins/qmltooling/"),
+         # What a program that had the example project open leaves in it (the build/
+         # folder with the undo history, snapshots, Trash, the lock, half-written files):
+         # never shipped (resources.NOT_COPIED; the user's copy leaves them out too).
+         EXAMPLE_LEFTOVERS)
 
 
 def keep_in_bundle(dest: str) -> bool:
@@ -314,6 +323,15 @@ def bundle_data_dir(app_dir: Path, platform: str = sys.platform) -> Path:
     return app_dir / "_internal"
 
 
+# The compiled parts of 'cryptography' and its helper cffi in a built program (".pyd" on
+# Windows, ".so" elsewhere), and their licence texts: Apache-2.0 asks for the licence to
+# be passed on with the program (the spec copies their package information folders).
+CRYPTOGRAPHY_FILES = ("cryptography/hazmat/bindings/_rust*", "_cffi_backend*",
+                      "cryptography-*.dist-info/**/LICENSE.APACHE",
+                      "cryptography-*.dist-info/**/LICENSE.BSD",
+                      "cffi-*.dist-info/**/LICENSE")
+
+
 def verify(app_dir: Path, platform: str = sys.platform) -> list[str]:
     """What is missing from a built program, or should not be in it (empty when all is
     well)."""
@@ -321,11 +339,28 @@ def verify(app_dir: Path, platform: str = sys.platform) -> list[str]:
     needed = [data / "si_assistant" / "styles" / "acs.typ",
               data / "si_assistant" / "data" / "azman_chemistry_dictionary.txt",
               data / "si_assistant" / "icons" / "app_icon_256.png",
+              data / "si_assistant" / "example" / "Example project" / "project.json",
               data / "spellchecker" / "resources" / "en.json.gz",
               data / "rdkit" / "Data" / "Fonts",
               data / "docs" / "user-guide.md", data / "LICENSE",
               data / "THIRD_PARTY_NOTICES.md", executable(app_dir, platform)]
     missing = [str(p) for p in needed if not p.exists()]
+    # The 'cryptography' package (compiled part and licence), which pypdf needs to read
+    # PDFs saved with edit restrictions; pypdf does without it silently, so check it came
+    # along.
+    places = [data, Path(app_dir) / "Contents" / "Frameworks"] \
+        if platform == "darwin" else [data]
+    for pattern in CRYPTOGRAPHY_FILES:
+        if not any(any(place.glob(pattern)) for place in places if place.is_dir()):
+            missing.append(str(data / pattern))
+    # The example project as tools/make_example_project.py makes it, nothing more.
+    example = data / "si_assistant" / "example"
+    if example.is_dir():
+        for found in sorted(example.rglob("*")):
+            rel = "si_assistant/example/" + found.relative_to(example).as_posix()
+            if EXAMPLE_LEFTOVERS.search(rel + ("/" if found.is_dir() else "")):
+                missing.append(f"should not be there: {found}")
+                break
     # Qt WebEngine is no longer used (SPEC §13n.2): it must not have come along.
     for found in Path(app_dir).rglob("*WebEngine*"):
         missing.append(f"should not be there: {found}")

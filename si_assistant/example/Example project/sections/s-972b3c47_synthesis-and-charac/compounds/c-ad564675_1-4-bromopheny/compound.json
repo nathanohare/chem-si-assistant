@@ -1,0 +1,128 @@
+{
+  "id": "c-ad564675",
+  "id_override": "",
+  "fields": [
+    {
+      "key": "structure"
+    },
+    {
+      "key": "name"
+    },
+    {
+      "key": "procedure"
+    },
+    {
+      "key": "scale"
+    },
+    {
+      "key": "yield"
+    },
+    {
+      "key": "physical_state"
+    },
+    {
+      "key": "purification"
+    },
+    {
+      "key": "rf"
+    },
+    {
+      "key": "nmr"
+    },
+    {
+      "key": "hrms"
+    },
+    {
+      "key": "spectra"
+    },
+    {
+      "key": "references"
+    },
+    {
+      "key": "notes"
+    }
+  ],
+  "values": {
+    "name": {
+      "text": "1-(4-Bromophenyl)ethan-1-ol"
+    },
+    "scale": {
+      "value": "0.50",
+      "unit": "mmol"
+    },
+    "yield": {
+      "percent": "95",
+      "mass": "95.5",
+      "mass_unit": "mg"
+    },
+    "physical_state": {
+      "text": "colorless oil"
+    },
+    "purification": {
+      "method": "flash column chromatography",
+      "phase": "SiO₂",
+      "eluent": "n-hexane/EtOAc 4:1",
+      "sentence": ""
+    },
+    "rf": {
+      "value": "0.17",
+      "eluent": "n-hexane/EtOAc 4:1",
+      "visualization": ""
+    },
+    "nmr": [
+      {
+        "id": "r-c0e989ae",
+        "nucleus": "1H",
+        "label": "",
+        "text": "1H NMR (500 MHz, CDCl3) δ 7.47 (d, J = 8.5 Hz, 2H), 7.25 (d, J = 8.5 Hz, 2H), 4.87 (qd, J = 6.4, 3.6 Hz, 1H), 1.77 (d, J = 3.7 Hz, 1H), 1.47 (d, J = 6.5 Hz, 3H)."
+      },
+      {
+        "id": "r-592d0341",
+        "nucleus": "13C",
+        "label": "",
+        "text": "13C NMR (126 MHz, CDCl3) δ 144.9, 131.7, 127.3, 121.3, 70.0, 25.4."
+      }
+    ],
+    "hrms": {
+      "ionization": "ESI",
+      "adduct": "[M+Na]+",
+      "found": "222.9727",
+      "species": "",
+      "formula": ""
+    },
+    "spectra": [
+      {
+        "file": "2e_1H.pdf",
+        "type": "1H",
+        "title": "",
+        "struct_caption": ""
+      },
+      {
+        "file": "2e_13C.pdf",
+        "type": "13C",
+        "title": "",
+        "struct_caption": ""
+      }
+    ],
+    "references": {
+      "text": "Spectral data matched those reported in the literature.",
+      "refs": [
+        "r-66ec47ab",
+        "r-30ec8485",
+        "r-f111eece"
+      ]
+    },
+    "procedure": {
+      "gp": "gp-cb78be13",
+      "values": {
+        "ketone": "4′-bromoacetophenone",
+        "ketone ID": "**1e**",
+        "mass": "99.5 mg"
+      }
+    },
+    "structure": {
+      "from_scheme": false
+    }
+  },
+  "flags": {}
+}

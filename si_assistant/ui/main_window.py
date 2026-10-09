@@ -2,31 +2,37 @@
 
 from __future__ import annotations
 
+import copy
 import getpass
+import json
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import (QEvent, QItemSelectionModel, QSettings, QStandardPaths, Qt,
+                            QThread, QTimer, QUrl, Signal)
 from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QIcon, QKeySequence
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
-                               QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
+from PySide6.QtWidgets import (QAbstractItemView, QAbstractSlider, QAbstractSpinBox,
+                               QApplication, QCheckBox, QDialog, QDockWidget, QFileDialog, QFrame, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QSplitter, QStackedWidget, QStyle, QToolButton,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from .. import APP_NAME
+from .. import APP_NAME, resources
 from ..core import front
 from ..core import spectra as spectra_mod
 from ..core.fileio import path_length_warning
 from ..core.lock import computer_name
-from ..core.project import (FORMAT_VERSION, SECTION_TYPE_LABELS, SPECTRA_NOT_DELETED,
-                            SPECTRA_SECTION, Project, ProjectError, SchemePage)
+from ..core.project import (FORMAT_VERSION, PROJECT_FILE, SECTION_TYPE_LABELS,
+                            SPECTRA_NOT_DELETED, SPECTRA_SECTION, BoxCopyFailed, Project,
+                            ProjectError, SchemePage)
 from ..core.undo import UndoContext
 from . import (feedback_ui, help_ui, restart, rich_text, text_checks, undo_keys, update_ui,
                wheel_guard)
 from ..compile.document import CompileOptions
 from .compile_ui import CompileDialog, PreviewWindow, open_file, run_compile, show_warnings
-from .compound_panel import CompoundPanel
+from .compound_panel import CompoundPanel, make_read_only
 from .warnings_panel import WarningsPanel
 from .scheme_panel import SchemePanel
 from .data_panel import DataSectionPanel
@@ -62,8 +68,17 @@ BOTTOM_KINDS = (MANUSCRIPT_ITEM, REFERENCES_ITEM)   # fixed items below the sect
 PANEL_TYPES = {"text": TextSectionPanel, "file": FileSectionPanel, "data": DataSectionPanel,
                SPECTRA_SECTION: SpectraSectionPanel}
 DELETE_TIP = "Delete the selected item (it goes to the project Trash)"
+EXAMPLE_TIP = ("Open a copy of a finished example project (real compounds from the literature, "
+               "simulated spectra) to see what the program does. The copy is yours to change.")
 SIZE_TIP = ("The size of everything in the window (text, buttons, pictures), on top of this "
             "computer's display scaling. Saved on this computer; used when the program starts.")
+
+
+def menu_text(text: str) -> str:
+    """A name typed by the user, for the label of a menu item or button: "&" would
+    otherwise be hidden and underline the next letter (an Alt+ shortcut), so it is
+    doubled. (Not for tooltips, which show "&" as it is.)"""
+    return text.replace("&", "&&")
 
 
 @lru_cache(maxsize=1)
@@ -175,6 +190,8 @@ class Preferences:
 class WelcomePage(QWidget):
     new_requested = Signal()
     open_requested = Signal()
+    example_requested = Signal()   # open a copy of the example project
+    example_pdf_requested = Signal()   # view the example's compiled SI (PDF)
     recent_chosen = Signal(str)
     open_last_toggled = Signal(bool)   # "Open the last project when the program starts"
 
@@ -184,13 +201,23 @@ class WelcomePage(QWidget):
         title = QLabel(f"<h1>{APP_NAME}</h1><p>Build the Supporting Information for your paper.</p>")
         new_btn = QPushButton("New Project…")
         open_btn = QPushButton("Open Project…")
+        # A finished example to look around in, shown prominently so a first-time user
+        # can see straight away what the program makes (a copy is opened; also in the
+        # Help menu).
+        self.example_btn = QPushButton("Open the Example Project…")
+        self.example_btn.setToolTip(EXAMPLE_TIP)
+        self.example_btn.setDefault(True)
+        example_pdf_btn = QPushButton("View Its Finished SI (PDF)")
+        example_pdf_btn.setToolTip("The PDF the program compiled from the example project")
+        example_pdf_btn.clicked.connect(self.example_pdf_requested)
         # The most recent project, one click away (SPEC §13l.3); hidden when there is none
         # or its folder is gone.
         self.last_btn = QPushButton()
-        for b in (new_btn, open_btn, self.last_btn):
+        for b in (new_btn, open_btn, self.example_btn, example_pdf_btn, self.last_btn):
             b.setMinimumHeight(36)
         new_btn.clicked.connect(self.new_requested)
         open_btn.clicked.connect(self.open_requested)
+        self.example_btn.clicked.connect(self.example_requested)
         self.last_btn.clicked.connect(self._open_last)
         self.open_last_box = QCheckBox("Open the last project when the program starts")
         self.open_last_box.setToolTip("Saved on this computer. Also in the View menu.")
@@ -204,10 +231,34 @@ class WelcomePage(QWidget):
         buttons.addWidget(self.last_btn)
         buttons.addStretch()
 
+        # The example, in a panel of its own.
+        self.example_card = QFrame()
+        self.example_card.setObjectName("exampleCard")
+        self.example_card.setStyleSheet(
+            "QFrame#exampleCard { border: 1px solid palette(highlight); border-radius: 8px; "
+            "background: palette(alternate-base); }")
+        card_text = QLabel(
+            "<b style='font-size: 13pt'>New here? Start with the example SI</b><br>"
+            "A finished Supporting Information to look around in: six compounds made by a "
+            "general procedure, a reaction scheme, an optimisation table, NMR spectra and "
+            "references, and the PDF compiled from them. A copy is opened, so you can change "
+            "anything and see what happens.")
+        card_text.setWordWrap(True)
+        card_buttons = QHBoxLayout()
+        card_buttons.addWidget(self.example_btn)
+        card_buttons.addWidget(example_pdf_btn)
+        card_buttons.addStretch()
+        card = QVBoxLayout(self.example_card)
+        card.setContentsMargins(14, 12, 14, 12)
+        card.addWidget(card_text)
+        card.addLayout(card_buttons)
+
         inner = QVBoxLayout()
         inner.addWidget(title)
         inner.addLayout(buttons)
         inner.addWidget(self.open_last_box)
+        inner.addSpacing(12)
+        inner.addWidget(self.example_card)
         inner.addSpacing(16)
         inner.addWidget(QLabel("<b>Recent projects</b> (double-click to open)"))
         inner.addWidget(self.recent_list)
@@ -229,7 +280,7 @@ class WelcomePage(QWidget):
         last = self.prefs.last_project()
         self.last_btn.setVisible(last is not None)
         if last is not None:
-            self.last_btn.setText(f"Open “{last.name}”")
+            self.last_btn.setText(f"Open “{menu_text(last.name)}”")
             self.last_btn.setToolTip(f"Open the project you had open last:\n{last}")
         self.open_last_box.blockSignals(True)
         self.open_last_box.setChecked(self.prefs.open_last_at_start)
@@ -403,6 +454,11 @@ class MainWindow(QMainWindow):
         self._panel_where: list[tuple[str, str]] = []   # the page's tree place (see _show)
         self._updating_tree = False
         self._collapsed: set[str] = set()  # Data sections the user collapsed
+        # The tree's warnings, kept only while one compound page is on show (see
+        # _refresh_labels): {compound id: (its ID-report messages, checks.all_warnings)},
+        # valid while _warnings_guard() gives the same value.
+        self._warn_cache: dict[str, tuple] = {}
+        self._warn_guard = None
 
         self.resize(1200, 800)
         geometry = self.prefs.value("window_geometry")
@@ -415,6 +471,8 @@ class MainWindow(QMainWindow):
         self.welcome = WelcomePage(self.prefs)
         self.welcome.new_requested.connect(self.new_project)
         self.welcome.open_requested.connect(self.choose_and_open_project)
+        self.welcome.example_requested.connect(self.open_example_project)
+        self.welcome.example_pdf_requested.connect(self.open_example_pdf)
         self.welcome.recent_chosen.connect(lambda p: self.open_project(Path(p)))
         self.welcome.open_last_toggled.connect(self.set_open_last_at_start)
         self.stack.addWidget(self.welcome)
@@ -533,10 +591,16 @@ class MainWindow(QMainWindow):
                                   icon=SP.SP_FileDialogContentsView)
         self.act_rename = act("&Rename…", self.rename_item, "F2")
         self.act_delete = act("&Delete…", self.delete_item, QKeySequence.StandardKey.Delete)
+        if sys.platform == "darwin":
+            # The Mac's delete key (⌫) is Backspace: ⌘⌫ as in Finder (shown in the menu),
+            # ⌫ itself, and forward-delete (fn+⌫). Deleting always asks first.
+            self.act_delete.setShortcuts([QKeySequence("Ctrl+Backspace"),
+                                          QKeySequence(Qt.Key.Key_Backspace),
+                                          QKeySequence(QKeySequence.StandardKey.Delete)])
         self.act_up = act("Move &Up", lambda: self.move_item(-1), "Ctrl+Up")
         self.act_down = act("Move Do&wn", lambda: self.move_item(1), "Ctrl+Down")
-        # These shortcuts only apply when the tree has focus, so Delete/F2 still
-        # work normally while typing in a text box.
+        # These shortcuts only apply when the tree has focus, so Delete/Backspace/F2
+        # still work normally while typing in a text box.
         for a in (self.act_rename, self.act_delete, self.act_up, self.act_down):
             a.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             self.tree.addAction(a)
@@ -651,6 +715,14 @@ class MainWindow(QMainWindow):
         self.act_user_guide = act("User guide", self.show_user_guide, "F1",
                                   tip="How to use the program, step by step")
         help_menu.addAction(self.act_user_guide)
+        self.act_open_example = act("Open example project…", self.open_example_project,
+                                    tip=EXAMPLE_TIP)
+        help_menu.addAction(self.act_open_example)
+        self.act_open_example_pdf = act(
+            "View the example SI (PDF)", self.open_example_pdf,
+            tip="Open the Supporting Information compiled from the example project, as a "
+                "PDF (simulated spectra; not a real SI)")
+        help_menu.addAction(self.act_open_example_pdf)
         help_menu.addSeparator()
         self.act_check_updates = act("Check for updates…", lambda: self.update_flow.check(True),
                                      tip="See whether a newer version is available on GitHub")
@@ -714,10 +786,13 @@ class MainWindow(QMainWindow):
         feedback_ui.FeedbackDialog(self).exec()
 
     def show_user_guide(self) -> None:
-        """Help ▸ User guide: the guide shipped with the program (one window, brought to
-        the front if already open), or its GitHub page if the guide is missing."""
+        """Help ▸ User guide: the guide shipped with the program (one window, kept when it
+        is closed and brought back to the front), or its GitHub page if the guide is
+        missing."""
         window = getattr(self, "guide_window", None)
-        if window is not None and window.isVisible():
+        if window is not None:   # (closing it only hid it)
+            window.setWindowState(window.windowState() & ~Qt.WindowState.WindowMinimized)
+            window.show()
             window.raise_()
             window.activateWindow()
             return
@@ -783,15 +858,20 @@ class MainWindow(QMainWindow):
             action.setToolTip(tip)
             action.setStatusTip(tip)
 
-    def restore_info(self) -> dict:
+    def restore_info(self, save: bool = True) -> dict:
         """Where the user is, for a restart (ui/restart.py): the open project, the selected
         tree item and the items it sits in (nearest first), the page's tab, and the live
-        preview and Warnings panes. Pending edits are saved first."""
+        preview and Warnings panes. Pending edits are saved first (unless the project was
+        taken over meanwhile: it then reopens read-only); with save=False they are not,
+        because close_project follows and saves them (a save that fails is then tried, and
+        reported, once)."""
         info: dict = {"preview_collapsed": bool(self.preview_pane.collapsed),
                       "warnings": self.warnings_dock.isVisible()}
         if self.project is None:
             return info
-        self._flush_panel()
+        self._stop_if_lock_lost()
+        if save:
+            self._flush_panel()
         info["folder"] = str(self.project.folder)
         info["read_only"] = bool(self.project.read_only)
         info["where"] = [[kind, item_id] for kind, item_id in self._where()]
@@ -841,7 +921,7 @@ class MainWindow(QMainWindow):
         """Close the project cleanly (edits saved, lock released), start a new copy of the
         program that reopens it where the user was, and quit. If the new copy cannot be
         started, the project is reopened here and the user is told."""
-        info = self.restore_info()
+        info = self.restore_info(save=False)   # (close_project saves the page)
         if not self.close_project():
             return False
         self.prefs.set_value("window_geometry", self.saveGeometry())
@@ -861,7 +941,7 @@ class MainWindow(QMainWindow):
     def _fill_recent_menu(self) -> None:
         self.recent_menu.clear()
         for path in self.prefs.recent:
-            self.recent_menu.addAction(path, lambda p=path: self.open_project(Path(p)))
+            self.recent_menu.addAction(menu_text(path), lambda p=path: self.open_project(Path(p)))
         if not self.prefs.recent:
             self.recent_menu.addAction("(none)").setEnabled(False)
 
@@ -958,6 +1038,56 @@ class MainWindow(QMainWindow):
             return
         self.open_project(project.folder)
 
+    def open_example_project(self) -> None:
+        """Help ▸ Open example project… (and the start page's button): copy the example
+        project shipped with the program into a new folder where the user chooses (the
+        Documents folder by default; "Chem SI Assistant example", or "… (2)" if that is
+        taken) and open the copy. The shipped example itself is never opened or changed,
+        so this also works when the program's own folder is read-only."""
+        source = resources.example_project()
+        if not (source / PROJECT_FILE).is_file():
+            QMessageBox.warning(self, "Example project not found",
+                                "The example project that comes with the program is missing:\n"
+                                f"{source}\n\nInstalling the program again brings it back.")
+            return
+        start = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
+        parent = QFileDialog.getExistingDirectory(
+            self, f"Choose where to put your copy of the example project (a folder "
+                  f"“{resources.EXAMPLE_COPY_NAME}” is made there)", start)
+        if not parent:
+            return
+        # The copy first: if it fails, the project that is open now stays open.
+        try:
+            folder = resources.copy_example_project(Path(parent), source)
+        except OSError as e:
+            QMessageBox.warning(self, "Could not copy the example project",
+                                f"The example project could not be copied into\n{parent}\n\n"
+                                f"{e}\n\nChoose another folder, e.g. your Documents folder.")
+            return
+        if not self.close_project():
+            self.statusBar().showMessage(
+                f"Your copy of the example project is in {folder}: open it with "
+                "File ▸ Open Project… when you are ready.", 30_000)
+            return
+        if self.open_project(folder):
+            self.statusBar().showMessage(
+                f"This is your own copy of the example project ({folder}). Change anything "
+                "you like: the example that comes with the program stays as it is.", 30_000)
+
+    def open_example_pdf(self) -> None:
+        """Help ▸ View the example SI (PDF): the SI compiled from the example project,
+        in the computer's PDF viewer (only read, never changed)."""
+        pdf = resources.example_pdf()
+        if not pdf.is_file():
+            QMessageBox.warning(self, "Example SI not found",
+                                "The example SI that comes with the program is missing:\n"
+                                f"{pdf}\n\nInstalling the program again brings it back.")
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(pdf))):
+            QMessageBox.warning(self, "Could not open the example SI",
+                                f"No program to show PDF files was found. The file is:\n{pdf}")
+
     def choose_and_open_project(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Open a Project Folder")
         if folder:
@@ -1004,6 +1134,34 @@ class MainWindow(QMainWindow):
                                     f"Could not write the lock file, so the project is opened "
                                     f"read-only.\n\n{e}")
                 project.read_only = True
+        try:
+            self._finish_opening(folder, project)
+        except BaseException:
+            # Something unexpected went wrong half-way: let go of the lock and leave no
+            # half-opened project in the window, then report the error as usual.
+            if self.project is project:
+                try:
+                    self.close_project()
+                except Exception:
+                    self._lock_timer.stop()
+                    project.read_only = True   # (nothing more is written from here)
+            try:
+                project.close()   # (does nothing when close_project already did it)
+            except OSError:
+                pass
+            raise
+        if project.load_warnings:
+            QMessageBox.warning(self, "Project opened with warnings",
+                                "\n".join(project.load_warnings))
+        long_path = path_length_warning(project.folder)
+        if long_path and not self.prefs.value(f"path_warned/{project.folder}"):
+            self.prefs.set_value(f"path_warned/{project.folder}", True)  # say it once
+            QMessageBox.information(self, "Long folder path", long_path)
+        return True
+
+    def _finish_opening(self, folder: Path, project: Project) -> None:
+        """open_project once the lock is taken: the automatic upgrades, then the window
+        shows the project (its tree, pages and panels)."""
         if not project.read_only:
             # Every project has a Spectra section (SPEC §13k.12): a new project gets it now,
             # an older one at the end of its tree, with its spectra settings carried over.
@@ -1024,6 +1182,8 @@ class MainWindow(QMainWindow):
 
         self.project = project
         if not project.read_only:
+            # (from now on: a takeover is noticed even if something below goes wrong)
+            self._lock_timer.start()
             # From here on every saved change can be undone (SPEC §13k.11); the automatic
             # changes made while opening (the Spectra section) are not part of it.
             journal = project.enable_undo()
@@ -1040,25 +1200,22 @@ class MainWindow(QMainWindow):
         self.prefs.add_recent(folder)
         self._populate_tree()
         self._update_ui_state()
-        if not project.read_only:
-            self._lock_timer.start()
-        if project.load_warnings:
-            QMessageBox.warning(self, "Project opened with warnings",
-                                "\n".join(project.load_warnings))
-        long_path = path_length_warning(project.folder)
-        if long_path and not self.prefs.value(f"path_warned/{project.folder}"):
-            self.prefs.set_value(f"path_warned/{project.folder}", True)  # say it once
-            QMessageBox.information(self, "Long folder path", long_path)
-        return True
 
     def close_project(self) -> bool:
         """Save pending edits and release the lock. Returns False if cancelled."""
         if self.project is None:
             return True
-        self._flush_panel()
+        self._stop_if_lock_lost()   # (taken over since the last check: nothing is saved)
+        if not self._flush_or_stay("Close the project", closing=True):
+            return False
         self._lock_timer.stop()
         self._set_panel(None)
         self.preview_pane.set_project(None)   # waits for a running preview compile
+        if self._preview is not None:
+            # Let go of build/preview.pdf (Windows keeps the file, and so the project
+            # folder, locked while it is shown), and don't keep showing the old page.
+            self._preview.release()
+            self._preview.hide()
         try:
             self.project.close()
         except OSError:
@@ -1075,7 +1232,9 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, event) -> None:  # noqa: N802
-        self.close_project()
+        if not self.close_project():
+            event.ignore()   # (kept open: the page's changes could not be saved)
+            return
         self.preview_pane.shutdown()
         # (The start-up test mode must leave this computer's settings as they are.)
         if not os.environ.get("SI_ASSISTANT_SMOKE_TEST"):
@@ -1083,29 +1242,301 @@ class MainWindow(QMainWindow):
         event.accept()
 
     def _check_lock(self) -> None:
-        """Notice if someone else took over the project while we had it open."""
+        """Notice if someone else took over the project, or it was closed or moved
+        elsewhere, while we had it open: the window then becomes read-only. A lock that
+        disappeared is not taken back: the files may have changed since this window read
+        them (e.g. someone took over on another computer, edited and closed), and its next
+        save would put its old copy back over their work."""
+        lost = self._lock_lost()
+        if lost is None:
+            return
+        p = self.project
+        pending = self._stop_writing()
+        self._show_lock_lost(p, lost, pending)
+
+    def _lock_lost(self) -> tuple[str, object] | None:
+        """Why this window may no longer write to its project, or None while its lock is
+        still there: ("taken", their lock) when someone else took it over; ("moved", None)
+        when the project folder is no longer where it was opened (renamed, moved or
+        deleted); ("gone", None) when our lock disappeared (the project was closed on
+        another computer). None also when the folder can't be read just now: it is asked
+        again next time. That includes a drive or share that is not there at the moment
+        (a USB stick unplugged, a network or mapped drive dropped): its files look missing
+        too, but the folder around the project is then missing as well. (Saves meanwhile
+        fail with a message; nothing is written into a re-created folder.)"""
         p = self.project
         if p is None or p.read_only:
-            return
+            return None
         try:
             current = p.current_lock()
-            if current is None:  # our lock vanished (e.g. sync glitch): re-claim it
-                p.acquire_lock(self.prefs.user_name)
-                return
-            if p.lock_still_ours():
-                return
+            if current is not None:
+                return None if p.lock_still_ours() else ("taken", current)
+            if not p.folder.parent.is_dir():
+                return None   # (the drive is not there just now, or can't be read)
+            if not (p.folder / PROJECT_FILE).is_file():
+                return "moved", None
         except OSError:
-            return
-        p.read_only = True  # pending autosaves check this and will not write
-        p.stop_undo()       # (build/undo/ now holds the other person's history)
+            return None
+        return "gone", None
+
+    def _stop_writing(self) -> bool:
+        """The lock was lost: from now on nothing is written (pending autosaves check
+        read_only), and build/undo/ (now someone else's history, or no one's) is left
+        alone. Returns whether typing on the page was not saved yet (it never will be).
+        The menus and buttons that change the project are greyed at once (also while a
+        menu or dialog is open; the page itself is rebuilt only after it closes)."""
+        p = self.project
+        pending = self._panel_has_unsaved_typing()
+        p.read_only = True
+        p.stop_undo()
         p.lock = None
-        self._update_undo_actions()
         self._lock_timer.stop()
-        self._populate_tree(select=self._current())
+        self._update_ui_state()   # (also the undo actions and the "[read-only]" title)
+        return pending
+
+    def _panel_has_unsaved_typing(self) -> bool:
+        """Typing on the page not saved yet: an autosave still waiting, edits whose save
+        failed (kept waiting to be tried again: e.g. the folder was just moved, or a file
+        was held by OneDrive), or the box being typed in edited and not yet left (some
+        boxes save only then)."""
+        panel = self.panel
+        if panel is None:
+            return False
+        if any(t.isActive() and t.isSingleShot() for t in panel.findChildren(QTimer)):
+            return True
+        if self._panel_waits_to_save(panel):
+            return True
+        focus = QApplication.focusWidget()
+        return (isinstance(focus, QLineEdit) and panel.isAncestorOf(focus)
+                and focus.isModified() and not focus.isReadOnly())
+
+    @staticmethod
+    def _panel_waits_to_save(panel: QWidget) -> bool:
+        """The page (or a part of it) has edits whose save is still waiting: not tried yet,
+        or tried and failed (kept to be tried again). A compound page, also on a scheme
+        page's tab, and the general procedures say so with has_unsaved(); the spectra, text
+        and front-matter pages mark it with _unsaved."""
+        def waits(w: QWidget) -> bool:
+            has_unsaved = getattr(w, "has_unsaved", None)
+            if callable(has_unsaved):
+                return bool(has_unsaved())
+            return getattr(w, "_dirty", False) is True or getattr(w, "_unsaved", False) is True
+        return any(waits(w) for w in [panel, *panel.findChildren(QWidget)])
+
+    def _panel_save_failed(self) -> bool:
+        """After _flush_panel: the page's latest changes could still not be saved (the page
+        has already said so). Not in read-only mode: nothing was tried then."""
+        p, panel = self.project, self.panel
+        return (panel is not None and p is not None and not p.read_only
+                and self._panel_waits_to_save(panel))
+
+    def _flush_or_stay(self, doing: str = "Leave the page", closing: bool = False) -> bool:
+        """Before the page on show is thrown away (another page shown, the tree rebuilt,
+        the project closed): save its changes. True to go on; False to stay on the page
+        (the caller then leaves it, and the tree, as they are)."""
+        self._flush_panel()
+        return self._leave_unsaved_page(doing, closing)
+
+    def _leave_unsaved_page(self, doing: str = "Leave the page", closing: bool = False) -> bool:
+        """After _flush_panel, before the page is thrown away: True to go on. When its
+        latest changes could not be saved, asks first, so the page can be kept open to
+        copy them or to close the program holding the file, and then try again (warnings
+        never block: going on is always possible). Going on drops the page at once, and
+        (unless the project is being closed) reads the project back from its files: the
+        page had already copied those changes into the project in memory (e.g. a compound
+        page's values), where they would show again as if saved, and be written by the
+        next save of that item."""
+        if not self._panel_save_failed():
+            return True
+        answer = QMessageBox.question(
+            self, "Changes not saved",
+            "The latest changes on this page could not be saved (see the message before "
+            f"this one).\n\n{doing} anyway? Those changes will then be lost.\n\nChoose No to "
+            "stay on the page: you can copy them, or close the program that has the file "
+            "open, and then try again.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        if answer != QMessageBox.StandardButton.Yes:
+            return False
+        return True if closing else self._drop_unsaved_page()
+
+    def _drop_unsaved_page(self) -> bool:
+        """Throw away the page whose changes could not be saved, and what it had copied
+        into the project in memory: the project is read back from its files (the tree's
+        labels follow; its items keep their ids). True when that worked. If the files could
+        not all be read back, what is in memory no longer matches them, so the project is
+        made read-only (never saved over the files) and shown again; False then."""
+        panel = self.panel
+        for timer in panel.findChildren(QTimer):
+            timer.stop()   # (nothing more is tried on it)
+        self._set_panel(None)
+        for timer in panel.findChildren(QTimer):
+            timer.stop()   # (also one started as its box lost the focus)
+        return self._read_back("The changes on the page were not kept")
+
+    def _read_back(self, what: str) -> bool:
+        """Read the project back from its files, so what is in memory matches them (after
+        changes that could not be saved: `what` says so). The page must be gone already
+        (_set_panel(None)); the tree's labels follow (its items keep their ids). True when
+        that worked; notices that only inform (e.g. a OneDrive conflict copy that appeared
+        meanwhile) are shown, nothing more. If a file could not be read back, what is in
+        memory no longer matches the files, so the project is made read-only (never saved
+        over the files) and shown again; False then."""
+        p = self.project
+        before, notes_before = set(p.read_failures), set(p.load_warnings)
+        try:
+            p.reload()
+            problem = next((w for w in p.read_failures if w not in before), None)
+        except (ProjectError, OSError, ValueError) as e:
+            problem = str(e)
+        if problem is None:
+            updating, self._updating_tree = self._updating_tree, True
+            try:
+                self._refresh_labels()   # (and the spectra pages: e.g. a spectrum not saved)
+            finally:
+                self._updating_tree = updating
+            notes = [w for w in p.load_warnings if w not in notes_before]
+            if notes:
+                QMessageBox.information(self, "Project read back from its files",
+                                        "\n\n".join(notes))
+            return True
+        p.read_only = True
+        QMessageBox.warning(
+            self, "Project now read-only",
+            f"{what}, but the project could not be read back from its files completely, so "
+            "it is now read-only (saving now could write those changes after all, or leave "
+            "out what could not be read). Close the project and open it again.\n\n"
+            f"{problem}")
         self._update_ui_state()
-        QMessageBox.warning(self, "Project taken over",
-                            f"{current.describe()}.\n\nThey have taken over editing, so this "
-                            "window is now read-only. Your earlier changes were already saved.")
+        QTimer.singleShot(0, self, lambda: self.project is p and self._populate_tree(
+            self._current()))
+        return False
+
+    def _scheme_change_failed(self) -> None:
+        """A scheme editor change could not be saved (a file held, e.g. by OneDrive), maybe
+        part-way (e.g. a new compound's folder written, scheme.json not): once the editor
+        is done, the project is read back from its files and the page shown again from
+        them, so nothing shows as done that is not saved (nor is written unseen later)."""
+        panel = self.panel
+
+        def read_back() -> None:
+            if self.panel is not panel or self.project is None or self.project.read_only:
+                return
+            where = self._current()
+            for timer in panel.findChildren(QTimer):
+                timer.stop()
+            self._set_panel(None)
+            if self._read_back("The change to the scheme was not kept"):
+                self._populate_tree(where)
+        QTimer.singleShot(0, self, read_back)
+
+    def _keep_page_selected(self, previous) -> None:
+        """Staying on the page (its changes could not be saved) after another tree item was
+        picked: select the page's item again, at once (so commands act on it) and again
+        once the click or key press that picked the other item is over (the tree selects
+        that item only after telling us, which would leave it highlighted)."""
+        panel = self.panel
+        if previous is not None:
+            place = (previous.data(0, KIND_ROLE), previous.data(0, ID_ROLE))
+        elif self._panel_where:
+            place = self._panel_where[0]
+        else:
+            return
+
+        def reselect() -> None:
+            if self.panel is not panel or self.project is None:
+                return
+            item = self._find_item(*place)
+            if item is None:
+                return
+            self._updating_tree = True
+            self.tree.setCurrentItem(item, 0, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+            self._updating_tree = False
+            self._update_ui_state()
+        reselect()
+        QTimer.singleShot(0, self, reselect)
+
+    @staticmethod
+    def _lock_lost_text(p: Project, lost) -> tuple[str, str]:
+        """(title, what happened) for a lost lock (see _lock_lost)."""
+        kind, current = lost
+        if kind == "taken":
+            return ("Project taken over",
+                    f"{current.describe()}.\n\nThey have taken over editing, so this window "
+                    "is now read-only.")
+        if kind == "moved":
+            return ("Project folder moved",
+                    f"The project folder is no longer at:\n{p.folder}\n\nIt was renamed, "
+                    "moved or deleted (e.g. in Explorer or Finder, or by OneDrive), so this "
+                    "window is now read-only. Open the project from its new place (File ▸ "
+                    "Open Project).")
+        return ("Project closed elsewhere",
+                "This project was closed on another computer while it was open here (its "
+                "lock file disappeared). Someone may have changed it there, so this window "
+                "is now read-only: saving here could undo their changes.\n\nOpen the "
+                "project again (File ▸ Open Recent) to go on from the latest files.")
+
+    def _show_lock_lost(self, p: Project, lost, pending: bool) -> None:
+        """Show the page read-only and say why the lock was lost, but never while a dialog,
+        menu or name lookup is open (a nested event loop): rebuilding the page then would
+        delete it, and any dialog on it, while still in use. Waits until they are closed."""
+        if self.project is not p:   # closed, or another project opened, meanwhile
+            return
+        if (QApplication.activeModalWidget() is not None
+                or QApplication.activePopupWidget() is not None
+                or QThread.currentThread().loopLevel() > 1):
+            QTimer.singleShot(300, self, lambda: self._show_lock_lost(p, lost, pending))
+            return
+        if pending and self.panel is not None:
+            # Keep the page with the typing on it (read-only), so it can still be copied,
+            # instead of building it again from the files.
+            self._populate_tree(select=self._current(), rebuild_panel=False)
+            self._make_page_read_only(self.panel)
+        else:
+            self._set_panel(None)   # (a scheme page would otherwise be kept, still editable)
+            self._populate_tree(select=self._current())
+        self._update_ui_state()
+        title, text = self._lock_lost_text(p, lost)
+        if pending:
+            text += ("\n\nYour latest typing on this page may not have been saved (saving it "
+                     "now could overwrite newer files). It is still shown, so you can copy "
+                     "it; it goes when you leave this page.")
+        elif lost[0] == "taken":
+            text += " Your earlier changes were already saved."
+        if lost[0] == "moved" and p.folder.exists():
+            text += ("\n\nChanges saved in the last moments may have gone into a new folder "
+                     "at the old place: copy anything you need from there, then delete it.")
+        QMessageBox.warning(self, title, text)
+
+    @staticmethod
+    def _make_page_read_only(panel: QWidget) -> None:
+        """A page kept after the lock was lost (for its typing to be copied): nothing on it
+        can be changed any more. Besides the text boxes, lists and buttons (make_read_only):
+        number boxes and sliders (e.g. the spectra page's settings), and the page's own
+        read-only switch where it has one (the spectra page: also its drawing, where
+        structures are dragged)."""
+        make_read_only(panel)
+        for w in [panel, *panel.findChildren(QWidget)]:
+            if isinstance(w, QAbstractSpinBox):
+                w.setReadOnly(True)
+            elif isinstance(w, QAbstractSlider):
+                w.setEnabled(False)
+            if getattr(w, "read_only", None) is False:
+                w.read_only = True
+            if getattr(w, "editable", None) is True:
+                w.editable = False
+
+    def _stop_if_lock_lost(self) -> None:
+        """Before the page is saved on the way out (closing, restarting, opening another
+        project): if the lock was lost since the last check, nothing is written, and the
+        user is told if that drops typing not saved yet."""
+        lost = self._lock_lost()
+        if lost is None:
+            return
+        if self._stop_writing():
+            title, text = self._lock_lost_text(self.project, lost)
+            QMessageBox.warning(self, title, text + "\n\nSo your latest typing on this page "
+                                "was not saved (that could overwrite newer files).")
 
     # ------------------------------------------------------------------ tree
 
@@ -1221,7 +1652,9 @@ class MainWindow(QMainWindow):
                               and i.data(0, TYPE_ROLE) != SPECTRA_SECTION),
                              fm)
         if to_select is not None:
-            # clear() above reset the current item, so this always rebuilds the panel.
+            # clear() above reset the current item, so this rebuilds the panel, except for
+            # a compound of the scheme page on show (only its tab is chosen again, see
+            # _on_tree_selection): after changing its data, call _set_panel(None) first.
             self.tree.setCurrentItem(to_select)
         else:
             self._set_panel(None)
@@ -1240,11 +1673,18 @@ class MainWindow(QMainWindow):
             self.warnings_panel.set_project(self.project)
 
     def _after_warnings_changed(self) -> None:
-        """A warning was dismissed/restored in the panel: update the page and tree."""
+        """A warning was dismissed/restored in the panel (or the project settings changed):
+        update the page and tree. A page whose latest changes could not be saved is kept as
+        it is (only the tree is updated): rebuilding it would throw them away, and saving is
+        tried again with the next edit or when the page is left."""
         self._refresh_labels()
         kind, item_id = self._current()
         if kind is not None:
             self._flush_panel()
+            if self._panel_save_failed():
+                self.statusBar().showMessage("The page was not updated: its latest changes "
+                                             "could not be saved yet.", 6000)
+                return
             self._show(kind, item_id)
 
     def _manuscript_changed(self) -> None:
@@ -1253,17 +1693,82 @@ class MainWindow(QMainWindow):
         if self.warnings_dock.isVisible():
             self._warnings_timer.start()
 
-    def _refresh_labels(self) -> None:
-        """Update compound and scheme labels (ID, name, warnings, flags) without rebuilding."""
+    def _labels(self):
+        """The figure, table and scheme labels (core/labels.py), worked out afresh."""
+        ctx = rich_text.link_context()
+        if ctx is not None and ctx.project is self.project:
+            ctx.invalidate()   # (they may have changed; shared with the text boxes)
+            return ctx.labels()
+        from ..core.labels import compute
+        return compute(self.project)
+
+    def _warnings_guard(self, labels) -> tuple:
+        """What a compound's warnings depend on besides its own data and its ID-report
+        messages: what texts can mention (figure, table and scheme labels; compounds), the
+        references, the general procedures and the project settings."""
+        p = self.project
+        gps = [(gp.get("id"), gp.get("name"), gp.get("sentence"))
+               for _s, gp in p.all_general_procedures()]
+        return (frozenset(labels.by_id), frozenset(c.id for c in p.all_compounds()),
+                tuple(r.get("id") for r in p.references),
+                json.dumps([gps, p.settings], sort_keys=True, default=str))
+
+    def _warnings_files(self, c, read: bool = False) -> tuple | None:
+        """(modified time, size) of the files a compound's warnings read: its structure.mol,
+        its HRMS report files and its text fields' .txt files (procedure, notes…: read
+        from disk by each check; None for one that is not there). With `read`, the
+        structure and reports are also read (each is remembered until it changes, so
+        checking it then reads it no more): None when one can't be read just now (offline,
+        or open in another program), as the warnings worked out from it would then be
+        wrong."""
+        from ..core import ms_reports
+        p = self.project
+        reports = [ms_reports.report_path(c, i["file"]) for i in ms_reports.report_items(c)]
+        texts = [p.compound_text_path(c, d.key) for d in p.field_defs(c) if d.kind == "richtext"]
+        paths = [p.structure_path(c), *reports, *texts]
+        try:
+            if read:
+                p.read_structure(c, strict=True)
+                if any(ms_reports.read_report(path).transient for path in reports):
+                    return None
+            stamps = []
+            for path in paths:
+                try:
+                    st = path.stat()
+                except FileNotFoundError:
+                    stamps.append(None)
+                    continue
+                stamps.append((st.st_mtime_ns, st.st_size))
+        except (OSError, ValueError):   # (ValueError: a name with a NUL character)
+            return None
+        return tuple(stamps)
+
+    def _refresh_labels(self, changed_id: str | None = None) -> None:
+        """Update compound and scheme labels (ID, name, warnings, flags) without rebuilding,
+        and the Warnings panel if it is open (from the same results).
+
+        `changed_id`: only that compound's page was saved (a compound page's autosave).
+        The other compounds' warnings are then taken from the last pass when nothing
+        else they depend on changed: their ID-report messages, _warnings_guard() and the
+        files they were read from (_warnings_files: e.g. changed by a OneDrive sync) are
+        the same. A result worked out while one of those files could not be read is not
+        kept. Every other call, and every other page shown (_set_panel), checks
+        everything again, so changes made elsewhere (other pages, undo, Trash, reload)
+        are always picked up."""
         if self.project is None:
             return
-        if self.warnings_dock.isVisible():
-            self._warnings_timer.start()
         ctx = rich_text.link_context()
         if ctx is not None:
             ctx.invalidate()   # labels (Figure S2…) may have changed too
         self._sync_spectra_pages()
         report = self.project.id_report()
+        labels = self._labels()
+        guard = self._warnings_guard(labels)
+        partial = changed_id is not None and guard == self._warn_guard
+        if not partial:
+            self._warn_cache = {}
+        self._warn_guard = guard
+        computed = {}   # compound id: checks.all_warnings (for the Warnings panel too)
         warn_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
         from ..core import checks  # warnings shown in the tree are the active (undismissed) ones
         for item in self._all_items():
@@ -1290,13 +1795,30 @@ class MainWindow(QMainWindow):
                 c = self.project.compound(item_id)
             except KeyError:
                 continue
-            problems = [w.message for w in checks.active_warnings(self.project, c, report)]
+            id_msgs = tuple(report.compound_warnings.get(item_id, []))
+            hit = self._warn_cache.get(item_id)
+            files = self._warnings_files(c) if partial and item_id != changed_id else None
+            if files is not None and hit is not None and hit[0] == (id_msgs, files):
+                every = hit[1]
+            else:
+                before = self._warnings_files(c, read=True)
+                every = checks.all_warnings(self.project, c, report, labels)
+                if before is not None and before == self._warnings_files(c):
+                    self._warn_cache[item_id] = ((id_msgs, before), every)
+                else:   # (a file could not be read just now, or changed meanwhile)
+                    self._warn_cache.pop(item_id, None)
+            computed[item_id] = every
+            problems = [w.message for w in every if not checks.is_dismissed(c, w)]
             text = f"{report.display_id(item_id)}{' 🔒' if c.id_override else ''}   " \
                    f"{c.name or '(unnamed)'}{'  ⚑' if c.flags else ''}"
             item.setText(0, text)
             item.setIcon(0, warn_icon if problems else QIcon())
             tips = problems + ([f"⚑ {len(c.flags)} flagged field(s)"] if c.flags else [])
             item.setToolTip(0, "\n".join(tips))
+        if self.warnings_dock.isVisible():
+            # The panel shows the same results now (not checked a second time).
+            self._warnings_timer.stop()
+            self.warnings_panel.show_computed(self.project, report, computed, labels)
 
     def _sync_spectra_pages(self) -> None:
         """Keep the Spectra section's pages (one per compound with spectra, in compound
@@ -1422,11 +1944,17 @@ class MainWindow(QMainWindow):
         def go():
             if self.project is None:
                 return
-            self._flush_panel()
+            # (saved, or asked about, here: selecting the item below then has nothing
+            # left to save, so a save that fails is tried, and reported, once)
+            if not self._flush_or_stay():
+                return
             self._sync_spectra_pages()
             section = self.project.spectra_section
             item = self._find_item("spectra_page", compound_id)
             if section is None or item is None:
+                if self.panel is None and self.tree.currentItem() is not None:
+                    # (left anyway above, and the spectrum went with the changes)
+                    self._on_tree_selection(self.tree.currentItem(), None)
                 QMessageBox.information(
                     self, "Spectra page",
                     "This compound has no spectra page yet: add a spectrum to its Spectra "
@@ -1448,7 +1976,7 @@ class MainWindow(QMainWindow):
         if isinstance(panel, CompoundPanel):
             panel.focus_field(key)
 
-    def _on_tree_selection(self, current, _previous) -> None:
+    def _on_tree_selection(self, current, previous) -> None:
         if self._updating_tree:
             return
         if current is None or self.project is None:
@@ -1468,7 +1996,19 @@ class MainWindow(QMainWindow):
                 self._update_ui_state()
                 self._update_preview_target()
                 return
-        self._flush_panel()
+        panel = self.panel
+        if not self._flush_or_stay():
+            if self.panel is panel:
+                # Stay on the page (its changes could not be saved): select its item again.
+                self._keep_page_selected(previous)
+            return   # (else it could not be read back: shown again read-only, see there)
+        if panel is not None and self.panel is None and self._find_item(kind, item_id) is None:
+            # Left anyway, and the item went with the changes thrown away (e.g. the spectra
+            # page of a spectrum not saved): rebuild once the click is over.
+            p = self.project
+            QTimer.singleShot(0, self, lambda: self.project is p and self._populate_tree(
+                (kind, item_id)))
+            return
         if self.project.journal is not None:
             self.project.journal.break_merge()   # edits on another page: a step of their own
         self._show(kind, item_id)
@@ -1479,7 +2019,8 @@ class MainWindow(QMainWindow):
         top-level sections when ""), counted before it was taken out."""
         if self.project is None or self.project.read_only:
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         section = self.project.section(section_id)
         if (section.parent_id or "") == parent_id:
             old = self.project.siblings(section).index(section)
@@ -1495,7 +2036,8 @@ class MainWindow(QMainWindow):
                          slot: int) -> None:
         if self.project is None or self.project.read_only:
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         self._set_panel(None)  # moving may move folders
         with self._step(self._move_label(kind, item_id), [(kind, item_id)]):
             if kind == "compound":
@@ -1544,6 +2086,9 @@ class MainWindow(QMainWindow):
                     menu.addSeparator()
                     menu.addAction(self.act_use_as_general)
         menu.exec(self.tree.viewport().mapToGlobal(pos))
+        # Free the menu, its "Move…" submenus and their actions (the chosen one has run
+        # inside exec(); the shared actions and new_sub_menu belong to the window).
+        menu.deleteLater()
 
     def _add_section_move_menu(self, menu: QMenu, section_id: str) -> None:
         """"Move into section ▸" (any custom section it may go in) and "Move to the top
@@ -1551,7 +2096,8 @@ class MainWindow(QMainWindow):
         section = self.project.section(section_id)
 
         def go(parent_id: str | None) -> None:
-            self._flush_panel()
+            if not self._flush_or_stay():
+                return
             container = self.project.section(parent_id).children if parent_id \
                 else self.project.top_sections
             if parent_id:
@@ -1569,7 +2115,7 @@ class MainWindow(QMainWindow):
             into = menu.addMenu("Move into section")
             for s in targets:
                 indent = "    " * (self.project.depth(s) - 1)
-                into.addAction(indent + s.name, lambda s=s: go(s.id))
+                into.addAction(indent + menu_text(s.name), lambda s=s: go(s.id))
         if section.parent_id:
             menu.addAction("Move out to the top level", lambda: go(None))
 
@@ -1584,7 +2130,8 @@ class MainWindow(QMainWindow):
             compound = self.project.compound(item_id)
             if compound.scheme_id:
                 def out():
-                    self._flush_panel()
+                    if not self._flush_or_stay():
+                        return
                     self._set_panel(None)
                     scheme = self.project.scheme(compound.scheme_id)
                     index = self.project.section(scheme.section_id).items.index(scheme) + 1
@@ -1602,13 +2149,14 @@ class MainWindow(QMainWindow):
                 into = menu.addMenu("Move into scheme")
                 for k in schemes:
                     def go(k=k):
-                        self._flush_panel()
+                        if not self._flush_or_stay():
+                            return
                         self._set_panel(None)
                         with moving():
                             self._save(lambda: self.project.move_compound(
                                 item_id, k.section_id, len(k.children), k.id))
                         rebuild()
-                    into.addAction(k.name, go)
+                    into.addAction(menu_text(k.name), go)
         else:
             here = self.project.scheme(item_id).section_id
             others = [s for s in self.project.data_sections() if s.id != here]
@@ -1616,7 +2164,8 @@ class MainWindow(QMainWindow):
             move = menu.addMenu("Move to section")
             for s in others:
                 def go_section(s=s):
-                    self._flush_panel()
+                    if not self._flush_or_stay():
+                        return
                     self._set_panel(None)
                     with moving():
                         if kind == "compound":
@@ -1626,7 +2175,7 @@ class MainWindow(QMainWindow):
                             self._save(lambda: self.project.move_scheme(item_id, s.id,
                                                                         len(s.items)))
                     rebuild()
-                move.addAction(s.name, go_section)
+                move.addAction(menu_text(s.name), go_section)
 
     # ------------------------------------------------------------------ main panel
 
@@ -1640,7 +2189,7 @@ class MainWindow(QMainWindow):
                 self._show_scheme(compound.scheme_id, item_id)
                 return
             panel = CompoundPanel(self.project, compound, lambda: self.prefs.user_name)
-            panel.labels_changed.connect(lambda _cid: self._refresh_labels())
+            panel.labels_changed.connect(lambda cid: self._refresh_labels(cid))
             panel.convert_requested.connect(self.convert_to_scheme)
             panel.view_spectra.connect(self.show_spectra_page)
         elif kind == "scheme":
@@ -1648,6 +2197,9 @@ class MainWindow(QMainWindow):
             return
         elif kind == "spectra_page":
             panel = SpectraPagePanel(self.project, self.project.compound(item_id))
+            # (a pasted spectrum may answer a warning, e.g. a 13C report with no spectrum;
+            # not on `saved`, which comes with every drag of a box)
+            panel.spectra_changed.connect(self._refresh_labels)
             # (after the click has finished: the page is replaced)
             panel.open_compound.connect(
                 lambda cid: QTimer.singleShot(0, lambda: self.select("compound", cid)))
@@ -1702,6 +2254,7 @@ class MainWindow(QMainWindow):
         panel.labels_changed.connect(self._on_scheme_changed)
         panel.compound_selected.connect(self._sync_tree_to_tab)
         panel.view_spectra.connect(self.show_spectra_page)
+        panel.read_back.connect(self._scheme_change_failed)
         panel.saved.connect(lambda msg: self.statusBar().showMessage(msg, 2500))
         # Pasting a scheme or placing labels changes the page without a "saved" message.
         panel.saved.connect(lambda _msg: self.preview_pane.schedule())
@@ -1709,12 +2262,27 @@ class MainWindow(QMainWindow):
         self._set_panel(panel)
 
     def _on_scheme_changed(self) -> None:
-        """Compounds were added/removed/renamed on a scheme page: rebuild the tree quietly."""
+        """Something changed on a scheme page: relabel the tree in place, or rebuild it
+        quietly when compounds were added to or removed from the scheme (or reordered)."""
         if not isinstance(self.panel, SchemePanel):
             return
+        scheme = self.panel.scheme
         current = self.panel.current_compound_id()
-        sel = ("compound", current) if current else ("scheme", self.panel.scheme.id)
-        self._populate_tree(sel, rebuild_panel=False)  # keep the scheme page as it is
+        sel = ("compound", current) if current else ("scheme", scheme.id)
+        item = self._find_item("scheme", scheme.id)
+        if item is not None and [item.child(i).data(0, ID_ROLE) for i in range(
+                item.childCount())] == [c.id for c in scheme.children]:
+            # Only labels changed (e.g. a compound tab saved a field): no rebuild, so the
+            # tree keeps where it was scrolled to.
+            self._refresh_labels()
+            selected = self._find_item(*sel)
+            if selected is not None and self.tree.currentItem() is not selected:
+                self._updating_tree = True
+                self.tree.setCurrentItem(selected)
+                self._updating_tree = False
+            self._update_ui_state()
+        else:
+            self._populate_tree(sel, rebuild_panel=False)  # keep the scheme page as it is
         # The tab on show may have changed (a compound added or deleted, quietly): the
         # preview follows it, never a compound that no longer exists.
         self._update_preview_target()
@@ -1739,6 +2307,9 @@ class MainWindow(QMainWindow):
             self.panel_holder.removeWidget(self.panel)
             self.panel.deleteLater()
         self.panel = panel
+        # Another page: the next relabelling checks every compound again (changes made on
+        # other pages are not reported to _refresh_labels one by one).
+        self._warn_cache, self._warn_guard = {}, None
         if panel is None:
             self._panel_where = []
             self.panel_holder.setCurrentWidget(self.empty_panel)
@@ -1956,10 +2527,9 @@ class MainWindow(QMainWindow):
         can_redo = p is not None and p.can_redo
         self.act_undo.setEnabled(can_undo)
         self.act_redo.setEnabled(can_redo)
-        # ("&" in a name would underline the next letter in the menu: doubled to show it.)
-        self.act_undo.setText("&Undo " + p.journal.undo_label.replace("&", "&&")
+        self.act_undo.setText("&Undo " + menu_text(p.journal.undo_label)
                               if can_undo else "&Undo")
-        self.act_redo.setText("&Redo " + p.journal.redo_label.replace("&", "&&")
+        self.act_redo.setText("&Redo " + menu_text(p.journal.redo_label)
                               if can_redo else "&Redo")
         undo_key = undo_keys.key_text(self.act_undo)   # (⌘Z on macOS)
         for action, what in ((self.act_undo, "Undo the last saved change"),
@@ -1984,21 +2554,29 @@ class MainWindow(QMainWindow):
         self._check_lock()    # (taken over by someone else: their history, not ours)
         if p.read_only or p.journal is None:
             return
-        self._flush_panel()   # (typing not saved yet is saved first, so it can be undone)
+        # (typing not saved yet is saved first, so it can be undone)
+        if not self._flush_or_stay("Undo" if not redo else "Redo"):
+            return
         p.journal.break_merge()   # (an action still being saved is over)
         if not (p.can_redo if redo else p.can_undo):
             self._update_undo_actions()
+            if self.panel is None:   # (the page whose changes could not be saved was left)
+                self._populate_tree(self._current())
             return
         current = self._where()
         self._set_panel(None)   # release open files (e.g. a PDF shown on a page)
-        try:
-            step = p.redo() if redo else p.undo()
-        except ProjectError as e:
-            QMessageBox.warning(self, "Could not redo" if redo else "Could not undo", str(e))
-            step = None
-        except OSError as e:   # (reloading the project failed)
-            QMessageBox.warning(self, "Could not reload the project", str(e))
-            step = None
+        if not (p.can_redo if redo else p.can_undo):
+            step = None   # (an edit saved as the page closed took the step: just rebuild)
+        else:
+            try:
+                step = p.redo() if redo else p.undo()
+            except ProjectError as e:
+                QMessageBox.warning(self, "Could not redo" if redo else "Could not undo",
+                                    str(e))
+                step = None
+            except OSError as e:   # (reloading the project failed)
+                QMessageBox.warning(self, "Could not reload the project", str(e))
+                step = None
         # Everything is reloaded from the files: rebuild what was made from them.
         text_checks.set_project(p)   # the project's dictionary.txt may have changed
         ctx = rich_text.link_context()
@@ -2019,8 +2597,7 @@ class MainWindow(QMainWindow):
             self._populate_tree()
         if self.tree.currentItem() is not None and self.panel is None:
             self._on_tree_selection(self.tree.currentItem(), None)
-        if self.warnings_dock.isVisible():
-            self.warnings_panel.set_project(p)
+        # (The Warnings panel was refreshed with the tree, from the reloaded project.)
         self._update_ui_state()
         if step is not None:
             self.statusBar().showMessage(f"{'Redone' if redo else 'Undone'}: {step.label}", 4000)
@@ -2064,7 +2641,8 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, title, "Section name:", text=defaults[type_])
         if not ok or not name.strip():
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         try:
             with self._step(f"New section “{name.strip()}”") as step:
                 section = self.project.add_section(type_, name.strip(), index, parent_id)
@@ -2090,7 +2668,8 @@ class MainWindow(QMainWindow):
                                     "first (right-click ▸ Move out to the top level), so they "
                                     "are not sent to the Trash with it.")
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         has_text = bool(self.project.read_front_text("general").strip())
         where = ("added after the text already on the General Information page"
                  if has_text else "put on the General Information page (Front matter), "
@@ -2121,7 +2700,8 @@ class MainWindow(QMainWindow):
                                     "Select a Data section (or a compound in one) first.")
             return
         section_id, scheme_id, index = target
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         try:
             with self._step("New compound") as step:
                 compound = self.project.add_compound(section_id, index, scheme_id=scheme_id)
@@ -2152,7 +2732,8 @@ class MainWindow(QMainWindow):
                    else self.project.scheme(item_id))
             top = self.project.scheme(obj.scheme_id) if kind == "compound" and obj.scheme_id else obj
             index = self.project.section(section_id).items.index(top) + 1
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         try:
             with self._step("New scheme page") as step:
                 # (drawn with the scheme editor: no blank compound — a product becomes one
@@ -2184,7 +2765,8 @@ class MainWindow(QMainWindow):
                 + "\n\nThey start with the section's default fields; Edit ▸ Undo removes "
                   "them again.") != QMessageBox.StandardButton.Yes:
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         tab = self.panel.tabs.currentIndex() if isinstance(self.panel, DataSectionPanel) else 0
         try:
             with self._step(f"Make pages for the IDs of “{section.name}”",
@@ -2205,7 +2787,8 @@ class MainWindow(QMainWindow):
             return
         from ..core import duplicate as dup
         from .duplicate_ui import DuplicateDialog
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         item = (self.project.scheme(item_id) if kind == "scheme"
                 else self.project.compound(item_id))
         dialog = DuplicateDialog(self.project, item, self)
@@ -2243,7 +2826,8 @@ class MainWindow(QMainWindow):
                 "You can then draw the scheme and add the other compounds in it."
         ) != QMessageBox.StandardButton.Yes:
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         self._set_panel(None)
         shown = self.project.id_report().display_id(compound_id)
         try:
@@ -2270,31 +2854,53 @@ class MainWindow(QMainWindow):
             if done:
                 self._on_renamed(item_id, name.strip())
         elif kind == "scheme":
+            # (a name typed on the page is saved first: the dialog starts with it)
+            if not self._flush_or_stay():
+                return
             scheme = self.project.scheme(item_id)
             name, ok = QInputDialog.getText(self, "Rename scheme page", "Name:", text=scheme.name)
             if ok and name.strip():
-                self._flush_panel()
                 with self._step(f"Rename scheme page “{scheme.name}”", [("scheme", item_id)]):
-                    self._save(lambda: self.project.rename_scheme(item_id, name))
+                    done = self._save(lambda: self.project.rename_scheme(item_id, name))
+                if done:
+                    # The page on show still has the old name in its box: saving it (when
+                    # the tree is rebuilt) would rename the scheme straight back.
+                    self._set_panel(None)
                 self._populate_tree(("scheme", item_id))
         elif kind == "compound":
-            self._flush_panel()
+            if not self._flush_or_stay():
+                return
             compound = self.project.compound(item_id)
             name, ok = QInputDialog.getText(self, "Compound name", "Name:", text=compound.name)
             if not ok:
                 return
+            before = copy.deepcopy(compound.data)   # (put back if it can't be saved)
             value = compound.values.setdefault("name", {"text": ""})
             value["text"] = name.strip()
             shown = self.project.id_report().display_id(item_id)
-            with self._step(f"Rename {shown}", [("compound", item_id)]):
+
+            def write() -> None:
                 if "name" not in compound.field_keys:
-                    self._save(lambda: self.project.add_field(compound, {"key": "name"}))
-                self._save(lambda: self.project.save_compound(compound))
+                    self.project.add_field(compound, {"key": "name"})   # (saves it too)
+                else:
+                    self.project.save_compound(compound)
+            with self._step(f"Rename {shown}", [("compound", item_id)]):
+                done = self._save(write)
+            if not done:
+                # Not saved (compound.json held, e.g. by OneDrive): memory keeps what the
+                # file has, or the tree and page would show the new name as if saved (and
+                # the compound's next save would write it unseen).
+                compound.data.clear()
+                compound.data.update(before)
+            # A scheme page on show would be kept (only its tab is chosen again), with the
+            # old name in its Name box, which its next autosave would write back.
+            self._set_panel(None)
             self._populate_tree(("compound", item_id))
 
     def _mentions_of(self, kind: str, item_id: str) -> str:
         """A note for the delete question if other texts mention what is being deleted."""
         from ..core import links
+        from ..core.markup import mentions, parse
         if kind == "compound":
             ids = [item_id]
         elif kind == "scheme":
@@ -2302,9 +2908,12 @@ class MainWindow(QMainWindow):
         else:
             ids = [c.id for s in self.project.subtree(self.project.section(item_id))
                    for c in s.compounds]
+        # (as links.mention_uses for each compound, but every text is read and parsed once)
+        found = [(place.where, set(mentions(parse(place.text))))
+                 for place in links.all_texts(self.project)] if ids else []
         places = []
         for cid in ids:
-            places += [w for w in links.mention_uses(self.project, cid) if w not in places]
+            places += [w for w, cids in found if cid in cids and w not in places]
         if not places:
             return ""
         shown = "\n• ".join(places[:6]) + ("\n…" if len(places) > 6 else "")
@@ -2342,7 +2951,8 @@ class MainWindow(QMainWindow):
             what = f"the compound “{self.project.id_report().display_id(item_id)} " \
                    f"{c.name or '(unnamed)'}”"
         renumber = kind != "section"
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         mentioned = self._mentions_of(kind, item_id)
         if QMessageBox.question(
                 self, "Delete",
@@ -2354,13 +2964,14 @@ class MainWindow(QMainWindow):
         self._flush_panel()
         self._set_panel(None)  # release any open files before moving the folder
         where = self._where()   # (undone: the item is shown again; redone: what follows)
+        box_problem = []   # (a scheme compound in the Trash whose box kept no copy)
         if kind == "section":
             section = self.project.section(item_id)
             parent = self.project.parent(section)
             siblings = self.project.siblings(section)
             index = siblings.index(section)
             with self._step(f"Delete section “{section.name}”", where) as step:
-                self._save(lambda: self.project.delete_section(item_id))
+                deleted = self._save(lambda: self.project.delete_section(item_id))
             if siblings:   # the next section at the same level, or the one before
                 select = ("section", siblings[min(index, len(siblings) - 1)].id)
             elif parent is not None:
@@ -2371,14 +2982,19 @@ class MainWindow(QMainWindow):
             scheme = self.project.scheme(item_id)
             section = self.project.section(scheme.section_id)
             with self._step(f"Delete scheme page “{scheme.name}”", where) as step:
-                self._save(lambda: self.project.delete_scheme(item_id))
+                deleted = self._save(lambda: self.project.delete_scheme(item_id))
             select = ("section", section.id)
         else:
             compound = self.project.compound(item_id)
             sid, kid, index = self.project.position(compound)
             shown = self.project.id_report().display_id(item_id)
+            def delete() -> None:
+                try:
+                    self.project.delete_compound(item_id)
+                except BoxCopyFailed as e:   # (deleted: only its box is left empty)
+                    box_problem.append(e)
             with self._step(f"Delete compound {shown}", where) as step:
-                self._save(lambda: self.project.delete_compound(item_id))
+                deleted = self._save(delete)
             container = (self.project.scheme(kid).children if kid
                          else self.project.section(sid).items)
             if container:
@@ -2386,16 +3002,22 @@ class MainWindow(QMainWindow):
                 select = ("scheme" if isinstance(nxt, SchemePage) else "compound", nxt.id)
             else:
                 select = ("scheme", kid) if kid else ("section", sid)
+        if not deleted:   # (nothing was moved to the Trash: show it again, as it was)
+            self._populate_tree((kind, item_id))
+            return
         if step is not None:
             step.where.insert(1, select)
         self._populate_tree(select)
         self.statusBar().showMessage("Moved to Trash", 4000)
+        for problem in box_problem:
+            QMessageBox.warning(self, "Scheme box left empty", str(problem))
 
     def move_item(self, step: int) -> None:
         kind, item_id = self._current()
         if kind in (None, *FIXED_KINDS, *SPECTRA_CHILDREN):
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         with self._step(self._move_label(kind, item_id), [(kind, item_id)]):
             if kind == "section":   # among the sections at the same level
                 section = self.project.section(item_id)
@@ -2428,10 +3050,23 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return
         self._flush_panel()
+        # (the page's latest changes could not be saved, and it has said so: the dialog is
+        # modal, so nothing changes meanwhile, and saving it again would only say it twice)
+        held = self._panel_save_failed()
+
+        def after() -> None:
+            if not held:
+                self._after_warnings_changed()
+                return
+            self._refresh_labels()
+            self.statusBar().showMessage("The page was not updated: its latest changes "
+                                         "could not be saved yet.", 6000)
         dlg = ProjectSettingsDialog(self.project, self.prefs.user_name, self)
+        writable = not self.project.read_only
         # One undo step for the dialog (including "Re-render pasted pictures" in it).
         with self._step("Change project settings"):
-            accepted = dlg.exec() and not self.project.read_only
+            ok = dlg.exec()
+            accepted = ok and not self.project.read_only
             saved = accepted and self._save(dlg.apply)
             if saved:
                 # Another HRMS tolerance may change a found m/z filled from the report
@@ -2443,10 +3078,15 @@ class MainWindow(QMainWindow):
             if saved:
                 self.statusBar().showMessage("Settings saved", 2500)
                 # Tolerances / impurity table affect checks; drawing settings the pictures.
-                self._after_warnings_changed()
+                after()
             self._update_ui_state()
         elif dlg.pictures_changed:
-            self._after_warnings_changed()  # re-rendered pictures: show the new ones
+            after()  # re-rendered pictures: show the new ones
+        if ok and writable and self.project.read_only:
+            QMessageBox.warning(self, "Settings not saved",
+                                "The project became read-only while Project settings was "
+                                "open (someone else took it over, or it was closed or moved "
+                                "elsewhere), so these settings were not saved.")
 
     def show_references(self, parent: QWidget | None = None) -> None:
         """File ▸ References (Ctrl+Shift+R): the References page at the bottom of the tree
@@ -2465,12 +3105,14 @@ class MainWindow(QMainWindow):
     def show_trash(self) -> None:
         if self.project is None:
             return
-        self._flush_panel()
+        if not self._flush_or_stay():
+            return
         current = self._current()
         self._set_panel(None)  # restoring a file may replace one being previewed
-        dlg = TrashDialog(self.project, self)
-        dlg.exec()
-        self._populate_tree(current)
+        try:
+            TrashDialog(self.project, self).exec()
+        finally:
+            self._populate_tree(current)   # (also after an error: never a blank page)
 
     def save_snapshot(self) -> None:
         if self.project is None or self.project.read_only:
@@ -2479,11 +3121,11 @@ class MainWindow(QMainWindow):
         label, ok = QInputDialog.getText(
             self, "Save snapshot",
             "Optional label for this snapshot (e.g. “submitted version”):")
-        if not ok:
-            return
+        if not ok or self.project is None or self.project.read_only:
+            return   # (taken over while the question was open: _check_lock has said so)
         try:
             path = self.project.save_snapshot(label)
-        except OSError as e:
+        except (ProjectError, OSError, ValueError) as e:   # (ValueError: an odd file name)
             QMessageBox.warning(self, "Could not save snapshot", str(e))
             return
         QMessageBox.information(self, "Snapshot saved",
@@ -2496,8 +3138,16 @@ class MainWindow(QMainWindow):
         dlg = CompileDialog(self.project, self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        self._check_lock()   # (compiling writes to build/: not once someone else has it)
+        if self.project is None or self.project.read_only:
+            self.statusBar().showMessage("The project is now read-only; nothing was compiled.",
+                                         6000)
+            return
         with self._step("Change the compile choices"):
-            dlg.remember()
+            # Remembering the choices is a convenience: if project.json can't be written
+            # (held by OneDrive or a virus scanner, a read-only disk) say so and compile
+            # anyway, as the choices are taken from the window (dlg.options()).
+            self._save(dlg.remember)
         if self._preview is not None:
             self._preview.release()
         result = run_compile(self, self.project, dlg.options())

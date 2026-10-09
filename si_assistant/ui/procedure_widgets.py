@@ -3,7 +3,7 @@ and the chooser on a compound's Procedure field."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, Qt, QTimer, Signal
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMessageBox, QPushButton,
                                QSplitter, QVBoxLayout, QWidget)
@@ -49,6 +49,9 @@ class GeneralProceduresEditor(QWidget):
         self.project = project
         self.section = section
         self.current: str | None = None
+        # Edits on screen not written yet: cleared only once the save worked, so a failed
+        # save is tried again (on the next flush), not forgotten.
+        self._dirty = False
         ro = project.read_only
 
         self.list = QListWidget()
@@ -153,13 +156,31 @@ class GeneralProceduresEditor(QWidget):
         self._show(target)
 
     def _selected(self, item, _prev=None) -> None:
-        self.flush()
+        if not self.flush():
+            # The typing could not be saved: it stays on screen (to be tried again), so the
+            # list goes back to the procedure being edited instead of showing another.
+            self._select_current_row()
+            # (A click selects the clicked procedure after this returns: select the one
+            # being edited again once the click is over, so the list does not mislead.)
+            QTimer.singleShot(0, self, self._select_current_row)
+            return
         if self.project.journal is not None:
             self.project.journal.break_merge()   # (typing in another procedure: a new step)
         self._show(item.data(Qt.ItemDataRole.UserRole) if item else None)
 
+    def _select_current_row(self) -> None:
+        """Select (only) the procedure on screen in the list, without showing it again."""
+        row = next((r for r in range(self.list.count())
+                    if self.list.item(r).data(Qt.ItemDataRole.UserRole) == self.current), -1)
+        self.list.blockSignals(True)
+        try:
+            self.list.setCurrentRow(row, QItemSelectionModel.SelectionFlag.ClearAndSelect)
+        finally:
+            self.list.blockSignals(False)
+
     def _show(self, gp_id: str | None) -> None:
         self.current = gp_id
+        self._dirty = False   # (what is on screen is replaced)
         found = self.project.general_procedure(gp_id) if gp_id else None
         self.right.setEnabled(found is not None)
         self.remove_btn.setEnabled(found is not None and not self.project.read_only)
@@ -215,17 +236,26 @@ class GeneralProceduresEditor(QWidget):
 
     def _edited(self, *_args) -> None:
         if not self.project.read_only and self.current:
+            self._dirty = True
             self._timer.start()
             item = self.list.currentItem()
             if item is not None:
                 item.setText(self.name.text().strip() or "(unnamed)")
             self._mark_duplicates()
 
-    def flush(self) -> None:
-        """Save the procedure on screen (if edited)."""
-        if not self._timer.isActive() or self.project.read_only or not self.current:
+    def has_unsaved(self) -> bool:
+        """Edits whose save is still waiting: not tried yet, or tried and failed (kept to
+        be tried again)."""
+        return self._dirty or self._timer.isActive()
+
+    def flush(self) -> bool:
+        """Save the procedure on screen (if edited). False if that failed (said in a
+        message box): the edits stay on screen and waiting, so an action that would replace
+        what is on screen (another procedure, Add, Move, Remove) should not go on."""
+        waiting = self._dirty or self._timer.isActive()
+        if not waiting or self.project.read_only or not self.current:
             self._timer.stop()
-            return
+            return True
         self._timer.stop()
         try:
             with self.project.autosave():   # (typing: merged into one undo step)
@@ -235,12 +265,17 @@ class GeneralProceduresEditor(QWidget):
                     sentence=self.sentence.text().strip() or DEFAULT_GP_SENTENCE)
                 self.project.write_gp_text(self.current, self.text.markup())
         except (ProjectError, OSError, KeyError) as e:
-            QMessageBox.warning(self, "Could not save", str(e))
-            return
+            QMessageBox.warning(self, "Could not save",
+                                f"{e}\n\nYour changes are still on screen; saving them is "
+                                "tried again with your next edit or when you leave this page.")
+            return False
+        self._dirty = False
         self.changed.emit()
+        return True
 
     def _add(self) -> None:
-        self.flush()
+        if not self.flush():
+            return
         with self.project.undo_step("Add a general procedure"):
             gp = self.project.add_general_procedure(self.section.id)
         self._fill_list(gp["id"])
@@ -249,9 +284,8 @@ class GeneralProceduresEditor(QWidget):
         self.changed.emit()
 
     def _remove(self) -> None:
-        if not self.current:
+        if not self.current or not self.flush():
             return
-        self.flush()
         _section, gp = self.project.general_procedure(self.current)
         users = self.project.gp_users(self.current)
         extra = (f"\n\n{len(users)} compound(s) use it; they will show a warning until you "
@@ -266,8 +300,7 @@ class GeneralProceduresEditor(QWidget):
         self.changed.emit()
 
     def _move(self, step: int) -> None:
-        if self.current:
-            self.flush()
+        if self.current and self.flush():
             _section, gp = self.project.general_procedure(self.current)
             with self.project.undo_step(f"Move general procedure “{gp.get('name')}”"):
                 self.project.move_general_procedure(self.current, step)
@@ -349,10 +382,7 @@ class GpChooser(QWidget):
             stored = next((v for n, v in self._values.items() if procedures.key(n) == k), "")
             if k in procedures.AUTO:
                 w = QLineEdit(stored)
-                shown = "".join(r.text for r in links.display_runs(self.project, auto.get(k, []),
-                                                                     report))
-                w.setPlaceholderText(f"automatic: {shown}" if shown else
-                                     f"automatic ({procedures.AUTO[k]}) — empty")
+                w.setPlaceholderText(self._auto_placeholder(k, auto, report))
                 w.setToolTip("Leave empty to use the automatic value, or type your own.")
                 if k == "scale":
                     w.setToolTip("Type the scale, e.g. 0.20 mmol: it also fills the Reaction "
@@ -370,6 +400,25 @@ class GpChooser(QWidget):
             w.setEnabled(not self.project.read_only)
             self.value_widgets[name] = w
             self.values_form.addRow(f"{{{name}}}:", w)
+        self._update_preview()
+
+    def _auto_placeholder(self, k: str, auto: dict, report) -> str:
+        shown = "".join(r.text for r in links.display_runs(self.project, auto.get(k, []), report))
+        return f"automatic: {shown}" if shown else f"automatic ({procedures.AUTO[k]}) — empty"
+
+    def refresh_auto(self) -> None:
+        """The compound was saved (Yield, Reaction scale, Purification or the ID may have
+        changed): update the "automatic: …" hints and the "Printed as" line, without
+        rebuilding the boxes (so focus and typing are kept)."""
+        gp = self.gp()
+        if gp is None:
+            return
+        auto = procedures.auto_values(self.project, self.compound, gp)
+        report = self.project.id_report()
+        for name, w in self.value_widgets.items():
+            k = procedures.key(name)
+            if k in procedures.AUTO and isinstance(w, QLineEdit):
+                w.setPlaceholderText(self._auto_placeholder(k, auto, report))
         self._update_preview()
 
     def _value_edited(self, *_args) -> None:

@@ -1,0 +1,34 @@
+{
+  "id": "k-730d7f01",
+  "name": "Reduction of aryl methyl ketones 1a–1f (R = aryl)",
+  "children": [],
+  "mode": "editor",
+  "editor": {
+    "starting": [
+      {
+        "id": "b-730228e5",
+        "structure": "editor/b-730228e5.mol",
+        "label": "1a–f"
+      }
+    ],
+    "steps": [
+      {
+        "id": "st-2b7f6f3b",
+        "top": "NaBH_{4} (1.5 equiv)",
+        "bottom": "MeOH, 0 °C, 30 min",
+        "products": [
+          {
+            "id": "b-b24f8feb",
+            "structure": "editor/b-b24f8feb.mol",
+            "label": "2a–f",
+            "yield": "89–96%"
+          }
+        ]
+      }
+    ],
+    "inline": {},
+    "layout": {
+      "show_label": true
+    }
+  }
+}

@@ -24,22 +24,27 @@ Every result is a `Finding` with a plain-language message, a stable key and a fi
 of the values it is about: it can be dismissed (manuscript/dismissed.json, readable) and
 comes back if the values change. All checks are local: nothing is sent anywhere.
 
-What was read is kept in manuscript/check.json (readable) until a file is added, removed
-or changed, or "Check again" is clicked; the comparison itself is quick and is made
-afresh whenever the results are shown, so they follow the SI as it is edited.
+What was read is kept in manuscript/check.json (readable), file by file: a file is read
+again when it is new or changed, or when "Check again" is clicked (a file that could not
+be opened just now — offline, or locked by another program — is not kept, and is read
+again next time); the comparison itself is quick and is made afresh whenever the results
+are shown, so they follow the SI as it is edited.
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import re
 import threading
+import weakref
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import chem
 from . import fileio
 from . import ms_parse as P
 from . import ms_read
@@ -50,7 +55,8 @@ from .markup import parse as parse_markup
 MANUSCRIPT_DIR = "manuscript"
 CACHE_FILE = "check.json"
 DISMISSED_FILE = "dismissed.json"
-OWN_FILES = (CACHE_FILE, DISMISSED_FILE)
+DAMAGED_FILE = "dismissed.damaged.json"   # (kept by earlier versions: see _damaged_copy)
+OWN_FILES = (CACHE_FILE, DISMISSED_FILE, DAMAGED_FILE)
 MANUSCRIPT_EXTENSIONS = (".pdf", ".docx", ".doc")
 CHEMDRAW_EXTENSIONS = (".cdxml", ".cdx")
 CACHE_VERSION = 1
@@ -158,10 +164,23 @@ _SYSTEM_FILES = {"desktop.ini", "thumbs.db", "ehthumbs.db", "ehthumbs_vista.db",
 
 
 def _hidden(name: str) -> bool:
-    """The program's own files, temporary files and hidden or system files (.DS_Store,
-    ._x, desktop.ini, Thumbs.db, Word's ~$ lock files)."""
+    """The program's own files (and OneDrive's conflict copies of them, such as
+    dismissed-OFFICE-PC.json), temporary files and hidden or system files (.DS_Store, ._x,
+    desktop.ini, Thumbs.db, Word's ~$ lock files)."""
     return name in OWN_FILES or name.startswith((".", "~$")) or \
-        name.lower() in _SYSTEM_FILES
+        name.lower() in _SYSTEM_FILES or _conflict_copy(name) or _damaged_copy(name)
+
+
+def _damaged_copy(name: str) -> bool:
+    """A damaged dismissed.json kept by dismiss(): dismissed.damaged-<date>.json (or the
+    single dismissed.damaged.json kept by earlier versions)."""
+    return re.fullmatch(r"dismissed\.damaged(-.+)?\.json", name, re.IGNORECASE) is not None
+
+
+def _conflict_copy(name: str) -> bool:
+    # (only OneDrive's "-<computer>" form: add_file's own "dismissed (2).json", for a
+    # user's file of that name, stays in the list)
+    return re.fullmatch(r"(check|dismissed)-.+\.json", name, re.IGNORECASE) is not None
 
 
 def add_file(project, source: Path) -> Path:
@@ -170,6 +189,8 @@ def add_file(project, source: Path) -> Path:
     base = folder(project)
     fileio.make_dirs(base)
     name = safe_filename(Path(source).name)
+    if _damaged_copy(name):   # (named like a kept damaged dismissed.json: it would be hidden)
+        name = re.sub(r"^dismissed\.", "dismissed_", name, flags=re.IGNORECASE)
     dest = base / name
     n = 2
     while dest.exists() or dest.name in OWN_FILES:
@@ -226,42 +247,95 @@ def cached_sources(project) -> list[ms_read.Source] | None:
         hit = _memory.get(key)
     if hit is not None and hit[0] == now:
         return hit[1]
-    try:
-        data = json.loads((folder(project) / CACHE_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
+    stored, sources = _stored(project)
     # (Read again when the files changed, or when this program reads files differently.)
-    if not isinstance(data, dict) or data.get("version") != CACHE_VERSION or \
-            data.get("reader") != ms_read.READER_VERSION or data.get("files") != now:
-        return None
-    try:
-        sources = [ms_read.Source.from_json(s) for s in data.get("sources") or []]
-    except (TypeError, ValueError):
+    if stored != now:
         return None
     with _lock:
         _memory[key] = (now, sources)
     return sources
 
 
+def _stored(project) -> tuple[dict | None, list[ms_read.Source]]:
+    """(the files' stamps, what they gave) from check.json; (None, []) if there is none,
+    it was made by another version of the reader, or it doesn't hold what is expected
+    (edited by hand): then the files are simply read again."""
+    try:
+        data = json.loads((folder(project) / CACHE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, []
+    if not isinstance(data, dict) or data.get("version") != CACHE_VERSION or \
+            data.get("reader") != ms_read.READER_VERSION or \
+            not isinstance(data.get("files"), dict):
+        return None, []
+    try:
+        sources = [ms_read.Source.from_json(s) for s in data.get("sources") or []]
+    except (TypeError, ValueError, AttributeError):
+        return None, []
+    if not all(_well_formed(s) for s in sources):
+        return None, []
+    return data["files"], sources
+
+
+def _well_formed(src: ms_read.Source) -> bool:
+    """Does a Source read back from check.json hold what the comparison expects?"""
+    def strings(items):
+        return isinstance(items, list) and all(isinstance(x, str) for x in items)
+    return (all(isinstance(x, str) for x in (src.file, src.kind, src.error))
+            and isinstance(src.records, list) and isinstance(src.names, list)
+            and all(isinstance(r, dict) for r in src.records)
+            and all(isinstance(n, dict) and isinstance(n.get("name"), str)
+                    for n in src.names)
+            and strings(src.mentioned) and strings(src.tokens) and strings(src.notes))
+
+
+def _previous(project) -> tuple[dict, dict[str, ms_read.Source]]:
+    """What was read last time, file by file: (stamps, {file name: Source}). A file that
+    could not be opened just now is left out (it is read again)."""
+    with _lock:
+        hit = _memory.get(str(project.folder))
+    if hit is not None:
+        then, sources = hit
+    else:
+        then, sources = _stored(project)
+    return then or {}, {s.file: s for s in sources if not s.transient}
+
+
 def read_all(project, progress=None, force: bool = False) -> list[ms_read.Source]:
-    """Read every manuscript file (or reuse what was read, if nothing changed and not
-    `force`). Raises ms_read.Stopped if the progress callback says stop."""
+    """Read the manuscript files: a file that hasn't changed since it was last read (the
+    same name, size and modification time, the same reader) is not read again, unless
+    `force` ("Check again"). Raises ms_read.Stopped if the progress callback says stop."""
     if not force:
         hit = cached_sources(project)
-        if hit is not None:
+        if hit is not None and not any(s.transient for s in hit):
             return hit
-    now = stamps(project)
-    sources = [ms_read.read_file(p, progress) for p in files(project)]
+    then, before = ({}, {}) if force else _previous(project)
+    now, sources = {}, []
+    for p in files(project):          # (one listing for both the stamps and the reading)
+        try:
+            st = p.stat()
+            stamp = [st.st_size, st.st_mtime_ns]
+            now[p.name] = stamp
+        except OSError:
+            stamp = None
+        old = before.get(p.name)
+        if stamp is not None and old is not None and then.get(p.name) == stamp:
+            sources.append(old)       # unchanged since it was read
+        else:
+            sources.append(ms_read.read_file(p, progress))
     with _lock:
         _memory[str(project.folder)] = (now, sources)
-    if not project.read_only and now:
+    # A file that could not be opened just now is not written down: read again next time.
+    later = {s.file for s in sources if s.transient}
+    kept = {name: stamp for name, stamp in now.items() if name not in later}
+    if not project.read_only and kept:
         _write_cache(folder(project) / CACHE_FILE,
                      {"version": CACHE_VERSION, "reader": ms_read.READER_VERSION,
-                      "files": now,
+                      "files": kept,
                       "checked_at": datetime.now().isoformat(timespec="seconds"),
                       "note": "What the Manuscript check read from the files beside this "
                               "one. Made by the program; safe to delete.",
-                      "sources": [s.to_json() for s in sources]})
+                      "sources": [s.to_json() for s in sources if not s.transient]})
     return sources
 
 
@@ -286,17 +360,43 @@ def forget(project) -> None:
 
 # ---------------------------------------------------------------------- dismissals
 
-def dismissed(project) -> dict[str, dict]:
+def _load_dismissed(project, strict: bool = False) -> dict | None:
+    """dismissed.json: {} if there is none, None if it is there but doesn't hold JSON
+    (cut off, or edited by hand). A file that can't be opened just now (offline, locked)
+    gives {}, or raises the OSError if `strict` (so that it is not written over)."""
     try:
-        data = json.loads((folder(project) / DISMISSED_FILE).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        raw = (folder(project) / DISMISSED_FILE).read_bytes()
+    except FileNotFoundError:
         return {}
-    return data if isinstance(data, dict) else {}
+    except OSError:
+        if strict:
+            raise
+        return {}
+    try:
+        data = json.loads(raw.decode("utf-8-sig"))
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def dismissed(project) -> dict[str, dict]:
+    return _load_dismissed(project) or {}
 
 
 def dismiss(project, finding: Finding, reason: str = "") -> None:
     project._check_writable()
-    data = dismissed(project)
+    data = _load_dismissed(project, strict=True)
+    if data is None:
+        # Don't lose what it held: keep a dated copy, never written over (as for a damaged
+        # references.json or front.json; Undo also brings the file back). If it can't be
+        # copied, the OSError stops the dismissal before the file is written over (the
+        # caller says the dismissal could not be saved).
+        from .project import _unique_path
+        source = folder(project) / DISMISSED_FILE
+        stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        fileio.copy_file(source, _unique_path(
+            source.with_name(f"dismissed.damaged-{stamp}.json")))
+        data = {}
     data[finding.key] = {"fingerprint": finding.fingerprint, "message": finding.message,
                          "reason": reason.strip(),
                          "by": project.lock.user if project.lock else "",
@@ -306,8 +406,10 @@ def dismiss(project, finding: Finding, reason: str = "") -> None:
 
 
 def restore(project, key: str) -> None:
+    """Raises the OSError if dismissed.json can't be opened just now (offline, locked):
+    the Restore did not happen, and the user is told so."""
     project._check_writable()
-    data = dismissed(project)
+    data = _load_dismissed(project, strict=True) or {}
     if data.pop(key, None) is not None:
         fileio.atomic_write_json(folder(project) / DISMISSED_FILE, data)
 
@@ -375,9 +477,10 @@ class Resolver:
         return next(iter(found)) if len(found) == 1 else key
 
 
-def si_procedure_text(project, compound) -> tuple[str, str, str]:
+def si_procedure_text(project, compound, gp_texts: dict | None = None) -> tuple[str, str, str]:
     """(the compound's own procedure text and typed placeholder values, its general
-    procedure's sentence filled in, the general procedure's text) as plain text."""
+    procedure's sentence filled in, the general procedure's text) as plain text.
+    `gp_texts` ({GP ID: text}, for one check only) saves reading a GP once per compound."""
     own = []
     for key in ("procedure", "si_text"):
         if key in compound.field_keys:
@@ -397,10 +500,14 @@ def si_procedure_text(project, compound) -> tuple[str, str, str]:
             sentence = "".join(r.text for r in runs)
         except Exception:  # noqa: BLE001
             sentence = gp.get("sentence", "")
-        try:
-            gp_text = _plain(project.read_gp_text(gp["id"]))
-        except (OSError, ValueError, KeyError):
-            gp_text = ""
+        gp_text = None if gp_texts is None else gp_texts.get(gp.get("id"))
+        if gp_text is None:
+            try:
+                gp_text = _plain(project.read_gp_text(gp["id"]))
+            except (OSError, ValueError, KeyError):
+                gp_text = ""
+            if gp_texts is not None and gp.get("id") is not None:
+                gp_texts[gp["id"]] = gp_text
     scale = compound.values.get("scale") or {}
     if "scale" in compound.field_keys and str(scale.get("value", "")).strip():
         own.append(f"{str(scale['value']).strip()} {scale.get('unit') or 'mmol'}")
@@ -438,8 +545,27 @@ def _ratio(text: str) -> tuple[str, float, float] | None:
     return m.group(1), float(m.group(2).replace(",", ".")), float(m.group(3).replace(",", "."))
 
 
+def same_yield(a: str, b: str) -> bool:
+    """Two yields agree when their numbers do; "quant." agrees with "quant." and with
+    99, >99 or 100%."""
+    if P.is_quant(a) or P.is_quant(b):
+        other = b if P.is_quant(a) else a
+        n = _number(other)
+        return P.is_quant(other) or (n is not None and n[0] in ("", ">", "≥") and n[1] >= 99)
+    return _number(a) == _number(b)
+
+
+def _pct(value: str) -> str:
+    """A yield as it is shown: "92%", but "quant." without a % sign."""
+    value = str(value)
+    return f"{value}%" if re.search(r"\d", value) else value
+
+
 def ee_value(text: str) -> tuple[str, float, bool] | None:
-    """(sign, ee, converted) from "94% ee", "94", ">99% ee" or "97:3 er" (converted)."""
+    """(sign, ee, converted) from "94% ee", "94", ">99% ee" or "97:3 er" (converted);
+    "rac" or "racemic" is 0% ee."""
+    if P.is_racemic(text):
+        return "", 0.0, False
     r = _ratio(text)
     if r is not None:
         sign, a, b = r
@@ -508,6 +634,8 @@ def same_name(a: str, b: str) -> bool:
 
 
 def _ms_ee_text(rec: dict) -> str:
+    if P.is_racemic(rec.get("ee")):
+        return P.RACEMIC
     if rec.get("ee"):
         return f"{rec['ee']}% ee"
     if rec.get("er"):
@@ -524,7 +652,8 @@ def _mol_keys(mol) -> tuple[str, str, bool, str]:
     try:
         whole = Chem.MolToInchiKey(mol) or ""
         pieces = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
-        largest = max(pieces, key=lambda m: m.GetNumHeavyAtoms()) if pieces else mol
+        # (the compound without its counter-ions, by the rule the HRMS "M" follows)
+        largest = chem.main_piece(mol)
         main = Chem.MolToInchiKey(largest) or ""
         formula = CalcMolFormula(largest)
     finally:
@@ -532,24 +661,60 @@ def _mol_keys(mol) -> tuple[str, str, bool, str]:
     return whole, main, len(pieces) > 1, formula
 
 
+@functools.lru_cache(maxsize=4096)
+def _smiles_keys(smiles: str) -> tuple[str, str, bool, str] | None:
+    """_mol_keys of a manuscript structure (None if it can't be read): the same SMILES
+    always gives the same keys, so they are worked out once."""
+    from rdkit import Chem, RDLogger
+    RDLogger.DisableLog("rdApp.*")
+    try:
+        mol = Chem.MolFromSmiles(smiles)
+    finally:
+        RDLogger.EnableLog("rdApp.*")
+    if mol is None:
+        return None
+    try:
+        return _mol_keys(mol)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# The SI side's keys, kept with the molecule object itself: Project.read_structure gives
+# a new object whenever structure.mol changes (an edit, Undo/Redo, a sync, a reload), so
+# these can never be older than the molecule they describe.
+_si_mol_keys: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+def _si_keys(mol) -> tuple[str, str, bool, str] | None:
+    with _lock:
+        try:
+            return _si_mol_keys[mol]
+        except (KeyError, TypeError):
+            pass
+    try:
+        keys = _mol_keys(mol)
+    except Exception:  # noqa: BLE001
+        keys = None
+    with _lock:
+        try:
+            _si_mol_keys[mol] = keys
+        except TypeError:
+            pass
+    return keys
+
+
 def compare_structures(ms_smiles: str, si_mol) -> tuple[str, str, str, str]:
     """(status, fingerprint, manuscript formula, SI formula): status "same", "salt"
     (same compound once the counter-ions are left out), "stereo", "charge", "different"
     or "" (not comparable). The fingerprint is made from both InChIKeys, so a dismissed
     difference comes back when either structure changes (even to an isomer)."""
-    from rdkit import Chem, RDLogger
-    RDLogger.DisableLog("rdApp.*")
-    try:
-        ms_mol = Chem.MolFromSmiles(ms_smiles)
-    finally:
-        RDLogger.EnableLog("rdApp.*")
-    if ms_mol is None or si_mol is None:
+    if si_mol is None:
         return "", "", "", ""
-    try:
-        a_whole, a_main, a_salt, a_formula = _mol_keys(ms_mol)
-        b_whole, b_main, b_salt, b_formula = _mol_keys(si_mol)
-    except Exception:  # noqa: BLE001
+    a, b = _smiles_keys(ms_smiles), _si_keys(si_mol)
+    if a is None or b is None:
         return "", "", "", ""
+    a_whole, a_main, a_salt, a_formula = a
+    b_whole, b_main, b_salt, b_formula = b
     if not a_whole or not b_whole:
         return "", "", "", ""
     fp = _fp(a_whole, b_whole)
@@ -678,6 +843,7 @@ def check(project, sources: list[ms_read.Source] | None) -> Result:
     si, extra = si_compounds(project)
     ms = merge(sources, Resolver(list(si) + list(extra)))
     out: list[Finding] = []
+    gp_texts: dict = {}      # each general procedure's text, read once for this check
 
     for key, mc in ms.items():
         sc = si.get(key)
@@ -700,7 +866,7 @@ def check(project, sources: list[ms_read.Source] | None) -> Result:
                                    si_value="no compound with this ID", where=mc.where))
             continue
         result.checked += 1
-        out += _compare_one(project, mc, sc)
+        out += _compare_one(project, mc, sc, gp_texts)
 
     for f in out:
         if not f.key:
@@ -708,12 +874,26 @@ def check(project, sources: list[ms_read.Source] | None) -> Result:
         if not f.fingerprint:
             f.fingerprint = _fp(f.ms_value, f.si_value, f.message if f.kind in
                                 ("conditions", "deviation") else "")
+    # Two findings can share a key (one footnote letter read with two texts, two drawings
+    # with one label in one file): those get their fingerprint in the key, so that each
+    # can be dismissed on its own.
+    prints: dict[str, set[str]] = {}
+    for f in out:
+        prints.setdefault(f.key, set()).add(f.fingerprint)
     gone = dismissed(project)
     for f in out:
-        d = gone.get(f.key)
-        if f.status == PROBLEM and d and d.get("fingerprint") == f.fingerprint:
-            f.status = DISMISSED
-            f.reason = str(d.get("reason") or "")
+        base, own = f.key, f"{f.key}:{f.fingerprint}"
+        if len(prints[base]) > 1:
+            f.key = own
+        if f.status != PROBLEM:
+            continue
+        for k in dict.fromkeys((f.key, base, own)):   # (also one stored the other way)
+            d = gone.get(k)
+            if isinstance(d, dict) and d.get("fingerprint") == f.fingerprint:
+                f.key = k        # so that Restore removes this very entry
+                f.status = DISMISSED
+                f.reason = str(d.get("reason") or "")
+                break
     order = {PROBLEM: 0, NOTE: 1, DISMISSED: 2, OK: 3}
     out.sort(key=lambda f: (order.get(f.status, 9), _id_sort(f.label), f.kind))
     result.findings = out
@@ -729,7 +909,7 @@ def _data_text(mc: MsCompound) -> str:
     parts = []
     y = mc.values("yield")
     if y:
-        parts.append(f"{y[0][0]}% yield")
+        parts.append(f"{_pct(y[0][0])} yield")
     ee = [r for r in mc.records if _ms_ee_text(r) and mc.own(r)]
     if ee:
         parts.append(_ms_ee_text(ee[0]))
@@ -741,7 +921,8 @@ def _data_text(mc: MsCompound) -> str:
     return ", ".join(parts)
 
 
-def _compare_one(project, mc: MsCompound, sc: SiCompound) -> list[Finding]:
+def _compare_one(project, mc: MsCompound, sc: SiCompound,
+                 gp_texts: dict | None = None) -> list[Finding]:
     c = sc.compound
     label = sc.label
     out: list[Finding] = []
@@ -754,11 +935,27 @@ def _compare_one(project, mc: MsCompound, sc: SiCompound) -> list[Finding]:
     # --- structure
     structures = [(r["smiles"], r.get("place", "")) for r in mc.records if r.get("smiles")]
     if structures:
+        # (strict: a structure.mol that can't be read just now, e.g. offline, is not "no
+        # structure"; it is said so, and compared at the next check)
+        unreadable = False
         try:
-            si_mol = project.read_structure(c)
+            si_mol = project.read_structure(c, strict=True)
+        except OSError:
+            si_mol, unreadable = None, True
         except Exception:  # noqa: BLE001
             si_mol = None
-        if si_mol is None:
+        if unreadable:
+            add("structure", f"{label}: the SI structure file could not be read just now (it "
+                             "may be an online-only OneDrive file while you are offline, or "
+                             "open in another program), so the structure was not compared. "
+                             "Check again later.", NOTE, "structure", "could not be read",
+                structures[0][1])
+        elif si_mol is None and project.generic_structure_atoms(c):
+            add("structure", f"{label}: the SI structure has a generic atom "
+                             f"({', '.join(project.generic_structure_atoms(c))}), so it was not "
+                             "compared with the ChemDraw file.", NOTE, "structure",
+                "generic structure", structures[0][1])
+        elif si_mol is None:
             add("structure", f"{label}: the ChemDraw file has a structure but the SI compound "
                              "has none yet.", NOTE, "structure", "—", structures[0][1])
         else:
@@ -787,17 +984,16 @@ def _compare_one(project, mc: MsCompound, sc: SiCompound) -> list[Finding]:
     yields = mc.values("yield")
     si_y = _si_yield(c)
     if yields:
-        out += _internal(label, c.id, "yield", yields, lambda v: f"{v}%",
-                         lambda a, b: _number(a) == _number(b))
-        printed = ", ".join(f"{v}%" for v in dict.fromkeys(v for v, _w in yields))
+        out += _internal(label, c.id, "yield", yields, _pct, same_yield)
+        printed = ", ".join(_pct(v) for v in dict.fromkeys(v for v, _w in yields))
         if not si_y:
             add("yield", f"{label}: the manuscript gives {printed} yield; the SI's Yield field "
                          "is empty.", PROBLEM, printed, "—", yields[0][1])
-        elif any(_number(v) == _number(si_y) for v, _w in yields):
-            add("yield", f"{label}: the yield agrees ({si_y}%).", OK, printed, f"{si_y}%")
+        elif any(same_yield(v, si_y) for v, _w in yields):
+            add("yield", f"{label}: the yield agrees ({_pct(si_y)}).", OK, printed, _pct(si_y))
         else:
-            add("yield", f"{label}: the manuscript gives {printed} yield, the SI {si_y}%.",
-                PROBLEM, printed, f"{si_y}%", yields[0][1])
+            add("yield", f"{label}: the manuscript gives {printed} yield, the SI {_pct(si_y)}.",
+                PROBLEM, printed, _pct(si_y), yields[0][1])
     nmr = mc.values("yield_nmr")
     if nmr and not yields:
         add("yield", f"{label}: the manuscript gives only an NMR/GC yield ({nmr[0][0]}%); it is "
@@ -813,8 +1009,10 @@ def _compare_one(project, mc: MsCompound, sc: SiCompound) -> list[Finding]:
                          lambda a, b: _same_ee_text(a, b))
         printed = ", ".join(dict.fromkeys(t for t, _w in vals))
         if not si_ee_text:
-            add("ee", f"{label}: the manuscript gives {printed}; the SI has no ee/er.", PROBLEM,
-                printed, "—", vals[0][1])
+            # (a racemic product with no ee in the SI is as expected)
+            if not all(t == P.RACEMIC for t, _w in vals):
+                add("ee", f"{label}: the manuscript gives {printed}; the SI has no ee/er.",
+                    PROBLEM, printed, "—", vals[0][1])
         else:
             si_ee = ee_value(si_ee_text)
             match = si_ee is not None and any(
@@ -873,7 +1071,7 @@ def _compare_one(project, mc: MsCompound, sc: SiCompound) -> list[Finding]:
                     mc.names[0].get("place", ""))
 
     # --- conditions
-    own, sentence, gp_text = si_procedure_text(project, c)
+    own, sentence, gp_text = si_procedure_text(project, c, gp_texts)
     si_all = "\n".join((own, sentence, gp_text))
     si_q = P.quantities(si_all)
     markers = mc.markers
@@ -961,14 +1159,14 @@ def _text_notes(label: str, c, mc: MsCompound) -> list[Finding]:
                 ms_text = _ms_ee_text(r)
             else:
                 ms_text = str(r.get(kind) or "")
-                ms_text = f"{ms_text}%" if kind == "yield" and ms_text else \
+                ms_text = _pct(ms_text) if kind == "yield" and ms_text else \
                     (f"{ms_text} dr" if ms_text else "")
             if not ms_text:
                 continue
             si_text = si[kind]
             if kind == "yield":
-                agrees = bool(si_text) and _number(r["yield"]) == _number(si_text)
-                si_shown = f"{si_text}%" if si_text else ""
+                agrees = bool(si_text) and same_yield(r["yield"], si_text)
+                si_shown = _pct(si_text) if si_text else ""
             elif kind == "ee":
                 a, b = ee_value(ms_text), ee_value(si_text) if si_text else None
                 agrees = a is not None and b is not None and same_ee(a, b)
@@ -1024,10 +1222,8 @@ def cached_result(project) -> Result | None:
     Warnings panel. None if nothing was read yet or the files changed since."""
     if not files(project):
         return None
-    sources = cached_sources(project)
-    if sources is None:
-        return None
     try:
-        return check(project, sources)
+        sources = cached_sources(project)
+        return None if sources is None else check(project, sources)
     except Exception:  # noqa: BLE001 — never break the Warnings panel
         return None

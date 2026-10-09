@@ -7,9 +7,11 @@ syncing mid-write) can never leave a half-written file behind.
 
 from __future__ import annotations
 
+import codecs
 import json
 import os
 import shutil
+import stat
 import tempfile
 import time
 import weakref
@@ -20,6 +22,14 @@ from typing import Any
 # moment; on Windows that makes the rename fail, so we retry briefly.
 _REPLACE_ATTEMPTS = 10
 _REPLACE_DELAY_S = 0.1
+
+# mkstemp() makes owner-only (0600) files; the umask is read once (at import, before any
+# threads start) so saved files keep the usual permissions on macOS and Linux.
+if os.name != "nt":
+    _UMASK = os.umask(0)
+    os.umask(_UMASK)
+else:
+    _UMASK = 0
 
 # ---------------------------------------------------------------------- undo (SPEC §13k.11)
 #
@@ -80,11 +90,30 @@ def copy_tree(source: Path, dest: Path) -> None:
     if journal is not None:
         journal.before_write(Path(dest))
     shutil.copytree(source, dest)
+    if journal is not None:
+        journal.made_tree(Path(dest))
+
+
+def _rename_retrying(source: Path, dest: Path) -> None:
+    """Rename; a brief hold (OneDrive, antivirus) is retried, a real lock raises."""
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            Path(source).rename(dest)
+            return
+        except PermissionError:
+            if attempt == _REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(_REPLACE_DELAY_S)
 
 
 def move(source: Path, dest: Path) -> None:
-    """Move a file or folder (both inside the Project Folder: a rename)."""
-    shutil.move(str(source), str(dest))
+    """Move a file or folder inside the Project Folder. Always a rename: it happens
+    completely or not at all (never copy-then-delete, which can stop half-way when a file
+    in it is open in another program). `dest` must not exist yet."""
+    if os.path.lexists(dest):
+        # (macOS and Linux would silently replace a file or empty folder; Windows refuses)
+        raise FileExistsError(17, "File exists", str(dest))
+    _rename_retrying(source, dest)
     journal = _journal_for(source, dest)
     if journal is not None:
         journal.moved(Path(source), Path(dest))
@@ -92,7 +121,7 @@ def move(source: Path, dest: Path) -> None:
 
 def rename(source: Path, dest: Path) -> None:
     """Rename a file or folder; fails (OSError) if it is in use, e.g. open elsewhere."""
-    Path(source).rename(dest)
+    _rename_retrying(source, dest)
     journal = _journal_for(source, dest)
     if journal is not None:
         journal.moved(Path(source), Path(dest))
@@ -106,11 +135,38 @@ def remove_tree(path: Path, ignore_errors: bool = False) -> None:
     if journal is not None and path.exists():
         try:
             journal.remove(path)
-            return
         except OSError:
             if not ignore_errors:
                 raise
+            # Something in it is in use. Deleting it for good here would bypass the undo
+            # history, so what can be moved goes into it one item at a time (e.g. a Trash
+            # entry's entry.json, so the entry is no longer listed), and only what is in
+            # use stays (a leftover Trash folder is listed as an unfinished deletion);
+            # unless the change being saved made it, with nothing else in it since.
+            if journal.made_by_current_step(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                _remove_piecewise(journal, path)
+        return
     shutil.rmtree(path, ignore_errors=ignore_errors)
+
+
+def _remove_piecewise(journal, folder: Path) -> None:
+    """Move what can be moved of `folder` into the undo history, item by item."""
+    try:
+        children = sorted(folder.iterdir())
+    except OSError:
+        return
+    for child in children:
+        try:
+            journal.remove(child)
+        except OSError:
+            if child.is_dir() and not child.is_symlink():
+                _remove_piecewise(journal, child)
+    try:
+        journal.remove(folder)   # (empty now, unless something in it is still in use)
+    except OSError:
+        pass
 
 
 def remove_file(path: Path) -> None:
@@ -124,8 +180,43 @@ def remove_file(path: Path) -> None:
     path.unlink(missing_ok=True)
 
 
+def same_contents(path: Path, data: bytes) -> bool:
+    """Whether `path` is a file that already holds exactly `data` (size checked first)."""
+    try:
+        st = os.stat(path)
+        if not stat.S_ISREG(st.st_mode) or st.st_size != len(data):
+            return False
+        with open(path, "rb") as f:
+            return f.read() == data
+    except OSError:
+        return False
+
+
+def _match_permissions(tmp_name: str, path: Path) -> None:
+    """Give the temporary file the permissions (and group) of the file it replaces, or the
+    usual ones for a new file, so a folder shared with colleagues on macOS or Linux stays
+    readable for them. Best effort: never makes a save fail (some drives refuse chmod)."""
+    if os.name == "nt":
+        return
+    try:
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            os.chmod(tmp_name, 0o666 & ~_UMASK)
+            return
+        os.chmod(tmp_name, stat.S_IMODE(st.st_mode) & 0o777)
+        if st.st_gid != os.stat(tmp_name).st_gid:
+            os.chown(tmp_name, -1, st.st_gid)   # keep a shared group's ownership
+    except OSError:
+        pass
+
+
 def atomic_write_bytes(path: Path, data: bytes) -> None:
     path = Path(path)
+    # Writing the same bytes again changes nothing: skipped, so the file's date stays put
+    # (OneDrive has nothing new to sync) and caches keyed on its date stay valid.
+    if same_contents(path, data):
+        return
     journal = _journal_for(path)
     if journal is not None:
         journal.before_write(path, data)
@@ -136,6 +227,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
+        _match_permissions(tmp_name, path)
         for attempt in range(_REPLACE_ATTEMPTS):
             try:
                 os.replace(tmp_name, path)
@@ -158,11 +250,44 @@ def atomic_write_json(path: Path, obj: Any) -> None:
     atomic_write_text(path, json.dumps(obj, indent=2, ensure_ascii=False) + "\n")
 
 
+def _cp1252_bytes(error: UnicodeDecodeError) -> tuple[str, int]:
+    """Bytes that are not UTF-8 are read as Windows-1252 (0xB0 → °, 0xB5 → µ). The five
+    bytes Windows-1252 has no character for (0x81, 0x8D, 0x8F, 0x90, 0x9D) are kept as
+    the characters of the same number, so writing the file back loses nothing."""
+    bad = error.object[error.start:error.end]
+    return bad.decode("cp1252", errors="si-latin1"), error.end
+
+
+def _latin1_bytes(error: UnicodeDecodeError) -> tuple[str, int]:
+    return error.object[error.start:error.end].decode("latin-1"), error.end
+
+
+codecs.register_error("si-latin1", _latin1_bytes)
+
+
+codecs.register_error("si-cp1252", _cp1252_bytes)
+
+
+def decode_text(data: bytes) -> str:
+    """Project text is UTF-8, but a file saved by another editor (Notepad's "ANSI" =
+    Windows-1252, or "Unicode" = UTF-16) is still read rather than failing. Only the
+    bytes that are not UTF-8 are read as Windows-1252, so a UTF-8 file with a ° typed in
+    later by an older editor keeps its δ and ₃. The file is written back as UTF-8 the next
+    time it is edited (never on reading)."""
+    try:
+        return data.decode("utf-8-sig")   # (strict: a real UTF-8 file is read exactly)
+    except UnicodeDecodeError:
+        if data[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            return data.decode("utf-16", errors="replace")
+        return data.decode("utf-8-sig", errors="si-cp1252")
+
+
 def read_text(path: Path, default: str = "") -> str:
     try:
-        return Path(path).read_bytes().decode("utf-8-sig").replace("\r\n", "\n")
+        data = Path(path).read_bytes()
     except FileNotFoundError:
         return default
+    return decode_text(data).replace("\r\n", "\n")
 
 
 def read_json(path: Path, default: Any = None) -> Any:

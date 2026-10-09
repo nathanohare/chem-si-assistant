@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 LETTERS = "letters"
 NUMBERS = "numbers"
@@ -61,8 +61,18 @@ def pattern_ids(prefix: str, style: str, start: str, count: int) -> list[str]:
 
 # ---------------------------------------------------------------------- assignment
 
+def _text(value) -> str:
+    """An ID as text: a hand-edited section.json may hold numbers ([1, 2, 3]) or nulls."""
+    return "" if value is None else str(value)
+
+
+def _table(table) -> list[str]:
+    """The ID table as text; a hand-edited value that is not a list counts as empty."""
+    return [_text(v) for v in table] if isinstance(table, list) else []
+
+
 def normalise(compound_id: str) -> str:
-    return compound_id.strip().casefold()
+    return _text(compound_id).strip().casefold()
 
 
 def assign_ids(overrides: list[str | None], table: list[str]) -> list[str | None]:
@@ -71,9 +81,11 @@ def assign_ids(overrides: list[str | None], table: list[str]) -> list[str | None
     `overrides[i]` is compound i's manual ID (None/"" if automatic). Returns
     None for a compound that has no ID (table too short or the cell is empty).
     """
+    table = _table(table)
     result: list[str | None] = []
     for i, override in enumerate(overrides):
-        if override and override.strip():
+        override = _text(override)
+        if override.strip():
             result.append(override.strip())
         elif i < len(table) and table[i].strip():
             result.append(table[i].strip())
@@ -113,6 +125,7 @@ def check_ids(sections: list[SectionIds]) -> IdReport:
     # normalised ID -> places it is used by a compound
     used: dict[str, list[tuple[str, str]]] = defaultdict(list)  # (compound id, where)
 
+    sections = [replace(s, table=_table(s.table)) for s in sections]
     for s in sections:
         assigned = assign_ids(s.overrides, s.table)
         for pos, (cid, display) in enumerate(zip(s.compound_ids, assigned)):

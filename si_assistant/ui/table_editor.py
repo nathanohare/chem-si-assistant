@@ -25,6 +25,7 @@ from ..core.markup import SUB, SUPER, Paragraph, mention_kind
 from ..core.tables import Cell, Table
 from . import rich_text
 from .rich_text import RichTextEditor, document_to_paragraphs
+from .structure_widgets import paste_key
 
 TEXT_ROLE = Qt.ItemDataRole.UserRole          # the cell's stored text
 ALIGN_ROLE = Qt.ItemDataRole.UserRole + 1     # "left" / "center" / "right"
@@ -154,11 +155,18 @@ class TableEditorDialog(QDialog):
         self.resize(940, 760)
         self._table = table.copy()
         self._table.normalize()
+        # A damaged or hand-edited file can hold a table with no rows or columns: one empty
+        # cell to work on, so it can be repaired (the file changes only if OK is pressed).
+        if not self._table.n_rows:
+            self._table.insert_row(0)      # (first: works with no columns)
+        if not self._table.n_cols:
+            self._table.insert_column(0)
         self._loading = False
 
         intro = QLabel("Click a cell and type (its text is edited in the box under the grid, "
                        "with bold, italic, sub/superscript and @ mentions). Select several "
-                       "cells to merge them. Ctrl+V pastes a table copied from Word or Excel.")
+                       f"cells to merge them. {paste_key()} pastes a table copied from Word "
+                       "or Excel.")
         intro.setWordWrap(True)
         intro.setStyleSheet("color: palette(placeholder-text);")
 
@@ -194,6 +202,7 @@ class TableEditorDialog(QDialog):
                 continue
             act = QAction(text, self)
             act.setToolTip(tip)
+            act.setData(tip)   # (the tip back, when _update_actions changes it)
             act.triggered.connect(slot)
             if key in ALIGN_NAMES:   # (shows the selected cell's alignment)
                 act.setCheckable(True)
@@ -369,6 +378,18 @@ class TableEditorDialog(QDialog):
                                                                 or cell.colspan > 1))
         self.actions_["del_rows"].setEnabled(self._table.n_rows > 1)
         self.actions_["del_cols"].setEnabled(self._table.n_cols > 1)
+        # (a table has at most MAX_ROWS x MAX_COLS: core/tables.py)
+        from ..core.tables import MAX_COLS, MAX_ROWS
+        for keys, room, full in (
+                (("row_above", "row_below"), self._table.n_rows < MAX_ROWS,
+                 f"A table can have at most {MAX_ROWS} rows: split it into several tables."),
+                (("col_left", "col_right"), self._table.n_cols < MAX_COLS,
+                 f"A table can have at most {MAX_COLS} columns: split it into several "
+                 "tables.")):
+            for key in keys:
+                act = self.actions_[key]
+                act.setEnabled(room)
+                act.setToolTip(act.data() if room else full)
         # Left / Centre / Right show how the selected cell is aligned (its own alignment,
         # or its column's), as the alignment button of the text editors does.
         align = (cell.align or self._table.columns[c]) if cell is not None else ""
@@ -446,8 +467,9 @@ class TableEditorDialog(QDialog):
         if not block:
             return
         r, c = self._current()
-        self._table.paste(r, c, block)
+        left_out = self._table.paste(r, c, block)
         self._fill_grid((r, c))
+        warn_left_out(self, left_out)
 
     def _copy_cells(self) -> None:
         r0, c0, r1, c1 = self._selected_rect()
@@ -554,6 +576,22 @@ class TableEditorDialog(QDialog):
 
     def caption(self) -> str:
         return self.caption_edit.markup()
+
+
+def warn_left_out(parent: QWidget | None, left_out: tuple[int, int]) -> None:
+    """Say what of a pasted table did not fit (Table.paste's limit), if anything."""
+    from ..core.tables import MAX_COLS, MAX_ROWS, PASTE_MAX_COLS, PASTE_MAX_ROWS
+    rows, cols = left_out
+    if not (rows or cols):
+        return
+    parts = ([f"{rows} row{'s' if rows != 1 else ''}"] if rows else []) + (
+        [f"{cols} column{'s' if cols != 1 else ''}"] if cols else [])
+    verb = "was" if rows + cols == 1 else "were"
+    QMessageBox.warning(parent, "Paste table",
+                        f"{' and '.join(parts)} of the copied table {verb} not pasted: one "
+                        f"paste brings in at most {PASTE_MAX_ROWS} rows and {PASTE_MAX_COLS} "
+                        f"columns, and a table can have at most {MAX_ROWS} rows and "
+                        f"{MAX_COLS} columns. Split it into several tables.")
 
 
 def _column_name(c: int) -> str:

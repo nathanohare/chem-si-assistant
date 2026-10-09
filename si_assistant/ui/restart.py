@@ -102,6 +102,30 @@ def forget_scale_variable(environ=None) -> None:
         environ.pop(SCALE_ENV, None)
 
 
+def forget_bundle_library_path(environ=None, frozen=None, platform=None,
+                               bundle=None) -> None:
+    """Packaged program on Linux: PyInstaller's starter put its own library folder first
+    on LD_LIBRARY_PATH (keeping the user's value in LD_LIBRARY_PATH_ORIG). Programs opened
+    from here (PDF viewer, file manager, browser via xdg-open) must not load the bundled
+    Qt/glib/ssl, so the original is put back. This program is unaffected: the Linux loader
+    reads LD_LIBRARY_PATH only when a program starts. A value the user set is left alone."""
+    environ = os.environ if environ is None else environ
+    frozen = getattr(sys, "frozen", False) if frozen is None else frozen
+    platform = sys.platform if platform is None else platform
+    bundle = getattr(sys, "_MEIPASS", None) if bundle is None else bundle
+    if not (frozen and platform.startswith("linux") and bundle):
+        return
+    current = environ.get("LD_LIBRARY_PATH", "")
+    first = current.split(":")[0]   # (Linux's separator, also when tested elsewhere)
+    if not first or os.path.realpath(first) != os.path.realpath(bundle):
+        return   # not set by the bundle
+    original = environ.get("LD_LIBRARY_PATH_ORIG")
+    if original:
+        environ["LD_LIBRARY_PATH"] = original
+    else:
+        environ.pop("LD_LIBRARY_PATH", None)
+
+
 def child_environment(environ=None) -> dict[str, str]:
     """The environment for a restarted copy: as this one, without the QT_SCALE_FACTOR
     this program set (the new copy sets it again from the saved size)."""
@@ -111,13 +135,34 @@ def child_environment(environ=None) -> dict[str, str]:
     return env
 
 
+def appimage_file(environ=None, executable: str | None = None,
+                  platform: str | None = None) -> str | None:
+    """The AppImage this program was started from (Linux), else None. Its files are in a
+    temporary mount that disappears when this copy quits, so a restart must start the
+    AppImage itself again. $APPIMAGE is used only when this program really runs from
+    $APPDIR (both set by the AppImage runtime): a program started from some other
+    AppImage inherits that one's values."""
+    environ = os.environ if environ is None else environ
+    executable = sys.executable if executable is None else executable
+    platform = sys.platform if platform is None else platform
+    image, appdir = environ.get("APPIMAGE", ""), environ.get("APPDIR", "")
+    if not (platform.startswith("linux") and image and appdir):
+        return None
+    try:
+        inside = Path(executable).resolve().is_relative_to(Path(appdir).resolve())
+    except (OSError, ValueError):
+        return None
+    return image if inside else None
+
+
 def restart_command(info: dict) -> tuple[list[str], str | None]:
     """(arguments, working folder) that start a new copy of the program with `info`.
     Normally `python -m si_assistant` (run from the folder holding the package); a
-    program packaged with PyInstaller (Phase 8) is started directly."""
+    program packaged with PyInstaller (Phase 8) is started directly, or from an AppImage
+    the AppImage file (if it is gone, starting fails and the user is told)."""
     restore = [RESTORE_ARG, json.dumps(info, ensure_ascii=False)]
     if getattr(sys, "frozen", False):
-        return [sys.executable, *restore], None
+        return [appimage_file() or sys.executable, *restore], None
     package = Path(__file__).resolve().parents[1]
     return [sys.executable, "-m", package.name, *restore], str(package.parent)
 

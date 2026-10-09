@@ -12,7 +12,9 @@ folder in the project, the journal keeps what was there, once per step:
 Undoing a step puts all of that back, newest first, while keeping what it replaces in a
 new step: that step is the redo. If anything cannot be put back (a file open in another
 program), everything done so far is reversed again, so the project is never left half
-undone.
+undone. Files put in the project from outside the program (e.g. with "Open storage
+folder") are not in the history, so an undo that would take them away is refused the same
+way, naming them.
 
 Every write in core/fileio.py tells the journal of its project first (`fileio.register`).
 build/, snapshots/ and the lock file are not part of the history.
@@ -35,11 +37,14 @@ typing undone again in its box) is dropped, so Edit ▸ Undo never does nothing 
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import shutil
 import time
+import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -76,6 +81,9 @@ class Step:
     # ("file", path, copy) | ("absent", path) | ("move", source, destination), in order.
     records: list = field(default_factory=list)
     _seen: set = field(default_factory=set)
+    # The files this step wrote (_key): anything else found in a folder it made was put
+    # there from outside the program (e.g. with "Open storage folder").
+    _made: set = field(default_factory=set)
     _count: int = 0
 
     def _stash_name(self, prefix: str) -> Path:
@@ -86,6 +94,34 @@ class Step:
 
 def _norm(path: Path | str) -> str:
     return os.path.normcase(os.path.abspath(str(path)))
+
+
+def _key(path: Path | str) -> str:
+    # (macOS may list names decomposed (NFD): é as e + accent)
+    return unicodedata.normalize("NFC", _norm(path))
+
+
+# Files that the system or the program itself leave in a folder without telling the
+# journal: never a reason to refuse an undo (they go with the folder).
+_DISPOSABLE_NAMES = {".ds_store", "thumbs.db", "desktop.ini", ".directory"}
+_DISPOSABLE_PREFIXES = ("._", ".tmp-", "~$")
+
+
+def _disposable(path: Path) -> bool:
+    name = path.name.lower()
+    if name in _DISPOSABLE_NAMES or name.startswith(_DISPOSABLE_PREFIXES):
+        return True
+    # (the Manuscript check's cache, written directly: core/manuscript.py)
+    return name == "check.json" and path.parent.name.lower() == "manuscript"
+
+
+class ForeignFiles(OSError):
+    """Undoing would take away files that were put in the project from outside the
+    program (they are not in the undo history, so they could not come back)."""
+
+    def __init__(self, files: list[Path]):
+        super().__init__("files added outside the program")
+        self.files = files
 
 
 def _rename(source: Path, target: Path) -> None:
@@ -152,6 +188,8 @@ class Journal:
         self._action: Step | None = None   # the step of an action still being saved
         self._ids = itertools.count(1)
         self._busy = False                 # undoing or redoing
+        # Trash folders written by _keep_after_failure (not in the history): {_norm: path}
+        self._kept: dict[str, Path] = {}
 
     # ------------------------------------------------------------------ life cycle
 
@@ -387,6 +425,26 @@ class Journal:
         """Delete a file or folder by moving it into the step (so it can come back)."""
         self._stash(self._current(), Path(path))
 
+    def made_tree(self, folder: Path) -> None:
+        """`folder` was just copied in whole (fileio.copy_tree): its files are this step's."""
+        if not self._busy:
+            made = self._current()._made
+            made.add(_key(folder))
+            made.update(_key(f) for f in Path(folder).rglob("*"))
+
+    def made_by_current_step(self, path: Path) -> bool:
+        """Whether the change being saved made `path` (a folder that did not exist before
+        it) and nothing has been put in it from outside since: deleting it for good then
+        loses nothing that undo could bring back."""
+        top = self.undo_stack[-1] if self.undo_stack else None
+        step = self._open or (self._action if self._action is top else None)
+        if step is None:
+            return False
+        p = _norm(path)
+        made = any(r[0] == "absent" and (p == _norm(r[1]) or p.startswith(_norm(r[1]) + os.sep))
+                   for r in step.records)
+        return made and not self._foreign(Path(path), step._made)
+
     # ---- the three kinds of record
 
     def _covered(self, step: Step, path: Path) -> bool:
@@ -400,6 +458,7 @@ class Journal:
 
     def _record_state(self, step: Step, path: Path) -> None:
         if self._covered(step, path):
+            step._made.add(_key(path))
             return
         top = None   # the outermost folder that doesn't exist yet
         p = path
@@ -408,6 +467,7 @@ class Journal:
         if top is not None:
             step.records.append(("absent", top))
             step._seen.add(_norm(top))
+            step._made.add(_key(path))
         elif path.is_file():
             copy = step._stash_name("f")
             shutil.copy2(path, copy)   # (file to file: never read into memory)
@@ -423,6 +483,19 @@ class Journal:
         if not folder.is_dir():
             self._record_state(step, folder)
             folder.mkdir(parents=True, exist_ok=True)
+
+    def _in_history(self, path: Path | str) -> bool:
+        """Whether `path` is in build/undo/ (a copy or a folder kept by a step)."""
+        return _norm(path).startswith(_norm(self.folder) + os.sep)
+
+    def _foreign(self, path: Path, made: set) -> list[Path]:
+        """The files in `path` (or `path` itself) that `made` does not list and that are
+        not the system's own (.DS_Store, Thumbs.db…): put there from outside the program."""
+        try:
+            files = [path] if path.is_file() else [f for f in path.rglob("*") if f.is_file()]
+        except OSError:
+            return []
+        return [f for f in files if _key(f) not in made and not _disposable(f)]
 
     # ------------------------------------------------------------------ undo and redo
 
@@ -448,13 +521,18 @@ class Journal:
             except Exception as e:   # noqa: BLE001 — any failure: put everything back
                 scratch = self._new_step("rollback")
                 try:
-                    self._apply(opposite, scratch)
+                    self._apply(opposite, scratch, rollback=True)
                     back = True
                 except Exception:   # noqa: BLE001
                     back = False
-                shutil.rmtree(scratch.folder, ignore_errors=True)
-                shutil.rmtree(opposite.folder, ignore_errors=True)
-                raise UndoError(self._failure(what, step, e, back)) from e
+                kept = ""
+                if back:
+                    shutil.rmtree(scratch.folder, ignore_errors=True)
+                    shutil.rmtree(opposite.folder, ignore_errors=True)
+                else:
+                    # The newer files may now exist only in these folders: never deleted.
+                    kept = self._keep_after_failure(step, what, opposite, scratch)
+                raise UndoError(self._failure(what, step, e, back) + kept) from e
         finally:
             self._busy = False
         source.pop()
@@ -464,17 +542,76 @@ class Journal:
         self._notify()
         return opposite
 
-    def _apply(self, step: Step, into: Step) -> None:
+    def _keep_after_failure(self, step: Step, what: str, *kept: Step) -> str:
+        """An undo or redo stopped part-way and could not be reversed: the folders holding
+        what it had already taken away go into the project's Trash (outside build/, which
+        is emptied when the project is closed or opened), with a list of where each file
+        came from. Returns a sentence for the message."""
+        from .project import TRASH_DIR, TRASH_ENTRY_FILE
+        folders = [s for s in kept if s.folder.is_dir()]
+        if not folders:
+            return ""
+        now = datetime.now()
+        entry = self.root / TRASH_DIR / f"{now:%Y%m%d-%H%M%S}-undo{folders[0].id}"
+        files = {}
+        for s in folders:
+            for r in s.records:
+                stored = r[2] if r[0] in ("file", "move") else None
+                if stored is None or not _norm(stored).startswith(_norm(s.folder) + os.sep):
+                    continue
+                try:
+                    place = Path(r[1]).relative_to(self.root).as_posix()
+                except ValueError:
+                    place = str(r[1])
+                files[f"{s.id}/{Path(stored).relative_to(s.folder).as_posix()}"] = place
+        name = f"Newer files kept when “{step.label}” could not be {what}ne"
+        try:
+            entry.mkdir(parents=True)
+            with open(entry / TRASH_ENTRY_FILE, "w", encoding="utf-8") as f:
+                json.dump({"kind": "incomplete", "name": name, "item": "",
+                           "deleted_at": now.isoformat(timespec="seconds"),
+                           "files": files}, f, ensure_ascii=False, indent=2)
+            for s in folders:
+                try:
+                    _rename(s.folder, entry / s.id)
+                except OSError:
+                    shutil.copytree(s.folder, entry / s.id)   # (a copy; the original stays)
+        except OSError:
+            return ("\n\nThe files it had already changed are kept in "
+                    f"{self.folder} — copy them somewhere safe before closing the project.")
+        self._kept[_norm(entry)] = entry
+        return (f"\n\nThe files it had already changed are kept in the project's Trash "
+                f"(“{name}”, folder {entry.relative_to(self.root).as_posix()}), with a list "
+                "of where each one came from (choose it in File ▸ Trash and press Restore to "
+                "see the list).")
+
+    def _apply(self, step: Step, into: Step, rollback: bool = False) -> None:
         """Put back what `step` recorded, newest first, recording what it replaces in
-        `into` (so that it can be reversed in turn)."""
+        `into` (so that it can be reversed in turn). Refuses (ForeignFiles) to take away
+        files put in the project from outside the program, unless this is the `rollback`
+        of an undo or redo that stopped part-way: that puts everything back exactly where
+        it was, also in the history of the step that is still to be undone."""
         for record in reversed(step.records):
             try:
-                self._apply_one(record, into)
+                if not rollback:
+                    self._check_foreign(record, step)
+                self._apply_one(record, into, rollback)
             except OSError as e:
                 e.project_path = record[1]   # (the place in the project, for the message)
                 raise
 
-    def _apply_one(self, record: tuple, into: Step) -> None:
+    def _check_foreign(self, record: tuple, step: Step) -> None:
+        """Done record by record (newest first): by the time a folder the step made is
+        taken away, what the step itself moved into it has already been moved out."""
+        kind, path = record[0], record[1]
+        if kind == "move" and self._in_history(path):
+            path = record[2]   # (it came out of the history: this takes it back in)
+        if kind in ("absent", "move") and path.exists():
+            found = self._foreign(path, step._made)
+            if found:
+                raise ForeignFiles(found)
+
+    def _apply_one(self, record: tuple, into: Step, rollback: bool = False) -> None:
         kind, path = record[0], record[1]
         if kind == "absent":          # it was made in the step: take it away again
             if path.exists():
@@ -482,30 +619,83 @@ class Journal:
         elif kind == "file":          # its earlier contents
             if not record[2].is_file():
                 raise FileNotFoundError(2, "The copy kept for undo is gone", str(record[2]))
+            self._make_dirs(into, path.parent)   # (its records are real changes)
+            # What is there now is recorded only once it has really been replaced, so a
+            # file that cannot be replaced (open elsewhere) leaves nothing to reverse.
+            count, seen, made = len(into.records), set(into._seen), set(into._made)
             self._record_state(into, path)
-            self._make_dirs(into, path.parent)
+            pending = into.records[count:]
+            del into.records[count:]
+            recorded = into._seen, into._made
+            into._seen, into._made = seen, made
             tmp = path.with_name(f".tmp-undo-{path.name}")
-            shutil.copy2(record[2], tmp)
-            for attempt in range(_RENAME_ATTEMPTS):
-                try:
-                    os.replace(tmp, path)
-                    break
-                except PermissionError:
-                    if attempt == _RENAME_ATTEMPTS - 1:
-                        tmp.unlink(missing_ok=True)
-                        raise
-                    time.sleep(_RENAME_DELAY_S)
+            try:
+                shutil.copy2(record[2], tmp)
+                for attempt in range(_RENAME_ATTEMPTS):
+                    try:
+                        os.replace(tmp, path)
+                        break
+                    except PermissionError:
+                        if attempt == _RENAME_ATTEMPTS - 1:
+                            raise
+                        time.sleep(_RENAME_DELAY_S)
+            except BaseException:
+                tmp.unlink(missing_ok=True)
+                for r in pending:
+                    if r[0] == "file":
+                        Path(r[2]).unlink(missing_ok=True)
+                raise
+            into.records.extend(pending)
+            into._seen, into._made = recorded
         elif kind == "move":          # moved elsewhere: move it back
             moved_to = record[2]
             if not moved_to.exists():
                 raise FileNotFoundError(2, "It is no longer there", str(moved_to))
+            if self._in_history(path) and not rollback:
+                # It came out of the history (a redo, or the undo of a deletion): it goes
+                # into `into`'s own folder, not back into that older step's, which is
+                # emptied (or already gone) once that step is no longer in the history.
+                self._stash(into, moved_to)
+                return
             if path.exists():
                 self._stash(into, path)
             self._make_dirs(into, path.parent)
             _rename(moved_to, path)
             into.records.append(("move", moved_to, path))
+            if self._in_history(moved_to):
+                # What comes back out of the history is the program's own, like the files
+                # a step writes: anything put in it later is found when it is taken away.
+                into._made.add(_key(path))
+                if path.is_dir():
+                    into._made.update(_key(f) for f in path.rglob("*"))
 
     def _failure(self, what: str, step: Step, error: Exception, back: bool) -> str:
+        if back and isinstance(error, ForeignFiles):
+            kept = {e: path for e, path in self._kept.items()
+                    if any(_norm(f).startswith(e + os.sep) for f in error.files)}
+            others = [f for f in error.files
+                      if not any(_norm(f).startswith(e + os.sep) for e in kept)]
+            if not others:
+                folders = ", ".join(path.relative_to(self.root).as_posix()
+                                    for path in kept.values())
+                return (f"“{step.label}” was not {what}ne, so nothing was changed: it would "
+                        "take away the newer files kept in the project's Trash when an "
+                        f"earlier undo could not be finished ({folders}). Undoing would put "
+                        "them in the undo history, which is emptied when the project is "
+                        "closed. Move that folder somewhere outside the project folder "
+                        "first, then try again.")
+            names = []
+            for f in others[:3]:
+                try:
+                    names.append(f.relative_to(self.root).as_posix())
+                except ValueError:
+                    names.append(f.name)
+            more = len(others) - len(names)
+            return (f"“{step.label}” was not {what}ne, so nothing was changed: it would take "
+                    "away files that were added to the project folder outside the program ("
+                    + ", ".join(names) + (f" and {more} more" if more else "") + "). They "
+                    "are not in the undo history, so they could not come back. Move them "
+                    "somewhere else first, then try again.")
         place = getattr(error, "project_path", None) or getattr(error, "filename", None)
         if place:
             try:

@@ -74,6 +74,14 @@ are not supported yet.
 
 ![The start page](images/start-page.png)
 
+**New here? Look at the example first.** The start page has a highlighted box for the
+example SI that comes with the program: **Open the Example Project…** asks where to put a
+copy and opens it (change anything you like; the original stays as it was), and **View Its
+Finished SI (PDF)** shows the SI compiled from it. Both are also in the **Help** menu. The
+example has six compounds made by one general procedure, a follow-up reaction, two schemes,
+an optimisation table, HRMS report files and references. Its data come from published papers
+(cited in it); its spectra are simulated from those data and are marked so on every page.
+
 1. Start the program and click **New Project…**.
 2. Type a **project name**. It becomes the folder's name, and the manuscript title on the
    cover page until you change it.
@@ -287,6 +295,7 @@ The program fills in what it can, and you can always replace it. You can:
 - set a manual ID;
 - set the HRMS formula (✎) or the part of a salt that is "M";
 - type any adduct;
+- type the formula an elemental analysis was calculated for (e.g. a solvate);
 - type your own spectrum headers and captions, and figure, table and scheme labels;
 - drag the IDs on a scheme;
 - use your own picture instead of the program's drawing.
@@ -317,6 +326,12 @@ you compile you can choose "Program drawings for every compound" instead.
 
 The program has no drawing editor of its own: draw in ChemDraw (or any other editor) and
 paste.
+
+A structure with a generic atom (R, X, *) can be used, for example for the general product
+of a scheme (R = aryl). It has no formula or mass, so its Structure field shows a warning and
+the checks that need a formula (HRMS, elemental analysis, ¹H and ¹³C counts) skip it. For a
+polymer or another structure that has no single formula, you can also paste its picture
+(**Paste image**) and type the formula in the HRMS field (✎).
 
 ### Names: paste from ChemDraw, or look them up in PubChem
 
@@ -511,13 +526,22 @@ spectrometer's software made, stored in the compound's `hrms` folder:
 
 **The found m/z is read from these files** (no vendor software needed):
 - PDF reports (the text in them; e.g. from MassHunter, Xcalibur/FreeStyle, MassLynx,
-  DataAnalysis or LabSolutions), CSV/TSV/TXT peak lists, Excel `.xlsx` files;
+  DataAnalysis or LabSolutions), CSV/TSV/TXT peak lists, Excel `.xlsx` files. Many programs
+  save their PDFs with edit restrictions; these are read too, using the free
+  *cryptography* package that comes with the program. That is its only job: it encrypts
+  nothing, keeps no passwords or keys, and sends nothing anywhere. A PDF that really needs a
+  password to open is reported and left out;
 - mzML, mzXML, mzData, MGF, JCAMP-DX and netCDF/ANDI-MS (`.cdf`) data files. Profile
   (not centroided) spectra are centroided first, and several scans are combined.
 - Pictures and scanned PDFs can't be read. Raw data (Thermo `.raw`, Agilent/Bruker `.d`,
   Waters `.raw` folders, SCIEX `.wiff`, Shimadzu `.lcd`) is kept but can't be read: export
   a PDF or CSV report from the instrument software, or convert the data to mzML with
   ProteoWizard **MSConvert** (free), and add that too.
+
+**Salts:** for a structure of several pieces, the HRMS field's **M is:** list chooses the
+piece that is M. Automatic takes the largest piece that is not a common counter-ion (halide,
+BF₄⁻, PF₆⁻, OTf⁻, OTs⁻, BArF⁻, Na⁺, K⁺, NBu₄⁺…) and shows which one it took. A typed M formula
+(✎) may carry a charge, e.g. "C10H16N+".
 
 **Which value is used:** of all the m/z values in all the files, those within your HRMS
 tolerance (Project settings ▸ Output) of a calculated isotope peak of the chosen ion. A
@@ -633,7 +657,7 @@ things worth a second look. The checks:
 | ¹³C signal count | Signals against the structure's symmetry-distinct carbons |
 | Solvent or impurity peaks | Signals at known solvent and impurity shifts (the table is editable in Project Settings ▸ NMR impurities) |
 | HRMS | Found m/z against the calculated value (tolerance in Project Settings ▸ Output); a found m/z typed by hand that differs from the report files |
-| Other | Large *J* values; yield against mass; spectra against NMR reports; NMR frequencies; missing heteroatom NMR; compound IDs; general procedures (including two with the same name, and a {scale} that differs from the Reaction scale field); deleted mentions; missing references; duplicate labels; missing figure or table files |
+| Other | Large *J* values; yield against mass; spectra against NMR reports; NMR frequencies; missing heteroatom NMR; a structure with a generic atom (R, X, *); compound IDs; general procedures (including two with the same name, a {scale} that differs from the Reaction scale field, and a Purification "Printed as" sentence that is not printed because the general procedure places {purification} itself); deleted mentions; missing references; a reference whose year or web address the journal style can't print; duplicate labels; missing figure or table files |
 
 Each check is approximate. Rotamers, C–F coupling and overlapping signals can make counts
 differ, so judge for yourself.
@@ -829,7 +853,15 @@ like any other folder. **File ▸ Show Project Folder** opens it.
   submitting or before big changes. Snapshots are your safety net; the program makes no
   other automatic backups.
 - **Trash:** deleted sections, compounds and pictures go to the project's Trash. **File ▸
-  Trash…** restores them, or empties the Trash for good.
+  Trash…** restores them, or empties the Trash for good. A few entries can't be put back
+  automatically (files kept after an undo that could not finish, or an entry whose
+  description is damaged): open the Trash folder and move those files back by hand.
+- **Kept copies:** if a file such as `references.json` could not be read, the program keeps
+  it as `references.damaged-<date>.json` before writing a new one. Check it and delete it
+  when you no longer need it.
+- **If a page can't be saved** (for example OneDrive or a virus scanner is holding a file),
+  you get a plain message, your typing stays on screen, and the save is tried again. Until
+  it works, the program asks before you leave the page, undo or close.
 
 ### Sharing a project (OneDrive, Dropbox, a network drive)
 

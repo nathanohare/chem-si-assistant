@@ -44,6 +44,8 @@ EDIT_DELAY_MS = 1000     # after an edit is saved
 SWITCH_DELAY_MS = 150    # after another page is selected (so arrowing through the tree
                          # doesn't compile every page on the way)
 LIVE_NAME = "live"
+TOC_TARGET = ("front", "toc")
+TOC_FOLDER = "toc"       # where the table of contents is built (see _start)
 SPECTRA_LIMIT = 8        # the Spectra section's live preview shows its first spectra only
 MIN_WIDTH = 240
 ZOOM_STEP = 1.25
@@ -355,8 +357,12 @@ class LivePreviewPane(QWidget):
             options.only = target
             options.preview_spectra = False   # the spectra get pages of their own
             options.spectra_limit = SPECTRA_LIMIT   # the Spectra section: a sample
+            # The table of contents is built with the whole SI (for its page numbers), in
+            # a folder of its own: the next page's build then doesn't first delete all of
+            # its pictures (every build empties its folder's assets-live/).
+            source = folder / TOC_FOLDER if tuple(target) == TOC_TARGET else folder
             result = build(project, options, image_info, convert_to_png, name=LIVE_NAME,
-                           folder=folder, root=root, crop=content_box)
+                           folder=source, root=root, crop=content_box)
         except PreviewUnavailable as e:
             self._show_message(str(e))
             return

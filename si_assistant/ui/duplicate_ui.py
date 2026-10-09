@@ -74,7 +74,7 @@ class DuplicateDialog(QDialog):
                            + (" (on every compound page)" if self.is_scheme else ""))
         grid = QGridLayout()
         for i, d in enumerate(defs.values()):
-            box = QCheckBox(d.label)
+            box = QCheckBox(d.label.replace("&", "&&"))   # ("Yield & ee": no Alt+ key)
             box.setChecked(True)
             self.boxes[d.key] = box
             grid.addWidget(box, i // COLUMNS, i % COLUMNS)

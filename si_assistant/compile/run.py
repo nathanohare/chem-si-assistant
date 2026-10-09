@@ -4,17 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import typst
 
 from ..core.project import Project
-from .document import CompileOptions, build
-
-
-class CompileError(Exception):
-    """Typst could not make the PDF. The message is shown to the user."""
+from .document import CompileError, CompileOptions, build   # (CompileError: also from here)
 
 
 @dataclass
@@ -35,10 +32,24 @@ def run_typst(typ: Path, output: Path, root: Path) -> list[str]:
         compiler = typst.Compiler(str(typ), root=str(root))
         compiler.compile(output=str(output))
     except Exception as e:  # noqa: BLE001 — Typst reports problems as plain exceptions
+        culprit = failed_file(e)
+        where = (f"\n\nThe file it could not read: {culprit}. Replace it or remove it, then "
+                 "compile again." if culprit else "")
         raise CompileError(
             "The SI could not be compiled. This is usually caused by an unusual file or "
-            f"character; details for troubleshooting:\n\n{e}") from e
+            f"character; details for troubleshooting:\n\n{e}{where}") from e
     return scheme_notes(compiler)
+
+
+def failed_file(error) -> str:
+    """The picture or PDF that Typst stopped at, from its error's source line (e.g.
+    `image("/sections/s-1/images/figure.png", …)`), as a path in the project folder; ""
+    if the error is about something else. Typst's own message doesn't name the file."""
+    if not re.search(r"image|pdf|file", str(error), re.I):   # (e.g. a stray character)
+        return ""
+    diagnostic = str(getattr(error, "diagnostic", "") or "")
+    m = re.search(r'\bimage\(\s*"([^"]+)"', diagnostic)
+    return m.group(1).lstrip("/") if m else ""
 
 
 SCHEME_TEXT_LABEL = "si-scheme-text"
@@ -245,10 +256,34 @@ def compile_pdf(project: Project, options: CompileOptions, image_info, converter
     (e.g. open in Acrobat on Windows) the new PDF gets a numbered name instead.
     """
     result = build(project, options, image_info, converter, name=name, crop=crop)
-    tmp = result.typ_path.with_name(f".{name}.partial.pdf")
-    result.warnings += run_typst(result.typ_path, tmp, project.folder)
+    return finish_pdf(result.typ_path, project.folder, name, list(result.warnings))
+
+
+def finish_pdf(typ: Path, root: Path, name: str, warnings: list[str]) -> CompileResult:
+    """compile_pdf's second half: Typst makes the PDF from `typ` (already built), which is
+    then named and put in place. Raises CompileError."""
+    return place_pdf(typ, name, typeset_pdf(typ, root, name, warnings))
+
+
+def typeset_pdf(typ: Path, root: Path, name: str, warnings: list[str]) -> list[str]:
+    """Typst makes the PDF from `typ` as build/.<name>.partial.pdf (placed by place_pdf);
+    returns the warnings. Touches no Qt objects and no project data, so it can run in a
+    worker thread (ui/compile_ui.run_compile). Raises CompileError."""
+    tmp = partial_pdf(typ, name)
+    warnings = warnings + run_typst(typ, tmp, root)
     mark_producer(tmp)
-    final = result.typ_path.with_suffix(".pdf")
+    return warnings
+
+
+def partial_pdf(typ: Path, name: str) -> Path:
+    return typ.with_name(f".{name}.partial.pdf")
+
+
+def place_pdf(typ: Path, name: str, warnings: list[str]) -> CompileResult:
+    """The PDF typeset_pdf made, given its name (<name>.pdf, or <name> (2).pdf… when that
+    one is open in another program)."""
+    tmp = partial_pdf(typ, name)
+    final = typ.with_suffix(".pdf")
     try:
         os.replace(tmp, final)
     except PermissionError:
@@ -258,11 +293,11 @@ def compile_pdf(project: Project, options: CompileOptions, image_info, converter
             try:
                 os.replace(tmp, alt)
                 final = alt
-                result.warnings.append(f"{name}.pdf is open in another program, so the new PDF "
-                                       f"was saved as {alt.name}.")
+                warnings.append(f"{name}.pdf is open in another program, so the new PDF "
+                                f"was saved as {alt.name}.")
                 break
             except PermissionError:
                 n += 1
                 if n > 50:
                     raise CompileError(f"Could not save {name}.pdf: the file is locked.") from None
-    return CompileResult(final, result.typ_path, result.warnings)
+    return CompileResult(final, typ, warnings)

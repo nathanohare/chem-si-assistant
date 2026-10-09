@@ -1,0 +1,50 @@
+{
+  "format_version": 1,
+  "saved_by_version": "1.0.0",
+  "title": "Sodium Borohydride Reduction of Aryl Methyl Ketones: an Example Project for Chem SI Assistant",
+  "authors": [
+    {
+      "name": "Alex Example",
+      "affiliations": [
+        "a"
+      ],
+      "corresponding": false,
+      "email": ""
+    },
+    {
+      "name": "Blair Sample",
+      "affiliations": [
+        "a"
+      ],
+      "corresponding": true,
+      "email": "blair.sample@example.com"
+    }
+  ],
+  "affiliations": [
+    {
+      "marker": "a",
+      "text": "Department of Chemistry, Example University, Exampletown, EX 00000, Exampleland"
+    }
+  ],
+  "journal_style": "ACS",
+  "hrms_tolerance_ppm": 5.0,
+  "auto_nmr_31P": false,
+  "auto_nmr_11B": false,
+  "compile_structures": "pictures",
+  "format_text": true,
+  "paste_dpi": 1200,
+  "toc": {
+    "depth": "compounds"
+  },
+  "section_tree": [
+    {
+      "id": "s-c1aa3466"
+    },
+    {
+      "id": "s-972b3c47"
+    },
+    {
+      "id": "s-d79a6040"
+    }
+  ]
+}

@@ -1,0 +1,146 @@
+{
+  "id": "c-1eebe878",
+  "id_override": "",
+  "fields": [
+    {
+      "key": "structure"
+    },
+    {
+      "key": "name"
+    },
+    {
+      "key": "procedure"
+    },
+    {
+      "key": "scale"
+    },
+    {
+      "key": "yield"
+    },
+    {
+      "key": "physical_state"
+    },
+    {
+      "key": "purification"
+    },
+    {
+      "key": "rf"
+    },
+    {
+      "key": "nmr"
+    },
+    {
+      "key": "hrms"
+    },
+    {
+      "key": "spectra"
+    },
+    {
+      "key": "references"
+    },
+    {
+      "key": "notes"
+    }
+  ],
+  "values": {
+    "name": {
+      "text": "1-(4-Chlorophenyl)ethan-1-ol"
+    },
+    "scale": {
+      "value": "0.50",
+      "unit": "mmol"
+    },
+    "yield": {
+      "percent": "93",
+      "mass": "72.8",
+      "mass_unit": "mg"
+    },
+    "physical_state": {
+      "text": "pale yellow oil"
+    },
+    "purification": {
+      "method": "flash column chromatography",
+      "phase": "SiO₂",
+      "eluent": "n-hexane/EtOAc 4:1",
+      "sentence": ""
+    },
+    "rf": {
+      "value": "0.16",
+      "eluent": "n-hexane/EtOAc 4:1",
+      "visualization": ""
+    },
+    "nmr": [
+      {
+        "id": "r-1135f5f7",
+        "nucleus": "1H",
+        "label": "",
+        "text": "1H NMR (400 MHz, CDCl3) δ 7.35 – 7.27 (m, 4H), 4.94 – 4.84 (m, 1H), 1.79 (d, J = 3.6 Hz, 1H), 1.48 (d, J = 6.5 Hz, 3H)."
+      },
+      {
+        "id": "r-27e09363",
+        "nucleus": "13C",
+        "label": "",
+        "text": "13C NMR (126 MHz, CDCl3) δ 144.4, 133.2, 128.8, 126.9, 69.9, 25.4."
+      }
+    ],
+    "hrms": {
+      "ionization": "ESI",
+      "adduct": "[M+Na]+",
+      "found": "179.0233",
+      "species": "",
+      "formula": "",
+      "reports": [
+        {
+          "file": "2d_HRMS_ESI.csv",
+          "kind": "file"
+        }
+      ],
+      "found_from": {
+        "file": "2d_HRMS_ESI.csv",
+        "mz": 179.02329
+      }
+    },
+    "spectra": [
+      {
+        "file": "2d_1H.pdf",
+        "type": "1H",
+        "title": "",
+        "struct_caption": ""
+      },
+      {
+        "file": "2d_13C.pdf",
+        "type": "13C",
+        "title": "",
+        "struct_caption": ""
+      }
+    ],
+    "references": {
+      "text": "Spectral data matched those reported in the literature.",
+      "refs": [
+        "r-66ec47ab",
+        "r-f111eece"
+      ]
+    },
+    "procedure": {
+      "gp": "gp-cb78be13",
+      "values": {
+        "ketone": "4′-chloroacetophenone",
+        "ketone ID": "**1d**",
+        "mass": "77.3 mg"
+      }
+    },
+    "structure": {
+      "from_scheme": false
+    }
+  },
+  "flags": {},
+  "dismissed": {
+    "frequency:r-27e09363": {
+      "fingerprint": "1d3986b70d79",
+      "message": "¹³C NMR at 126 MHz doesn't match ¹H at 400 MHz (expected ≈ 101 MHz).",
+      "reason": "As in the cited source: the ¹H and ¹³C spectra were recorded on different spectrometers (400 and 500 MHz).",
+      "by": "Example",
+      "at": "2026-10-09T12:00:00"
+    }
+  }
+}

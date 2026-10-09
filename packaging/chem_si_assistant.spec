@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, SPECPATH)          # (SPECPATH: this folder, set by PyInstaller)
 import build_app as B                 # noqa: E402
-from PyInstaller.utils.hooks import collect_data_files  # noqa: E402
+from PyInstaller.utils.hooks import collect_data_files, copy_metadata  # noqa: E402
 
 version = B.read_version()
 name = B.app_name()
@@ -25,6 +25,9 @@ datas = B.data_files()
 datas += collect_data_files("spellchecker", includes=["resources/en.json.gz"])
 # RDKit's data folder (fonts for structure drawings, functional groups, salts…).
 datas += collect_data_files("rdkit", includes=["Data/**/*"])
+# The package information of 'cryptography' and cffi, which holds their licence texts
+# (Apache-2.0 / BSD-3-Clause; MIT-0), so the licences always travel with the program.
+datas += copy_metadata("cryptography") + copy_metadata("cffi")
 
 a = Analysis(
     [str(Path(SPECPATH) / "launcher.py")],
@@ -35,6 +38,16 @@ a = Analysis(
         # Imported inside functions or by Qt itself, so PyInstaller may not see them.
         "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtSvg", "rdkit.Chem.rdChemReactions",
         "pypdf", "spellchecker",
+        # pypdf looks for 'cryptography' only when it starts, and quietly does without it,
+        # so make sure it comes along: without it, PDFs that instrument software saved with
+        # edit restrictions (AES-encrypted, empty opening password) can't be read. It is
+        # used for nothing else (see THIRD_PARTY_NOTICES.md). _cffi_backend: its helper.
+        "pypdf._crypt_providers._cryptography", "cryptography",
+        "cryptography.hazmat.primitives.ciphers.algorithms",
+        "cryptography.hazmat.primitives.ciphers.base",
+        "cryptography.hazmat.primitives.ciphers.modes",
+        "cryptography.hazmat.primitives.padding",
+        "cryptography.hazmat.decrepit.ciphers.algorithms", "_cffi_backend",
     ],
     hookspath=[],
     runtime_hooks=[],

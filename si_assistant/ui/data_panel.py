@@ -39,12 +39,13 @@ class DataSectionPanel(SectionPanel):
         self.dashboard.new_compound_requested.connect(self.new_compound_requested)
         self.dashboard.saved.connect(self.saved)
         self.tabs.addTab(self.dashboard, "Dashboard")
-        self.tabs.addTab(self._build_id_table(), "ID table")
+        self.id_page = self._build_id_table()
+        self.tabs.addTab(self.id_page, "ID table")
         self.tabs.addTab(self._build_defaults(), "Default fields")
         self.procedures = GeneralProceduresEditor(project, section)
         self.procedures.changed.connect(lambda: self.saved.emit("Saved"))
         self.tabs.addTab(self.procedures, "General procedures")
-        self.tabs.currentChanged.connect(lambda _i: self.refresh())
+        self.tabs.currentChanged.connect(self._show_tab)
         self.layout_.addWidget(self.tabs, 1)
         self.refresh()
 
@@ -54,9 +55,34 @@ class DataSectionPanel(SectionPanel):
         self._fill_id_table(self.project.id_report())
         self.procedures._update_users()
 
+    def _show_tab(self, _index: int | None = None) -> None:
+        """Rebuild only the tab on show, from the project: the others are rebuilt when
+        they are shown (rebuilding the dashboard on every tab switch was slow)."""
+        self.procedures.flush()   # (typed GP text is saved before anything is rebuilt)
+        page = self.tabs.currentWidget()
+        if page is self.dashboard:
+            self.dashboard.refresh()
+        elif page is self.id_page:
+            self._fill_id_table(self.project.id_report())
+        elif page is self.procedures:
+            self.procedures._update_users()
+
     def flush(self) -> None:
+        self._commit_id_edit()
         super().flush()
         self.procedures.flush()
+
+    def _commit_id_edit(self) -> None:
+        """Save an ID cell still being typed in (no Enter yet) now, e.g. before Undo/Redo
+        looks at the history; otherwise it is saved later, when the page is hidden."""
+        t = self.id_table
+        if t.state() != QAbstractItemView.State.EditingState:
+            return
+        row, col = t.currentRow(), t.currentColumn()
+        # Moving the current cell makes Qt commit and close the open editor.
+        t.setCurrentIndex(t.model().index(-1, -1))
+        if 0 <= row < t.rowCount() and 0 <= col < t.columnCount():   # (saving may drop a row)
+            t.setCurrentCell(row, col)
 
     # ------------------------------------------------------------------ ID table
 
@@ -150,7 +176,9 @@ class DataSectionPanel(SectionPanel):
                 self.project.set_id_table(self.section.id, values)
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not save", str(e))
-        self.refresh()
+        self._fill_id_table(self.project.id_report())
+        if self.tabs.currentWidget() is not self.id_page:
+            self._show_tab()   # (a cell committed just after switching to another tab)
         self.ids_changed.emit()
         self.saved.emit("Saved")
 

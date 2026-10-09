@@ -461,6 +461,8 @@ def test_about_mentions_licence_and_github():
     text = about_text()
     assert __version__ in text and "GNU General Public License" in text
     assert updates.REPO_URL in text
+    # (why the cryptography package is bundled, said plainly: SPEC §13s)
+    assert "cryptography" in text and "nothing is encrypted" in text
 
 
 # ---------------------------------------------------------------------- project format guard

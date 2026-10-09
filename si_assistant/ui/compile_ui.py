@@ -2,17 +2,19 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QUrl, Signal
+from PySide6.QtCore import (QCoreApplication, QEvent, QEventLoop, QObject, QThread, Qt, QUrl,
+                            Signal)
 from PySide6.QtGui import QDesktopServices, QGuiApplication
 from PySide6.QtPdf import QPdfDocument
 from PySide6.QtPdfWidgets import QPdfView
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton,
-                               QRadioButton, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QFormLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
+                               QPushButton, QRadioButton, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
-from ..compile.document import CompileOptions
+from ..compile.document import CompileOptions, build
 from ..compile.qt_images import content_box, convert_to_png, image_info
-from ..compile.run import CompileError, CompileResult, compile_pdf
+from ..compile.run import CompileError, CompileResult, partial_pdf, place_pdf, typeset_pdf
 from ..core import front
 from ..core import ms_reports
 from ..core.project import SPECTRA_SECTION, Project
@@ -210,13 +212,80 @@ class CompileDialog(QDialog):
             self.project.save_settings()
 
 
+class _TypstJob(QThread):
+    """Runs `work()` (Typst making the PDF) away from the window, keeping its result or
+    the error it raised."""
+
+    def __init__(self, work):
+        super().__init__()
+        self.work = work
+        self.result = None
+        self.error: BaseException | None = None
+
+    def run(self) -> None:  # noqa: D401 — QThread
+        try:
+            self.result = self.work()
+        except BaseException as e:  # noqa: BLE001 — handed back to the window's thread
+            self.error = e
+
+
+class _HoldClose(QObject):
+    """While a compile finishes, the main window is not closed (its project would be
+    closed under it): the close is ignored; the user can close it once it is done."""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() == QEvent.Type.Close and isinstance(obj, QMainWindow):
+            event.ignore()
+            return True
+        return False
+
+
+def in_background(work):
+    """`work()` run in a worker thread while the window keeps drawing itself (so Windows
+    doesn't call it "Not responding" during a long compile); clicks and key presses wait
+    until it is done, as they did before. Returns its result or raises its error."""
+    job = _TypstJob(work)
+    loop = QEventLoop()
+    job.finished.connect(loop.quit)
+    hold = _HoldClose()
+    app = QCoreApplication.instance()
+    app.installEventFilter(hold)
+    try:
+        job.start()
+        loop.exec(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        job.wait()   # (also when the loop ended early, e.g. the program is quitting)
+    finally:
+        app.removeEventFilter(hold)
+    if job.error is not None:
+        raise job.error
+    return job.result
+
+
 def run_compile(parent: QWidget, project: Project, options: CompileOptions,
                 name: str = "SI") -> CompileResult | None:
-    """Compile with a busy cursor; problems are shown to the user, never raised."""
+    """Compile with a busy cursor; problems are shown to the user, never raised. The
+    document is built here (it reads the project and uses Qt for pictures); Typst then
+    makes the PDF in a worker thread, and it is put in place back here (compile.run.
+    compile_pdf does all three in one go)."""
+    if project.read_only:   # (a second safety net: the menu commands check this first)
+        QMessageBox.warning(parent, "Could not compile", "This project is open read-only, so "
+                            "the SI cannot be compiled into its build folder.")
+        return None
     QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
-        return compile_pdf(project, options, image_info, convert_to_png, name=name,
-                           crop=content_box)
+        built = build(project, options, image_info, convert_to_png, name=name,
+                      crop=content_box)
+        warnings = in_background(lambda: typeset_pdf(built.typ_path, project.folder, name,
+                                                     list(built.warnings)))
+        if project.read_only:
+            # (the window lost the right to write while Typst worked: e.g. the project was
+            # taken over on another computer; the lock check runs during the compile)
+            partial_pdf(built.typ_path, name).unlink(missing_ok=True)
+            QMessageBox.warning(parent, "Could not compile", "The project became read-only "
+                                "while the SI was being compiled, so the new PDF was not "
+                                "saved.")
+            return None
+        return place_pdf(built.typ_path, name, warnings)
     except CompileError as e:
         QMessageBox.warning(parent, "Could not compile", str(e))
     except OSError as e:

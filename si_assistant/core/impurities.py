@@ -11,6 +11,8 @@ exactly one of these shifts is suspicious), and only ¹³C peaks that are distin
 
 from __future__ import annotations
 
+import functools
+
 # solvent -> [(shift, what)]: ¹H singlets
 PROTON_SINGLETS: dict[str, list[tuple[float, str]]] = {
     "CDCl3": [(7.26, "residual CHCl₃"), (1.56, "water"), (2.17, "acetone"),
@@ -88,9 +90,11 @@ def default_table() -> list[dict]:
 
 def project_table(settings: dict) -> list[dict]:
     """The project's own table if it has been edited (Project settings → NMR impurities),
-    otherwise the built-in one."""
+    otherwise the built-in one. A hand-edited row that is not a {…} row is left out."""
     table = settings.get("impurity_table")
-    return table if isinstance(table, list) else default_table()
+    if not isinstance(table, list):
+        return default_table()
+    return [row for row in table if isinstance(row, dict)]
 
 
 def _number(value) -> float | None:
@@ -142,9 +146,14 @@ def upgrade_settings(settings: dict) -> None:
     set_tolerances(settings, proton, carbon)
 
 
+@functools.lru_cache(maxsize=1024)
 def normalise_solvent(text: str) -> str:
     """"cdcl3", "Chloroform-d", "MeOD" → "CDCl3", "CD3OD", so typed solvents match the
-    parsed ones."""
+    parsed ones.
+
+    Remembered per text (the check asks for every table row and every peak): the answer
+    depends only on the text and the fixed list of solvent names (solvents.ALIASES), so it
+    can never be out of date; an edited table row is simply another text."""
     from .solvents import canonical
     return canonical(text)
 

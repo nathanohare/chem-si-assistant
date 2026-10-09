@@ -1,0 +1,9 @@
+# Simulated HRMS (ESI+) peak list of sample 2d for the Chem SI Assistant example project (invented, not a measurement)
+Peak,m/z,Intensity
+1,157.04187,18300
+2,179.02329,12500000
+3,180.02664,1081573
+4,181.02034,3995117
+5,182.02369,345681
+6,194.99715,9100
+7,413.26623,6400

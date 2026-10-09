@@ -163,20 +163,31 @@ class ReferencesWidget(QWidget):
 
     def _fill(self, select: str | None = None) -> None:
         uses = links.citation_uses(self.project)
-        self.table.setRowCount(len(self.project.references))
-        for row, r in enumerate(self.project.references):
-            where = uses.get(r["id"], [])
-            journal = " ".join(x for x in (r.get("journal", ""), r.get("year", "")) if x)
-            cells = [refs.short_label(r), journal, r.get("title", ""),
-                     f"{len(where)} place{'s' if len(where) != 1 else ''}" if where else "not cited"]
-            for col, text in enumerate(cells):
-                item = QTableWidgetItem(text)
-                item.setData(Qt.ItemDataRole.UserRole, r["id"])
-                if col == 3 and where:
-                    item.setToolTip("\n".join(where))
-                self.table.setItem(row, col, item)
-            if r["id"] == select:
-                self.table.selectRow(row)
+        header = self.table.horizontalHeader()
+        # Measuring the auto-sized columns after every cell made a refill slow (seconds
+        # with a few hundred references): they are measured once, after the fill.
+        modes = [header.sectionResizeMode(c) for c in range(header.count())]
+        for c in range(header.count()):
+            header.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+        try:
+            self.table.setRowCount(len(self.project.references))
+            for row, r in enumerate(self.project.references):
+                where = uses.get(r["id"], [])
+                journal = " ".join(x for x in (r.get("journal", ""), r.get("year", "")) if x)
+                cells = [refs.short_label(r), journal, r.get("title", ""),
+                         f"{len(where)} place{'s' if len(where) != 1 else ''}" if where
+                         else "not cited"]
+                for col, text in enumerate(cells):
+                    item = QTableWidgetItem(text)
+                    item.setData(Qt.ItemDataRole.UserRole, r["id"])
+                    if col == 3 and where:
+                        item.setToolTip("\n".join(where))
+                    self.table.setItem(row, col, item)
+                if r["id"] == select:
+                    self.table.selectRow(row)
+        finally:
+            for c, mode in enumerate(modes):
+                header.setSectionResizeMode(c, mode)
 
     def _current(self) -> dict | None:
         row = self.table.currentRow()
@@ -185,11 +196,31 @@ class ReferencesWidget(QWidget):
         return self.project.reference(self.table.item(row, 0).data(Qt.ItemDataRole.UserRole))
 
     def _save(self, func, *args):
+        """func(*args), or None if it could not be saved (the user is told why). A func
+        that returns nothing gives True when it worked."""
         try:
-            return func(*args)
+            result = func(*args)
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not save", str(e))
             return None
+        return True if result is None else result
+
+    def _add_all(self, new: list[dict]) -> list[dict]:
+        """Add several references with one save of references.json (an import)."""
+        self.project.references = self.project.references + new
+        self.project.save_references()
+        return new
+
+    def _change(self, func, *args):
+        """func(*args), a change to the reference list. If it cannot be saved, the list is
+        put back as it was (and the error raised), so the change is neither shown nor
+        written by a later save of the list."""
+        before = list(self.project.references)
+        try:
+            return func(*args)
+        except BaseException:
+            self.project.references = before
+            raise
 
     def _add(self, ref: dict) -> None:
         existing = refs.find_duplicate(self.project.references, ref)
@@ -200,7 +231,7 @@ class ReferencesWidget(QWidget):
             self._fill(existing["id"])
             return
         with self._step(f"Add reference {refs.short_label(ref)}"):
-            added = self._save(self.project.add_reference, ref)
+            added = self._save(self._change, self.project.add_reference, ref)
         if added:
             self._fill(added["id"])
             self.changed.emit("Reference added")
@@ -240,13 +271,14 @@ class ReferencesWidget(QWidget):
             QMessageBox.warning(self, "Could not read the file", str(e))
             return
         found = refs.parse_file_text(text)
-        added = skipped = 0
-        with self._step(f"Import references from {Path(path).name}"):
-            for ref in found:
-                if refs.find_duplicate(self.project.references, ref) is not None:
-                    skipped += 1
-                elif self._save(self.project.add_reference, ref):
-                    added += 1
+        new = refs.new_references(self.project.references, found)
+        if new:
+            with self._step(f"Import references from {Path(path).name}"):
+                saved = self._save(self._change, self._add_all, new)
+            if saved is None:   # (could not be saved: the warning was shown, nothing added)
+                self._fill()
+                return
+        added, skipped = len(new), len(found) - len(new)
         self._fill()
         if added:
             self.changed.emit(f"Imported {added} reference(s)")
@@ -261,9 +293,10 @@ class ReferencesWidget(QWidget):
         dlg = ReferenceEditDialog(ref, self, "Edit reference")
         if dlg.exec():
             with self._step(f"Edit reference {refs.short_label(ref)}"):
-                self._save(self.project.update_reference, dlg.value())
+                ok = self._save(self._change, self.project.update_reference, dlg.value())
             self._fill(ref["id"])
-            self.changed.emit("Reference saved")
+            if ok:
+                self.changed.emit("Reference saved")
 
     def _delete(self) -> None:
         ref = self._current()
@@ -278,9 +311,10 @@ class ReferencesWidget(QWidget):
                                 f"Delete {refs.short_label(ref)}?{extra}"
                                 ) == QMessageBox.StandardButton.Yes:
             with self._step(f"Delete reference {refs.short_label(ref)}"):
-                self._save(self.project.delete_reference, ref["id"])
+                ok = self._save(self._change, self.project.delete_reference, ref["id"])
             self._fill()
-            self.changed.emit("Reference deleted")
+            if ok:
+                self.changed.emit("Reference deleted")
 
 
 class ReferencesDialog(QDialog):

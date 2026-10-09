@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+import shutil
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog,
                                QDialogButtonBox, QDoubleSpinBox, QFormLayout, QGridLayout,
@@ -10,6 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from ..core import fields as F
+from ..core import ms_reports
 from ..core.compound_ids import LETTERS, NUMBERS, pattern_ids
 from ..core.ids import new_id
 from ..core.lock import LockInfo
@@ -126,13 +130,24 @@ class ProjectSettingsDialog(QDialog):
         oform = QFormLayout(output)
         self.style_box = QComboBox()
         self.style_box.addItems(JOURNAL_STYLES)
-        self.style_box.setCurrentText(s.get("journal_style", "ACS"))
+        style = s.get("journal_style", "ACS")   # (a hand-edited project.json may hold anything)
+        if not isinstance(style, str):
+            style = "ACS"
+            s = {**s, "journal_style": style}   # (what the tabs below are filled from)
+        self.style_box.setCurrentText(style)
         oform.addRow("Journal style:", self.style_box)
         self.tolerance = QDoubleSpinBox()
-        self.tolerance.setRange(0.1, 100.0)
-        self.tolerance.setDecimals(1)
+        self.tolerance.setRange(0.01, 1000.0)
+        self.tolerance.setDecimals(2)
         self.tolerance.setSuffix(" ppm")
-        self.tolerance.setValue(float(s.get("hrms_tolerance_ppm", 5.0)))
+        try:
+            tolerance = ms_reports.tolerance(project)
+        except OverflowError:   # a hand-edited whole number too big for a float
+            tolerance = 5.0
+        self.tolerance.setValue(tolerance if math.isfinite(tolerance) else 5.0)
+        # (a value set by hand outside this range or with more decimals is kept unless
+        # the box is changed: see apply)
+        self._tolerance_shown = self.tolerance.value()
         oform.addRow("HRMS tolerance:", self.tolerance)
         spectra_note = QLabel("Spectra per page, the structure's position on them and the rest "
                               "of the spectra layout are set on the Spectra section's page in "
@@ -304,7 +319,8 @@ class ProjectSettingsDialog(QDialog):
         """Copy the dialog's values into the project and save."""
         s = self.project.settings
         s["journal_style"] = self.style_box.currentText()
-        s["hrms_tolerance_ppm"] = self.tolerance.value()
+        if self.tolerance.value() != self._tolerance_shown:
+            s["hrms_tolerance_ppm"] = self.tolerance.value()
         s["auto_nmr_31P"] = self.auto_31p.isChecked()
         s["auto_nmr_11B"] = self.auto_11b.isChecked()
         s["paste_dpi"] = self.paste_dpi.currentData()
@@ -802,6 +818,8 @@ class ImpurityTableEditor(QWidget):
         t.blockSignals(True)
         t.setRowCount(0)
         for r in rows:
+            if not isinstance(r, dict):   # (hand-edited project.json: not a row)
+                continue
             self.table.add_row([r.get("on", True), r.get("solvent", ""), r.get("nucleus", ""),
                                 f"{float(r['shift']):g}" if _is_number(r.get("shift")) else
                                 str(r.get("shift", "")), r.get("what", "")])
@@ -866,6 +884,11 @@ def _is_number(value) -> bool:
         return False
 
 
+def _as_text(value) -> str:
+    """A Trash description value as text (descriptions can be hand-edited)."""
+    return value if isinstance(value, str) else ("" if value is None else str(value))
+
+
 class TrashDialog(QDialog):
     def __init__(self, project: Project, parent: QWidget | None = None):
         super().__init__(parent)
@@ -911,37 +934,90 @@ class TrashDialog(QDialog):
         self.entries = self.project.list_trash()
         self.table.setRowCount(len(self.entries))
         for row, e in enumerate(self.entries):
-            subs = int(e.info.get("subsections", 0) or 0)
-            kind = {
-                "section": "Section" + (f" (with {subs} sub-section{'s' if subs > 1 else ''})"
-                                        if subs else ""),
-                "file": f"File (from “{e.info.get('section_name', '?')}”)",
-                "compound": f"Compound (from “{e.info.get('section_name', '?')}”)",
-                "compound_file": f"File (from compound “{e.info.get('compound_name') or 'unnamed'}”)",
-                "scheme": f"Scheme page (from “{e.info.get('section_name', '?')}”)",
-                "scheme_file": f"Scheme picture (from “{e.info.get('scheme_name', '?')}”)",
-                "gp": f"General procedure (from “{e.info.get('section_name', '?')}”)",
-                "manuscript_file": "Manuscript check file",
-                "incomplete": "Unfinished deletion (no description)",
-            }.get(e.kind, e.kind)
-            for col, text in enumerate([e.name, kind, e.deleted_at.replace("T", " "), e.deleted_by]):
+            try:   # (a hand-edited description must not hide the other items)
+                texts = self._row_texts(e)
+            except Exception:  # noqa: BLE001
+                texts = [e.id, "(damaged description)", "", ""]
+            for col, value in enumerate(texts):
+                text = _as_text(value)
                 cell = QTableWidgetItem(text)
                 cell.setToolTip(text)   # (the full text, if a column is ever too narrow)
                 self.table.setItem(row, col, cell)
+
+    @staticmethod
+    def _row_texts(e) -> list:
+        try:
+            subs = int(e.info.get("subsections", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            subs = 0
+        kind = {
+            "section": "Section" + (f" (with {subs} sub-section{'s' if subs > 1 else ''})"
+                                    if subs else ""),
+            "file": f"File (from “{e.info.get('section_name', '?')}”)",
+            "compound": f"Compound (from “{e.info.get('section_name', '?')}”)",
+            "compound_file": f"File (from compound “{e.info.get('compound_name') or 'unnamed'}”)",
+            "scheme": f"Scheme page (from “{e.info.get('section_name', '?')}”)",
+            "scheme_file": f"Scheme picture (from “{e.info.get('scheme_name', '?')}”)",
+            "scheme_box": f"Structure (from scheme “{e.info.get('scheme_name', '?')}”)",
+            "gp": f"General procedure (from “{e.info.get('section_name', '?')}”)",
+            "figure": f"Figure (from “{e.info.get('owner_name', '?')}”)",
+            "table": f"Table (from “{e.info.get('owner_name', '?')}”)",
+            "manuscript_file": "Manuscript check file",
+            # (newer files kept after an unfinished undo say where each came from)
+            "incomplete": ("Files kept after an unfinished undo"
+                           if isinstance(e.info.get("files"), dict) and e.info["files"]
+                           else "Unfinished deletion (no description)"),
+        }.get(e.kind, e.kind) if isinstance(e.kind, str) else e.kind
+        return [e.name, kind, _as_text(e.deleted_at).replace("T", " "), e.deleted_by]
 
     def _restore(self) -> None:
         row = self.table.currentRow()
         if row < 0:
             return
         entry = self.entries[row]
+        item = entry.info.get("item")   # (the description can be hand-edited)
+        if not isinstance(item, str) or (not item and entry.kind != "incomplete"):
+            QMessageBox.warning(self, "Could not restore",
+                                "This item's description in the Trash is damaged, so it "
+                                "cannot be put back automatically.")
+            return
+        step = None
         try:
-            with self.project.undo_step(f"Restore “{entry.name}” from the Trash"):
+            with self.project.undo_step(f"Restore “{entry.name}” from the Trash") as step:
                 message = self.project.restore_from_trash(entry.id)
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not restore", str(e) + self._take_back(step))
+        except Exception:
+            # Unexpected (a fault in the program, or a value in the description edited by
+            # hand): put back what was done, then let the error report show it as usual.
+            self._take_back(step)
+            raise
+        else:
             self.restored_any = True
             QMessageBox.information(self, "Restored", message)
+        finally:
+            self._fill()
+
+    def _take_back(self, step) -> str:
+        """After a restore that stopped part-way: undo what it had already done (e.g. a
+        folder moved out of the Trash), so the project and the Trash are as they were.
+        Returns a note for the user ("" if it had done nothing)."""
+        journal = self.project.journal
+        if step is None or journal is None or not journal.undo_stack \
+                or journal.undo_stack[-1] is not step:
+            return ""   # (nothing was changed, or there is no undo history to use)
+        try:
+            redo = self.project.undo()
         except (ProjectError, OSError) as e:
-            QMessageBox.warning(self, "Could not restore", str(e))
-        self._fill()
+            return ("\n\nIt may have been put back only in part, and this could not be "
+                    f"undone automatically:\n{e}")
+        # The half-finished restore must not be offered by Edit ▸ Redo: redoing it would
+        # bring the item back but leave an empty entry in the Trash.
+        if journal.redo_stack and journal.redo_stack[-1] is redo:
+            journal.redo_stack.pop()
+            shutil.rmtree(redo.folder, ignore_errors=True)
+            journal._notify()   # (the Edit menu updates its Redo item)
+        return "\n\nWhat had already been put back was taken out again: nothing was changed."
 
     def _empty(self) -> None:
         if not self.entries:
@@ -949,7 +1025,9 @@ class TrashDialog(QDialog):
         if QMessageBox.warning(
                 self, "Empty Trash",
                 f"Permanently delete the {len(self.entries)} item(s) in the Trash?\n"
-                + ("Until the project is closed, Edit ▸ Undo can still bring them back."
+                + (f"Edit ▸ Undo can still bring them back, but only while this is one of "
+                   f"the last {self.project.journal.max_steps} changes, and only until the "
+                   "project is closed."
                    if self.project.journal is not None else "This cannot be undone."),
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel) == QMessageBox.StandardButton.Yes:

@@ -48,7 +48,7 @@ import zipfile
 import zlib
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 import xml.etree.ElementTree as ET
 
@@ -93,6 +93,7 @@ class ReportData:
     readable: bool = True                       # False: nothing can be read from it
     profile: bool = False                       # profile data, centroided here
     scans: int = 0                              # spectra read (data formats)
+    transient: bool = False                     # couldn't be opened just now: not remembered
 
     @property
     def count(self) -> int:
@@ -202,29 +203,55 @@ def _is_text_file(path: Path) -> bool:
 
 # ---------------------------------------------------------------------- reading (cached)
 
-_CACHE: "OrderedDict[tuple, ReportData]" = OrderedDict()
-_CACHE_MAX = 64
+# Keyed on the file's path, size and modification time, so a file that changes in any way
+# (undo/redo, Trash restore, a new export, an edit synced from another computer) is read
+# again. Bounded by the number of files and by the values held (large mzML results count
+# for more), not by a small count: the warnings read every report in the same order on
+# each autosave, and a cache smaller than the project would never be hit.
+_CACHE: "OrderedDict[tuple, tuple[ReportData, int]]" = OrderedDict()
+_CACHE_MAX = 4096              # files
+_CACHE_BUDGET = 4_000_000      # values held (m/z, intensities, marked values): tens of MB
+_cache_total = 0
+
+
+def _weight(data: ReportData) -> int:
+    return data.count + len(data.measured) + len(data.calculated) + 1
+
+
+def clear_cache() -> None:
+    """Forget every report read (tests)."""
+    global _cache_total
+    _CACHE.clear()
+    _cache_total = 0
 
 
 def read_report(path: Path) -> ReportData:
     """What can be read from one report file (or folder). Never raises: a file that can't
     be read gives `readable=False` and a message saying why. Remembered until the file
-    changes."""
+    changes. A file that can't be opened just now (online-only while offline, or locked)
+    is not remembered: it is tried again next time."""
+    global _cache_total
     path = Path(path)
     try:
         st = path.stat()
         key = (str(path), st.st_size, st.st_mtime_ns, path.is_dir())
-    except OSError:
+    except (OSError, ValueError):   # ValueError: a name with a NUL character
         return ReportData(path.name, "missing", readable=False,
                           message=f"{path.name} is missing from the compound's folder.")
     hit = _CACHE.get(key)
     if hit is not None:
         _CACHE.move_to_end(key)
-        return hit
+        return hit[0]
     data = _read_uncached(path)
-    _CACHE[key] = data
-    while len(_CACHE) > _CACHE_MAX:
-        _CACHE.popitem(last=False)
+    if data.transient:
+        return data
+    weight = _weight(data)
+    _CACHE[key] = (data, weight)
+    _cache_total += weight
+    # least recently used first; the file just read is always kept
+    while len(_CACHE) > 1 and (len(_CACHE) > _CACHE_MAX or _cache_total > _CACHE_BUDGET):
+        _key, (_old, old_weight) = _CACHE.popitem(last=False)
+        _cache_total -= old_weight
     return data
 
 
@@ -253,11 +280,14 @@ def _read_uncached(path: Path) -> ReportData:
                               message=f"{name} is too large to read here "
                                       f"({size / 1e6:.0f} MB). Export a peak list or a PDF "
                                       "report of the spectrum and add that.")
-        if suffix == ".pdf":
-            data = read_pdf(path)
-        else:
-            content = path.read_bytes()
-            data = read_bytes(content, name)
+    except OSError as e:
+        return _not_opened(path, e)
+    try:
+        content = path.read_bytes()
+    except OSError as e:
+        return _not_opened(path, e)
+    try:
+        data = read_pdf(path, content) if suffix == ".pdf" else read_bytes(content, name)
     except ReportReadError as e:
         return ReportData(name, _kind_name(path), readable=False, message=str(e))
     except Exception as e:  # noqa: BLE001 — a damaged file must never stop the program
@@ -270,11 +300,20 @@ def _read_uncached(path: Path) -> ReportData:
     return data
 
 
+def _not_opened(path: Path, e: OSError) -> ReportData:
+    """A file that can't be opened just now (read_report doesn't remember it)."""
+    name = path.name
+    return ReportData(name, _kind_name(path), readable=False, transient=True,
+                      message=f"{name} could not be opened just now ({type(e).__name__}): it "
+                              "may be an online-only OneDrive file while you are offline, or "
+                              "open in another program. It will be read again next time.")
+
+
 def _kind_name(path: Path) -> str:
     suffix = path.suffix.lower()
     return {".pdf": "PDF report", ".mzml": "mzML", ".mzxml": "mzXML", ".mgf": "MGF",
-            ".xlsx": "Excel file", ".cdf": "netCDF (ANDI-MS)"}.get(suffix, suffix.lstrip(".")
-                                                                  or "file")
+            ".xlsx": "Excel file", ".cdf": "netCDF (ANDI-MS)",
+            ".zip": "zip archive"}.get(suffix, suffix.lstrip(".") or "file")
 
 
 def summary(data: ReportData) -> str:
@@ -302,8 +341,10 @@ def read_bytes(content: bytes, name: str = "") -> ReportData:
     head = content[:2048].lstrip()
     if content[:3] == b"CDF" or suffix in CDF_EXTENSIONS:
         return read_netcdf(content)
-    if content[:2] == b"PK" or suffix in XLSX_EXTENSIONS:
+    if suffix in XLSX_EXTENSIONS:       # (a damaged .xlsx still says "Excel file")
         return read_xlsx(content)
+    if content[:4] in ZIP_MAGIC:        # not just b"PK": a text may start "PKa values…"
+        return _read_zip(content, name)
     if content[:5] == b"%PDF-":
         return read_pdf_bytes(content)
     if suffix in (".mzml", ".mzxml", ".mzdata") or lower.endswith(".mzdata.xml") or \
@@ -323,6 +364,37 @@ def read_bytes(content: bytes, name: str = "") -> ReportData:
     if suffix in JCAMP_EXTENSIONS or re.match(r"\s*##TITLE=", text):
         return read_jcamp(text)
     return read_table_text(text)
+
+
+ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")   # a zip's first entry / an empty zip
+
+
+def _read_zip(content: bytes, name: str) -> ReportData:
+    """A zip not named .xlsx: an Excel workbook under another name (read), or zipped raw
+    data or another archive (kept, not read, with advice)."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            names = z.namelist()
+    except Exception:  # noqa: BLE001 — a damaged zip is simply not read
+        names = []
+    if "xl/workbook.xml" in names or any(
+            re.fullmatch(r"xl/worksheets/sheet\d+\.xml", n) for n in names):
+        return read_xlsx(content)
+    shown = name or "This file"
+    for n in names:
+        parts = [p.lower() for p in PurePosixPath(n.replace("\\", "/")).parts]
+        if parts and (any(p.endswith((".d", ".raw")) for p in parts[:-1])
+                      or parts[-1] in VENDOR_DIR_FILES or parts[-1].endswith(".wiff.scan")
+                      or PurePosixPath(parts[-1]).suffix in VENDOR_FILES):
+            return ReportData(name, "zip archive", readable=False, message=raw_data_message(
+                shown, "a zip archive of instrument raw data"))
+    if Path(name.lower()).suffix in ("", ".zip"):
+        message = (f"{shown} is a zip archive: it is kept, but not read. To fill in the "
+                   "found m/z automatically, unzip it and add the report inside (PDF, CSV "
+                   "or mzML).")
+    else:   # .ods, .numbers… (unzipping these gives no report)
+        message = f"{shown} can't be read. Save it as PDF, CSV or .xlsx and add that."
+    return ReportData(name, "zip archive", readable=False, message=message)
 
 
 def _decode(content: bytes) -> str:
@@ -563,6 +635,7 @@ def read_mzxml(content: bytes) -> ReportData:
         if tag == "scan":
             if stack:
                 stack.pop()
+            elem.clear()          # (its attributes were kept at its start)
             continue
         if tag != "peaks" or not stack:
             continue
@@ -570,6 +643,7 @@ def read_mzxml(content: bytes) -> ReportData:
         level = int(scan.get("msLevel", "1") or 1)
         levels.append(level)
         if level != 1:
+            elem.clear()
             continue
         raw = base64.b64decode((elem.text or "").strip())
         if (elem.get("compressionType") or "none").lower() == "zlib" and raw:
@@ -584,6 +658,7 @@ def read_mzxml(content: bytes) -> ReportData:
         mz, inten, was_profile = _scan_peaks(mz, inten, profile)
         scans.append((mz, inten))
         flags.append(was_profile)
+        elem.clear()
     if not scans and levels:
         raise ReportReadError("This mzXML file has no MS1 scans, so no found m/z can be read "
                               "from it.")
@@ -1200,7 +1275,8 @@ XLSX_MAX_PART_BYTES = 200 * 1024 * 1024   # a sheet's XML unpacked (a damaged or
                                           # file is not unpacked)
 
 
-def xlsx_rows(content: bytes, max_rows: int = 100000) -> list[list[list[str]]]:
+def xlsx_rows(content: bytes, max_rows: int = 100000,
+              counts: list[tuple[int, int]] | None = None) -> list[list[list[str]]]:
     """Every sheet of an .xlsx workbook as rows of cell texts (shared strings and inline
     strings resolved, numbers as written in the file). Read with zipfile, no Excel.
 
@@ -1208,7 +1284,11 @@ def xlsx_rows(content: bytes, max_rows: int = 100000) -> list[list[list[str]]]:
     used columns, in order, so a stray cell far to the right (or a damaged reference such
     as "ZZZZZZZ1", beyond Excel's last column XFD: ignored) costs one column, not millions.
     At most `max_rows` rows, XLSX_MAX_COLUMNS columns and XLSX_MAX_CELLS cells in all.
-    Raises ReportReadError (or zipfile/XML errors) for a file that can't be read."""
+    When `counts` is given, each sheet's (number of rows with cells in the file, number of
+    those up to the last one with any text) is added to it, read or not: Excel writes
+    formatted but empty cells (<c r="A5" s="1"/>) for a bordered or pre-formatted range,
+    and those rows print as blank lines. Raises ReportReadError (or zipfile/XML errors)
+    for a file that can't be read."""
     with zipfile.ZipFile(io.BytesIO(content)) as z:
         names = z.namelist()
 
@@ -1230,7 +1310,12 @@ def xlsx_rows(content: bytes, max_rows: int = 100000) -> list[list[list[str]]]:
         for name in sheets:
             sparse: list[dict[int, str]] = []
             cells_read = 0
-            for row in ET.fromstring(part(name)).iter(f"{_XLSX_NS}row"):
+            n_rows = last = 0     # rows with cells; … up to the last one with text
+            sheet = ET.fromstring(part(name))
+            for row in sheet.iter(f"{_XLSX_NS}row"):
+                full = len(sparse) >= max_rows or cells_read >= budget
+                if full and counts is None:
+                    break
                 cells: dict[int, str] = {}
                 for c in row.iter(f"{_XLSX_NS}c"):
                     ref = c.get("r", "")
@@ -1246,20 +1331,25 @@ def xlsx_rows(content: bytes, max_rows: int = 100000) -> list[list[list[str]]]:
                         text = "".join(x.text or "" for x in c.iter(f"{_XLSX_NS}t"))
                     else:
                         text = v.text if v is not None and v.text else ""
-                        if t not in ("str", "b", "e") and text:
+                        if t not in ("str", "b", "e") and text and not full:
                             text = _excel_number(text)
                     cells[col] = text
-                if cells:
+                if not cells:
+                    continue
+                n_rows += 1
+                if any(text.strip() for text in cells.values()):
+                    last = n_rows
+                if not full:
                     sparse.append(cells)
                     cells_read += len(cells)
-                if len(sparse) >= max_rows or cells_read >= budget:
-                    break
             used = sorted({col for cells in sparse for col in cells})[:XLSX_MAX_COLUMNS]
             if used:
                 sparse = sparse[:max(1, budget // len(used))]
             rows = [[cells.get(col, "") for col in used] for cells in sparse]
             budget = max(0, budget - len(rows) * len(used))
             out.append(rows)
+            if counts is not None:
+                counts.append((n_rows, last))
         return out
 
 
@@ -1338,9 +1428,10 @@ def _pdf_result(text: str) -> ReportData:
     return parse_report_text(text, "PDF report")
 
 
-def read_pdf(path: Path) -> ReportData:
+def read_pdf(path: Path, content: bytes | None = None) -> ReportData:
+    """A PDF report; `content`: its bytes, already read (named as `path` in messages)."""
     try:
-        text = pdf_text(path)
+        text = pdf_text(content if content is not None else path)
     except Exception as e:  # noqa: BLE001
         raise ReportReadError(f"{Path(path).name} could not be opened as a PDF (it may be "
                               "damaged).") from e
@@ -1387,9 +1478,22 @@ def format_mz(mz: float) -> str:
 
 
 def report_items(compound) -> list[dict]:
+    """The compound's report entries. An entry whose file name was edited by hand into
+    something that isn't a plain name inside hrms/ ("../structure.mol", a number…) is left
+    out (and left as it is in compound.json)."""
     value = compound.values.get("hrms")
     items = value.get(REPORTS_KEY) if isinstance(value, dict) else None
-    return [i for i in items or [] if isinstance(i, dict) and i.get("file")]
+    if not isinstance(items, list):   # (a number or text typed in place of the list)
+        return []
+    return [i for i in items if isinstance(i, dict) and safe_report_name(i.get("file"))]
+
+
+def safe_report_name(name) -> bool:
+    """A report's file name that stays inside the compound's hrms/ folder: no folders, no
+    drive, not "." or ".." (on Windows "..." is the folder itself, too)."""
+    return (isinstance(name, str) and bool(name.strip(" ."))
+            and "/" not in name and "\\" not in name and "\x00" not in name
+            and Path(name).name == name)
 
 
 def report_path(compound, name: str) -> Path:
@@ -1403,11 +1507,13 @@ def compound_reports(project, compound) -> list[ReportData]:
 
 def expected_peaks(project, compound, value: dict | None = None):
     """The calculated isotope peaks of the compound's chosen ion (checks.hrms_calc), or
-    None when there is no structure/formula or the adduct can't be used."""
+    None when there is no structure/formula or the adduct can't be used. Raises OSError
+    when structure.mol can't be read just now (offline, or locked): that is not "no
+    structure"."""
     from . import chem, checks
     value = value if value is not None else (compound.values.get("hrms") or {})
     try:
-        sp = checks.hrms_species(project.read_structure(compound), value)
+        sp = checks.hrms_species(project.read_structure(compound, strict=True), value)
         if sp is None:
             return None
         return checks.hrms_calc(sp.info, str(value.get("adduct", "") or ""), "",
@@ -1417,20 +1523,38 @@ def expected_peaks(project, compound, value: dict | None = None):
 
 
 def tolerance(project) -> float:
+    """The HRMS tolerance in ppm (5 unless the project says otherwise). A hand-edited
+    value that isn't a positive number ("nan" would turn the check off, a negative one
+    would fail every compound) gives 5."""
     try:
-        return float(project.settings.get("hrms_tolerance_ppm", 5.0))
-    except (TypeError, ValueError):
+        value = float(project.settings.get("hrms_tolerance_ppm", 5.0))
+    except (TypeError, ValueError, OverflowError):   # (OverflowError: a huge whole number)
         return 5.0
+    return value if math.isfinite(value) and value > 0 else 5.0
 
 
 def compound_match(project, compound, value: dict | None = None) -> Match | None:
-    """The report value for the compound's Found box (see choose_match), or None."""
+    """The report value for the compound's Found box (see choose_match), or None (also
+    when the structure can't be read just now)."""
+    try:
+        return _compound_match(project, compound, value)
+    except OSError:
+        return None
+
+
+def _compound_match(project, compound, value: dict | None = None) -> Match | None:
+    """compound_match, raising OSError when structure.mol or a report can't be read just
+    now (the answer might be different once it can)."""
     if not report_items(compound):
         return None
     peaks = expected_peaks(project, compound, value)
     if not peaks:
         return None
-    return choose_match(compound_reports(project, compound), peaks, tolerance(project))
+    reports = compound_reports(project, compound)
+    for report in reports:
+        if report.transient:
+            raise OSError(report.message)
+    return choose_match(reports, peaks, tolerance(project))
 
 
 def found_is_from_report(value: dict) -> bool:
@@ -1449,7 +1573,8 @@ def update_found(project, compound, value: dict | None = None) -> str:
     """Fill the Found box from the reports (in `value`, default the compound's HRMS value;
     nothing is saved): when it is empty or still holds the value filled from a report
     before. A value the user typed is never changed (its "found_from" is dropped).
-    Returns "filled", "cleared" (the report value no longer fits) or ""."""
+    Returns "filled", "cleared" (the report value no longer fits) or "". Nothing changes
+    while structure.mol can't be read just now (offline, or locked)."""
     if value is None:
         value = compound.values.get("hrms")
         if not isinstance(value, dict):
@@ -1460,7 +1585,10 @@ def update_found(project, compound, value: dict | None = None) -> str:
         value.pop(FOUND_FROM_KEY, None)
         if found:
             return ""
-    match = compound_match(project, compound, value)
+    try:
+        match = _compound_match(project, compound, value)
+    except OSError:
+        return ""
     if match is None:
         if from_report:
             value["found"] = ""
@@ -1551,24 +1679,54 @@ def listing_failed(lines: list[str]) -> bool:
 
 def _listing_lines(path: Path, max_lines: int, width: int) -> tuple[list[str], int]:
     if path.suffix.lower() in XLSX_EXTENSIONS:
-        sheets = xlsx_rows(path.read_bytes(), max_rows=max_lines + 1000)
+        counts: list[tuple[int, int]] = []
+        sheets = xlsx_rows(path.read_bytes(), max_rows=max_lines + 1000, counts=counts)
         rows = [r for s in sheets for r in s + [[]]]
-        lines = _aligned(rows)
+        if all(len(s) == n for s, (n, _last) in zip(sheets, counts)):   # all read
+            lines = _trimmed(_aligned(rows))
+            total = len(lines)
+        else:
+            # every sheet's rows and a blank line after each, without the blank lines at
+            # the very end: up to the last row with text of the last sheet with any
+            total = start = 0
+            for n, last in counts:
+                if last:
+                    total = start + last
+                start += n + 1
+            lines = _aligned(rows)[:total]   # (blank rows just before the cut are kept)
     else:
         if path.stat().st_size > MAX_FILE_BYTES:
             raise ReportReadError("too large")
         text = _decode(path.read_bytes())
         raw = text.splitlines()
         if path.suffix.lower() in (".csv", ".tsv", ".tab"):
-            rows, _comma, _delimited = _split_rows(text)
-            lines = _aligned(rows)
+            body = [ln for ln in raw if ln.strip()]      # the lines _split_rows keeps
+            head = max(max_lines, 2000)                  # (_aligned sizes columns from 2000)
+            if len(body) > head and body[-1].replace(",", "").replace(";", "").strip():
+                # the last row prints as a non-blank line whatever the delimiter, so none
+                # is dropped at the end: only the rows that can be printed are aligned
+                rows, _comma, _delimited = _split_rows("\n".join(body[:head]))
+                lines = _aligned(rows)
+                total = len(body)
+            else:
+                rows, _comma, _delimited = _split_rows(text)
+                lines = _trimmed(_aligned(rows))
+                total = len(lines)
         else:
-            lines = [ln.expandtabs(8).rstrip() for ln in raw]
-    while lines and not lines[-1].strip():
-        lines.pop()
-    left = max(0, len(lines) - max_lines)
+            total = len(raw)
+            while total and not raw[total - 1].strip():
+                total -= 1
+            lines = [ln.expandtabs(8).rstrip() for ln in raw[:min(total, max_lines)]]
+    left = max(0, total - max_lines)
     lines = [ln if len(ln) <= width else ln[:width - 1] + "…" for ln in lines[:max_lines]]
     return lines, left
+
+
+def _trimmed(lines: list[str]) -> list[str]:
+    """`lines` without the blank lines at the end."""
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return lines
 
 
 def _aligned(rows: list[list[str]], cell_max: int = 18) -> list[str]:

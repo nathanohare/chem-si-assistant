@@ -180,6 +180,27 @@ def download_folder(key: str | None) -> Path:
     return folder
 
 
+def remove_old_installers(folder: Path, keep: Path) -> None:
+    """Windows only (never the macOS/Linux Downloads folder): delete earlier installers and
+    .part files of interrupted downloads from the program's own temporary update folder.
+    An installer that is still running is locked and is skipped; this never stops the
+    download."""
+    pattern = updates.ASSET_PATTERNS["windows"] + "*"   # the .exe and its .exe.part
+    skip = {keep.name, keep.name + ".part"}
+    try:
+        old = list(folder.glob(pattern))
+    except OSError:
+        return
+    for p in old:
+        if p.name in skip:
+            continue
+        try:
+            if p.is_file() and not p.is_symlink():
+                p.unlink()
+        except OSError:
+            pass
+
+
 def reveal(path: Path) -> None:
     """Show a file in Finder / its folder in the file manager."""
     if sys.platform == "darwin":
@@ -212,7 +233,10 @@ class Updater:
             # No installer for this computer in the release: show the release page.
             self.open_url(self.info.page_url)
             return
-        dest = download_folder(self.key) / self.asset.name
+        folder = download_folder(self.key)
+        dest = folder / self.asset.name
+        if self.key == "windows":
+            remove_old_installers(folder, keep=dest)
         self.download = _Download(self.asset, dest)
         dlg = QProgressDialog(f"Downloading {self.asset.name}…", "Cancel", 0, 100, self.window)
         dlg.setWindowTitle("Downloading the update")
@@ -243,11 +267,14 @@ class Updater:
 
     def _finished(self, result) -> None:
         self.result = result
+        # Read the user's choice before closing: closing a QProgressDialog emits `canceled`,
+        # which would otherwise mark every finished download as cancelled.
+        user_cancelled = self.download is not None and self.download.cancelled
         if self.progress_dialog is not None:
             self.progress_dialog.close()
             self.progress_dialog = None
         if isinstance(result, Exception):
-            if self.download is not None and self.download.cancelled:
+            if user_cancelled:
                 return
             box = QMessageBox(QMessageBox.Icon.Warning, "Update not downloaded",
                               f"{result}\n\nYou can download the new version from the "
@@ -257,6 +284,11 @@ class Updater:
             box.exec()
             if box.clickedButton() is page:
                 self.open_url(self.info.page_url)
+            return
+        if user_cancelled:
+            # Cancel clicked just as the last part arrived: do as the user asked, never
+            # close the project and start the installer. (The file is left where it is;
+            # on Windows the next download removes it.)
             return
         self.hand_over(Path(result))
 

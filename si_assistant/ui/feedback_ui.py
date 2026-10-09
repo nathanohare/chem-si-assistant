@@ -220,8 +220,13 @@ def about_text() -> str:
             "<br><br>The spelling check uses the Open Source Chemistry Dictionary v3.0 by "
             "Adam M. Azman (<i>J. Chem. Educ.</i> 2012, 89, 412), under the Creative Commons "
             "Attribution 3.0 United States licence. Structures are read and drawn with RDKit "
-            "(BSD-3-Clause); the interface uses Qt (LGPL-3.0) through PySide6. See "
-            "THIRD_PARTY_NOTICES.md for all components.")
+            "(BSD-3-Clause); the interface uses Qt (LGPL-3.0) through PySide6."
+            "<br><br>Why a <i>cryptography</i> package is included: many NMR and mass-spectrometry "
+            "programs save their PDF reports with edit restrictions, and the free cryptography "
+            "package (Apache-2.0 / BSD-3-Clause) is what lets the program open and read such "
+            "PDFs. That is all it is used for: nothing is encrypted, no passwords or keys are "
+            "kept, and nothing is sent anywhere."
+            "<br><br>See THIRD_PARTY_NOTICES.md for all components.")
 
 
 def show_about(parent: QWidget | None) -> None:

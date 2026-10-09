@@ -4,7 +4,9 @@
 
 Checks that everything the program needs came with it — journal styles, word lists and
 dictionaries, icons, the user guide and licences, RDKit (structures and drawings), Typst,
-Qt's SVG and PDF parts (and that Qt WebEngine, no longer used, was left out) — and, given
+Qt's SVG and PDF parts (and that Qt WebEngine, no longer used, was left out), reading a PDF
+saved with edit restrictions (the 'cryptography' package, see `_pdf`), the example project
+(it is there and opens, see `_example`) — and, given
 a project folder, compiles that project's SI (to its build/ folder, as Compile SI does). The results are written as
 JSON to REPORT.json (a packaged Windows program has no console to print to); the exit
 code is 0 when every check passed. Used by the release workflow and when building the
@@ -108,6 +110,61 @@ def _typst() -> str:
     return f"PDF {len(pdf):,} bytes"
 
 
+def edit_restricted_pdf(text: str, user_password: str = "") -> bytes:
+    """A small two-page PDF with `text` on its first page, saved the way much NMR and
+    mass-spectrometry software saves its reports: AES-256 encrypted with an empty opening
+    password (anyone can open and read it; only editing is restricted). A non-empty
+    `user_password` makes a truly password-protected PDF instead. Used by the self-test
+    and the tests."""
+    import io
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+    writer = PdfWriter()
+    page = writer.add_blank_page(300, 100)
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"),
+                             NameObject("/Subtype"): NameObject("/Type1"),
+                             NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject(
+        {NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
+    content = DecodedStreamObject()
+    safe = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    content.set_data(b"BT /F1 10 Tf 10 50 Td (" + safe.encode("latin-1") + b") Tj ET")
+    page.replace_contents(content)
+    writer.add_blank_page(300, 100)
+    # Made-up test sample only: this PDF is built in memory from the text above, never
+    # from a user's file, and is thrown away straight after the check. "owner-only" is a
+    # fixed dummy value that PDF edit restrictions require, not a real password.
+    writer.encrypt(user_password=user_password, owner_password="owner-only",
+                   algorithm="AES-256")
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def _pdf() -> str:
+    """Spectra and HRMS report PDFs saved with edit restrictions (AES-encrypted with an
+    empty opening password, as much instrument software does) can be read: pypdf needs
+    the 'cryptography' package for that. Without it such files are reported as
+    password-protected and left out of the SI. (Reading such PDFs is the only use of
+    'cryptography'. Apart from the throw-away sample PDF that edit_restricted_pdf makes
+    for this check, the program never encrypts anything, and it keeps no passwords or
+    keys.)"""
+    import cryptography
+    from .compile import document
+    from .core import ms_reports
+    text = "HRMS (ESI) found 165.0912"
+    data = edit_restricted_pdf(text)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "edit_restricted.pdf"
+        path.write_bytes(data)
+        pages = document.pdf_page_count(path)
+    if pages != 2:
+        raise RuntimeError(f"an edit-restricted PDF gave {pages} pages instead of 2")
+    if "165.0912" not in ms_reports.pdf_text(data):
+        raise RuntimeError("the text of an edit-restricted PDF could not be read")
+    return f"edit-restricted (AES) PDFs open; cryptography {cryptography.__version__}"
+
+
 def _qt() -> str:
     from PySide6.QtCore import QByteArray
     from PySide6.QtGui import QImage, QPainter
@@ -129,6 +186,35 @@ def _qt() -> str:
     return "QtSvg, QtPdf (no Qt WebEngine)"
 
 
+def _example() -> str:
+    """The example project (Help ▸ Open example project…) came with the program and opens:
+    read-only and without taking its lock, so nothing in the program's folder changes."""
+    from .core import chem
+    from .core.project import Project
+    folder = resources.example_project()
+    if not folder.is_dir():
+        raise RuntimeError(f"missing: {folder}")
+    if not resources.example_pdf().is_file():   # (Help ▸ View the example SI (PDF))
+        raise RuntimeError(f"missing: {resources.example_pdf()}")
+    project = Project.open(folder, read_only=True)
+    try:
+        compounds = project.all_compounds()
+        if not compounds:
+            raise RuntimeError("the example project has no compounds")
+        drawn = [c for c in compounds if project.read_structure(c) is not None]
+        if len(drawn) != len(compounds):
+            raise RuntimeError(f"only {len(drawn)} of {len(compounds)} structures could "
+                               "be read")
+        chem.mol_info(project.read_structure(compounds[0]))
+        spectra = sum(len(c.values.get("spectra") or []) for c in compounds)
+        problems = project.load_warnings
+    finally:
+        project.close()
+    if problems:
+        raise RuntimeError("opened with warnings: " + "; ".join(problems))
+    return f"{len(compounds)} compounds, {spectra} spectra in {folder}"
+
+
 def _module_shipped(name: str) -> bool:
     import importlib.util
     try:
@@ -141,10 +227,12 @@ def _compile(folder: Path) -> str:
     from .compile.document import CompileOptions
     from .compile.qt_images import content_box, convert_to_png, image_info
     from .compile.run import compile_pdf
+    from .core import lock as lockmod
     from .core.project import Project
-    project = Project.open(folder)
+    # Opened read-only, without taking the lock: compiling only writes build/, and someone
+    # who has the project open in the program keeps it (their window is not taken over).
+    project = Project.open(folder, read_only=True)
     try:
-        project.acquire_lock("self-test")
         options = CompileOptions.from_settings(project.settings)
         result = compile_pdf(project, options, image_info, convert_to_png, crop=content_box)
     finally:
@@ -153,14 +241,17 @@ def _compile(folder: Path) -> str:
     pages = len(PdfReader(str(result.pdf)).pages)
     if pages < 1:
         raise RuntimeError("the PDF has no pages")
-    return f"{result.pdf} ({pages} pages)"
+    held = lockmod.read_lock(folder)
+    note = f"; {held.describe()}, so it was compiled without taking it over" if held else ""
+    return f"{result.pdf} ({pages} pages){note}"
 
 
 def run(report: Path, project: Path | None = None) -> int:
     """Run every check, write `report` (JSON) and return the exit code (0 = all passed)."""
     checks: list[tuple[str, Callable[[], str]]] = [
         ("files", _files), ("python", _python), ("spelling", _spelling),
-        ("rdkit", _rdkit), ("typst", _typst), ("qt", _qt)]
+        ("rdkit", _rdkit), ("typst", _typst), ("pdf", _pdf), ("qt", _qt),
+        ("example", _example)]
     if project is not None:
         checks.append(("compile", lambda: _compile(project)))
     results = {}

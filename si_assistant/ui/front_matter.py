@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QAbstractButton, QAbstractSpinBox, QCheckBox, QCo
                                QVBoxLayout, QWidget)
 
 from ..core import front
-from ..core.project import GENERAL_OWNER, Project
+from ..core.project import GENERAL_OWNER, Project, ProjectError
 from ..core.spectra import STYLE_TEXT_PT
 from .dialogs import EditableTable
 from .rich_text import RichTextEditor
@@ -61,22 +61,48 @@ class FrontPanel(QWidget):
         self._timer.setInterval(AUTOSAVE_DELAY_MS)
         self._timer.timeout.connect(self._save)
         self._choice = False   # a choice (not typing) is waiting to be saved
+        self._unsaved = False  # a save failed: tried again on flush or the next change
+        self._reported = False  # ...and was said, with nothing changed since
 
     def _changed(self, *_args) -> None:
         # A tick box, list or number changed (not typing): the save is an undo step of its
         # own, rather than merging with the typing on this page.
         if isinstance(self.sender(), (QAbstractButton, QComboBox, QAbstractSpinBox)):
             self._choice = True
+        self._reported = False
         if not self.project.read_only:
             self._timer.start()
 
-    def _save(self) -> None:
+    def _finish_typing(self) -> None:
+        """A heading or title box was left (or Enter pressed): what was typed is saved now
+        (the ordinary save: the page stays open). Nothing new typed: nothing is tried (a
+        failed save is not said again)."""
+        if self._timer.isActive():
+            self._save()
+
+    def _save(self, leaving: bool = False) -> None:
         self._timer.stop()
         choice, self._choice = self._choice, False
         if self.project.read_only:
             return
-        with nullcontext() if choice else self.project.autosave():
-            self.save()
+        try:
+            with nullcontext() if choice else self.project.autosave():
+                self.save()
+        except (ProjectError, OSError) as e:
+            self._unsaved = True   # (the main window can see it before closing the page)
+            self._choice = self._choice or choice   # (the retry is still its own step)
+            if leaving and self._reported:
+                # (said a moment ago, e.g. as the box lost the keyboard, with nothing changed
+                # since: the main window now asks whether to leave anyway)
+                return
+            self._reported = True
+            QMessageBox.warning(self, "Could not save", f"{e}\n\n" + (
+                "The latest changes on this page could not be saved, so they are lost if "
+                "the page is closed." if leaving else
+                "What you entered is still on the page; saving it is tried again with "
+                "your next change or when you leave the page."))
+            return
+        self._unsaved = self._reported = False
         self.saved.emit("Saved")
 
     def save(self) -> None:
@@ -85,11 +111,18 @@ class FrontPanel(QWidget):
     def commit_edits(self) -> None:
         """Finish any edit still being typed (e.g. an open table cell) so it is saved."""
 
+    def save_waiting(self) -> bool:
+        """Save what is still waiting (the ordinary autosave, not the save made when
+        leaving the page). False if it failed (said so)."""
+        if self._timer.isActive() or self._unsaved:
+            self._save()
+        return not self._unsaved
+
     def flush(self) -> None:
         """Save anything pending. Called before switching away, compiling or closing."""
         self.commit_edits()
-        if self._timer.isActive():
-            self._save()
+        if self._timer.isActive() or self._unsaved:
+            self._save(leaving=True)
 
 
 class FrontMatterOverview(FrontPanel):
@@ -140,7 +173,7 @@ class CoverPagePanel(FrontPanel):
         for edit in (self.heading_edit, self.title_edit):
             edit.setReadOnly(ro)
             edit.textEdited.connect(self._changed)
-            edit.editingFinished.connect(self.flush)
+            edit.editingFinished.connect(self._finish_typing)
 
         self.authors = EditableTable(["Name", "Affiliations", "Corresponding", "Email"],
                                      checkbox_columns={2})
@@ -209,7 +242,7 @@ class TocPanel(FrontPanel):
         self.title_edit = QLineEdit(v["title"])
         self.title_edit.setPlaceholderText("(no title)")
         self.title_edit.textEdited.connect(self._changed)
-        self.title_edit.editingFinished.connect(self.flush)
+        self.title_edit.editingFinished.connect(self._finish_typing)
         self.depth = QComboBox()
         for key, text in front.TOC_DEPTHS.items():
             self.depth.addItem(text, key)
@@ -289,7 +322,7 @@ class GeneralInfoPanel(FrontPanel):
                                      "table of contents). Leave empty for none.")
         self.heading_edit.setReadOnly(ro)
         self.heading_edit.textEdited.connect(self._changed)
-        self.heading_edit.editingFinished.connect(self.flush)
+        self.heading_edit.editingFinished.connect(self._finish_typing)
         self.numbered = QCheckBox("Number this heading like a section (Wiley and RSC styles)")
         self.numbered.setChecked(front.general_numbered(project.settings))
         self.numbered.setToolTip(

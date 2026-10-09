@@ -223,6 +223,12 @@ class LinkChip(QPyTextObject):
     def _structures(self):
         return getattr(self.parent(), "inline_structures", None)
 
+    def _label(self, cf: QTextCharFormat) -> str:
+        edit = self.parent()
+        if hasattr(edit, "chip_label"):
+            return edit.chip_label(cf)
+        return str(cf.property(LINK_LABEL) or "?")
+
     def intrinsicSize(self, doc, pos, fmt):  # noqa: N802 (Qt naming)
         cf = QTextCharFormat(fmt)
         ref = str(cf.property(LINK_REF) or "")
@@ -232,7 +238,7 @@ class LinkChip(QPyTextObject):
             if size is not None:
                 return size
         metrics = QFontMetricsF(self._font(cf))
-        label = str(cf.property(LINK_LABEL) or "?")
+        label = self._label(cf)
         if ref.startswith(STRUCT):
             label = MISSING_STRUCTURE
         return QSizeF(metrics.horizontalAdvance(label) + 6, metrics.height())
@@ -240,7 +246,7 @@ class LinkChip(QPyTextObject):
     def drawObject(self, painter, rect, doc, pos, fmt):  # noqa: N802
         cf = QTextCharFormat(fmt)
         ref = str(cf.property(LINK_REF) or "")
-        label = str(cf.property(LINK_LABEL) or "?")
+        label = self._label(cf)
         provider = self._structures()
         if ref.startswith(STRUCT) and provider is not None:
             pixmap = provider.pixmap(ref[len(STRUCT):], QRectF(rect).size(),
@@ -326,6 +332,18 @@ def _clean_format(fmt: QTextCharFormat) -> QTextCharFormat:
 
 # ---------------------------------------------------------------------- document <-> paragraphs
 
+def _code_point_index(text: str, utf16: int) -> int:
+    """The index in the Python string `text` of the character at Qt position `utf16` (Qt
+    counts a character outside the Basic Multilingual Plane, e.g. an emoji or a math
+    italic 𝐽 copied from a PDF, as 2; Python counts it as 1)."""
+    n = 0
+    for i, ch in enumerate(text):
+        if n >= utf16:
+            return i
+        n += 2 if ord(ch) > 0xFFFF else 1
+    return len(text)
+
+
 def document_to_paragraphs(doc: QTextDocument, start: int = 0,
                            end: int | None = None, aligned: bool = False) -> list[Paragraph]:
     """The document (or the part from `start` to `end`, e.g. a selection) as paragraphs.
@@ -342,11 +360,23 @@ def document_to_paragraphs(doc: QTextDocument, start: int = 0,
             p.align = stored_align(block_align_name, p.is_object)
         paragraphs.append(p)
 
+    caption_break = False   # a line break typed in the caption being read (Shift+Enter)
+
+    def caption_text(text: str) -> None:
+        """Before `text` is added: a line break typed in a caption (a caption is one line)
+        becomes a space, so the words either side are not joined (none next to a space)."""
+        nonlocal caption_break
+        if (caption_break and current.runs and not current.runs[-1].text[-1:].isspace()
+                and not text[:1].isspace()):
+            current.runs.append(Run(" "))
+        caption_break = False
+
     block = doc.findBlock(start) if start else doc.begin()
     while block.isValid() and (end is None or block.position() <= end):
         heading = min(block.blockFormat().headingLevel(), markup.MAX_HEADING)
         block_align_name = block_align(block) if aligned else ""
         current = Paragraph([], heading)
+        caption_break = False
         it = block.begin()
         while not it.atEnd():
             frag = it.fragment()
@@ -356,7 +386,12 @@ def document_to_paragraphs(doc: QTextDocument, start: int = 0,
                 continue
             if frag.isValid():
                 fmt = frag.charFormat()
-                text = frag.text()[max(0, start - lo):(end - lo) if end is not None else None]
+                text = frag.text()
+                a, b = max(0, start - lo), (end - lo) if end is not None else None
+                if len(text) != frag.length():   # (an emoji or a math 𝐽: 2 positions in Qt)
+                    a = _code_point_index(text, a)
+                    b = _code_point_index(text, b) if b is not None else None
+                text = text[a:b]
                 is_picture = fmt.isImageFormat() and fmt.property(IMAGE_REL)
                 is_object = fmt.objectType() in OBJECT_KINDS and fmt.property(OBJECT_ID)
                 if (is_picture or is_object) and (current.is_object or current.runs):
@@ -388,8 +423,11 @@ def document_to_paragraphs(doc: QTextDocument, start: int = 0,
                     if k > 0 and not current.is_object:  # a soft line break: a new paragraph
                         finish(current)
                         current = Paragraph([], heading)
+                    elif k > 0 and current.runs:
+                        caption_break = True   # (not the break straight after the object)
                     if is_link:
                         for ch in piece:
+                            caption_text("x" if ch == _OBJECT_CHAR else ch)
                             if ch == _OBJECT_CHAR:
                                 current.runs.append(Run(str(fmt.property(LINK_LABEL) or ""),
                                                         ref=str(fmt.property(LINK_REF))))
@@ -399,6 +437,7 @@ def document_to_paragraphs(doc: QTextDocument, start: int = 0,
                         continue
                     piece = piece.replace(_OBJECT_CHAR, "")
                     if piece:
+                        caption_text(piece)
                         current.runs.append(Run(piece, bold, fmt.fontItalic(), valign,
                                                 underline=underline))
             it += 1
@@ -493,8 +532,9 @@ def insert_paragraphs(cursor: QTextCursor, paragraphs: list[Paragraph], base_siz
             cursor.insertText(_LINE_SEPARATOR, char_format_for(Run(""), base_size, 0))
         for run in para.runs:
             if run.ref:
+                chip = edit.chip_format if edit is not None else link_format
                 cursor.insertText(_OBJECT_CHAR,
-                                  link_format(run.ref, char_format_for(run, base_size, heading)))
+                                  chip(run.ref, char_format_for(run, base_size, heading)))
                 cursor.setCharFormat(char_format_for(Run(""), base_size, heading))
             else:
                 cursor.insertText(run.text, char_format_for(run, base_size, heading))
@@ -581,14 +621,20 @@ class PickerDialog(QDialog):
         if first is not None:
             self.list.setCurrentItem(first)
 
+    def _visible_current(self) -> QListWidgetItem | None:
+        """The current item, unless the search hid it (Qt keeps a hidden one current)."""
+        item = self.list.currentItem()
+        return item if item is not None and not item.isHidden() else None
+
     def _accept_current(self) -> None:
-        if self.list.currentItem() is not None:
+        if self._visible_current() is not None:
             self.accept()
 
     def values(self) -> list[str]:
         chosen = [i for i in self.list.selectedItems() if not i.isHidden()]
-        if not chosen and self.list.currentItem() is not None:
-            chosen = [self.list.currentItem()]
+        current = self._visible_current()
+        if not chosen and current is not None:
+            chosen = [current]
         return [v for v in (i.data(Qt.ItemDataRole.UserRole) for i in chosen) if v is not None]
 
 
@@ -675,6 +721,11 @@ class RichTextEdit(QTextEdit):
         # A scheme's conditions above the arrow can hold small structures (@struct{…},
         # SPEC §13n.4): set by ui/scheme_editor_ui.py; None = not in this text.
         self.inline_structures = None
+        # The label each chip shows now (ref -> label), set by refresh_links. Kept outside
+        # the document, so a new label (e.g. after renumbering) is not an edit: no Ctrl+Z
+        # step of its own, no autosave. It keeps links deleted since (Ctrl+Z can bring
+        # them back) until set_markup. A chip not in it shows the label it was made with.
+        self.chip_labels: dict[str, str] = {}
         self._chip = LinkChip(self)
         self.document().documentLayout().registerHandler(LINK_OBJECT, self._chip)
         self.currentCharFormatChanged.connect(self._leave_link_format)
@@ -705,6 +756,7 @@ class RichTextEdit(QTextEdit):
     def set_markup(self, text: str) -> None:
         doc = self.document()
         doc.setUndoRedoEnabled(False)
+        self.chip_labels = {}   # (the chips made now have the current labels)
         self.checks.setDocument(None)   # underline once at the end, not after every run
         doc.clear()
         cursor = QTextCursor(doc)
@@ -817,7 +869,7 @@ class RichTextEdit(QTextEdit):
         cursor.beginEditBlock()
         cursor.removeSelectedText()
         base = _clean_format(cursor.charFormat())
-        cursor.insertText(_OBJECT_CHAR, link_format(ref, base))
+        cursor.insertText(_OBJECT_CHAR, self.chip_format(ref, base))
         cursor.setCharFormat(base)
         cursor.endEditBlock()
         self.setTextCursor(cursor)
@@ -909,9 +961,25 @@ class RichTextEdit(QTextEdit):
             return True
         return False
 
+    def chip_label(self, fmt: QTextCharFormat) -> str:
+        """The label a chip shows (e.g. "3a", "Figure S2")."""
+        ref = str(fmt.property(LINK_REF) or "")
+        return self.chip_labels.get(ref) or str(fmt.property(LINK_LABEL) or "?")
+
+    def chip_format(self, ref: str, base: QTextCharFormat | None = None) -> QTextCharFormat:
+        """link_format() for a chip put in this text: chips already there with the same
+        link show its (current) label too."""
+        fmt = link_format(ref, base)
+        if ref in self.chip_labels:
+            self.chip_labels[ref] = str(fmt.property(LINK_LABEL))
+        return fmt
+
     def refresh_links(self) -> None:
-        """Update chip labels (e.g. after renumbering) without touching the text."""
+        """Update chip labels (e.g. after renumbering) without touching the text: the
+        labels are not part of the document, so this is not an edit (no Ctrl+Z step, no
+        autosave)."""
         doc = self.document()
+        labels: dict[str, str] = {}
         block = doc.begin()
         while block.isValid():
             it = block.begin()
@@ -919,18 +987,19 @@ class RichTextEdit(QTextEdit):
                 frag = it.fragment()
                 fmt = frag.charFormat()
                 if frag.isValid() and fmt.objectType() == LINK_OBJECT:
-                    label = link_label(str(fmt.property(LINK_REF)))
-                    if label != fmt.property(LINK_LABEL):
-                        c = QTextCursor(doc)
-                        c.setPosition(frag.position())
-                        c.setPosition(frag.position() + frag.length(),
-                                      QTextCursor.MoveMode.KeepAnchor)
-                        new = QTextCharFormat(fmt)
-                        new.setProperty(LINK_LABEL, label)
-                        c.setCharFormat(new)
+                    ref = str(fmt.property(LINK_REF))
+                    if ref not in labels:
+                        labels[ref] = link_label(ref)
                 it += 1
             block = block.next()
+        # Links deleted since keep a (current) label too: a chip brought back by the box's
+        # own Ctrl+Z must not show the label it was made with (set_markup clears these).
+        for ref in self.chip_labels:
+            if ref not in labels:
+                labels[ref] = link_label(ref)
+        self.chip_labels = labels
         doc.markContentsDirty(0, doc.characterCount())
+        self.viewport().update()
 
     # ---- figures and tables (custom sections, General Information)
 
@@ -1024,7 +1093,7 @@ class RichTextEdit(QTextEdit):
         cursor.removeSelectedText()
         for run in runs:
             if run.ref:
-                cursor.insertText(_OBJECT_CHAR, link_format(run.ref, char_format_for(
+                cursor.insertText(_OBJECT_CHAR, self.chip_format(run.ref, char_format_for(
                     run, self.base_size, 0)))
             else:
                 cursor.insertText(run.text, char_format_for(run, self.base_size, 0))
@@ -1070,7 +1139,7 @@ class RichTextEdit(QTextEdit):
         cursor.insertText(_LINE_SEPARATOR, base)
         for run in caption or []:
             if run.ref:
-                cursor.insertText(_OBJECT_CHAR, link_format(run.ref, char_format_for(
+                cursor.insertText(_OBJECT_CHAR, self.chip_format(run.ref, char_format_for(
                     run, self.base_size, 0)))
             else:
                 cursor.insertText(run.text, char_format_for(run, self.base_size, 0))
@@ -1091,7 +1160,7 @@ class RichTextEdit(QTextEdit):
         found = self.object_at(event.pos())
         if found is not None and self.objects is not None:
             from .text_objects import object_menu
-            object_menu(self, *found).exec(event.globalPos())
+            text_checks.show_menu(object_menu(self, *found), event.globalPos())   # (then deleted)
             return
         menu = self.createStandardContextMenu(event.pos())
         sid = self.structure_at(event.pos()) if self.inline_structures is not None else ""
@@ -1165,7 +1234,8 @@ class RichTextEdit(QTextEdit):
             if found:
                 data.setData(OBJECTS_MIME, json.dumps(found).encode("utf-8"))
         # Plain text shows links as they look (e.g. "3a"), not as boxes.
-        data.setText("\n".join(p.plain_text for p in paragraphs))
+        data.setText("\n".join("".join(self.chip_labels.get(r.ref, r.text) if r.ref else r.text
+                                       for r in p.runs) for p in paragraphs))
         return data
 
     def canInsertFromMimeData(self, source) -> bool:  # noqa: N802
@@ -1252,19 +1322,24 @@ class RichTextEdit(QTextEdit):
             info = {}
         info = info if isinstance(info, dict) else {}
         new_ids: dict[str, str | None] = {}
-        for p in paragraphs:
-            runs = []
-            for r in p.runs:
-                if r.structure:
-                    if r.structure not in new_ids:
-                        new_ids[r.structure] = self.inline_structures.adopt(
-                            r.structure, info.get(r.structure))
-                    sid = new_ids[r.structure]
-                    if not sid:
-                        continue
-                    r = r.but(ref=markup.STRUCT + sid)
-                runs.append(r)
-            p.runs = runs
+        # One Edit ▸ Undo step for all of them (and the text's autosave that follows), not
+        # one per structure: one Undo must not leave copied structures behind.
+        count = len({r.structure for p in paragraphs for r in p.runs if r.structure})
+        pasting = getattr(self.inline_structures, "pasting", None)
+        with pasting(count) if pasting is not None else contextlib.nullcontext():
+            for p in paragraphs:
+                runs = []
+                for r in p.runs:
+                    if r.structure:
+                        if r.structure not in new_ids:
+                            new_ids[r.structure] = self.inline_structures.adopt(
+                                r.structure, info.get(r.structure))
+                        sid = new_ids[r.structure]
+                        if not sid:
+                            continue
+                        r = r.but(ref=markup.STRUCT + sid)
+                    runs.append(r)
+                p.runs = runs
         return paragraphs
 
     def _adopt_objects(self, paragraphs: list[Paragraph], info: dict,
@@ -1361,6 +1436,8 @@ class RichTextEdit(QTextEdit):
     # ---- formatting commands
 
     def _merge(self, fmt: QTextCharFormat) -> None:
+        if self.isReadOnly():   # (Ctrl+B… still reach a read-only box: Qt would format it)
+            return
         cursor = self.textCursor()
         cursor.mergeCharFormat(fmt)
         self.mergeCurrentCharFormat(fmt)
@@ -1389,6 +1466,8 @@ class RichTextEdit(QTextEdit):
         self._merge(fmt)
 
     def set_heading(self, level: int) -> None:
+        if self.isReadOnly():
+            return
         cursor = self.textCursor()
         cursor.beginEditBlock()
         start, end = cursor.selectionStart(), cursor.selectionEnd()
@@ -1634,6 +1713,11 @@ class RichTextEditor(QWidget):
     def set_read_only(self, read_only: bool) -> None:
         self.edit.setReadOnly(read_only)
         self.toolbar.setEnabled(not read_only)
+        # (their keys work without the toolbar: greyed out with it)
+        for act in (self.bold_act, self.italic_act, self.underline_act, self.sup_act,
+                    self.sub_act, *self.align_acts.values()):
+            act.setEnabled(not read_only)
+        self._sync_buttons()
 
     def _formula_switched(self, on: bool) -> None:
         """Another text box switched the Chemical formula toggle: show it here too."""
@@ -1660,7 +1744,7 @@ class RichTextEditor(QWidget):
             name = self.edit.block_alignment()
             self.align_acts[name].setChecked(True)
             on_object = starts_with_object(self.edit.textCursor().block())
-            self.align_acts[JUSTIFY].setEnabled(not on_object)
+            self.align_acts[JUSTIFY].setEnabled(not on_object and not self.edit.isReadOnly())
             self.align_button.setIcon(alignment_icon(
                 name, self.palette().color(QPalette.ColorRole.ButtonText)))
             what = "this figure or table" if on_object else "this paragraph"

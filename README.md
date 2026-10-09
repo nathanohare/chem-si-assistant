@@ -79,8 +79,9 @@ This makes one folder holding the whole program (about 250 MB; on macOS a `.app`
 Windows, keep the output and scratch folders on a short path such as `C:\Temp\b` (long
 paths are a problem for Windows). `build_app.py self-test --exe … --report r.json
 --project <a project folder>` runs the built program's own self-test: every bundled
-file, the spelling dictionaries, RDKit, Typst, Qt (and that Qt WebEngine, no longer used, was
-left out), and compiling that project's SI.
+file, the spelling dictionaries, RDKit, Typst, reading a PDF saved with edit restrictions
+(the `cryptography` package), Qt (and that Qt WebEngine, no longer used, was left out), and
+compiling that project's SI.
 
 The installers themselves: on Windows, compile `packaging/windows/installer.iss` with
 [Inno Setup 6](https://jrsoftware.org/isinfo.php) (see the comment at its top); on macOS
@@ -148,6 +149,7 @@ The program is built on the free components below, which keep their own licences
 | RDKit | Structures, formulas, masses, structure drawings | BSD-3-Clause |
 | Typst (`typst` Python package) | Typesetting the SI PDF | Apache-2.0 |
 | pypdf | Reading page counts of spectra PDFs; the text of HRMS report PDFs and of manuscript PDFs (Manuscript check) | BSD-3-Clause |
+| cryptography (with its helper cffi; pip also installs pycparser, which the installers leave out) | Used **only** so that pypdf can open PDF files that their software saved with edit restrictions (many NMR and mass-spectrometry programs do this; anyone can open such a file, but without this package pypdf cannot read it, and those spectra and HRMS reports would be left out). Chem SI Assistant does not encrypt your files and keeps no passwords or keys; reading these PDFs happens on your computer and sends nothing anywhere. A truly password-protected PDF is still reported and left out. | Apache-2.0 or BSD-3-Clause (either may be chosen); cffi MIT-0; pycparser BSD-3-Clause |
 | chem-vision (Nathan O'Hare; code adapted) | The Manuscript check's reading of labels, yields, ee/er, dr, footnotes, tables and ChemDraw files | MIT |
 | NumPy | Scheme label placement, picture trimming, spectra auto-crop, converting pasted Mnova spectra (metafile pictures, the self-check) | BSD-3-Clause |
 | pyspellchecker | Spelling check in the text boxes (English word list included; works offline) | MIT |

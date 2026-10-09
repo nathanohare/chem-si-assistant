@@ -229,7 +229,18 @@ def _thin_rectangle(q: np.ndarray) -> tuple[float, float, float, float] | None:
 
 _SVG_UNITS_PT = {"": 1.0, "px": 1.0, "pt": 1.0, "pc": 12.0, "mm": 72 / 25.4,
                  "cm": 72 / 2.54, "in": 72.0}   # (as compile/document.svg_size_in)
-_LENGTH = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*([a-z%]*)\s*$")
+_SVG_UNITS_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "mm": 96 / 25.4,
+                 "cm": 96 / 2.54, "in": 96.0}   # (as the SVG renderer reads them)
+# A width or height as compile/document.svg_size_in reads it for the printed size (the
+# two must agree, so it can build its pattern from this one): no sign, spaces anywhere
+# around the unit.
+PRINT_LENGTH = r"\s*((?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*([a-z%]*)\s*"
+_PRINT_LENGTH = re.compile(PRINT_LENGTH)
+# … and as the SVG renderer (usvg, in Typst) reads it: spaces before it, a sign, the unit
+# straight after the number and nothing after that. Anything else (such as 'auto') it
+# ignores, as if there were no width or height.
+_RENDER_LENGTH = re.compile(r"[ \t\n\r]*([-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)"
+                            r"(?:[eE][-+]?[0-9]+)?)(%|em|ex|px|in|cm|mm|pt|pc)?")
 _SKIP = {"defs", "clipPath", "mask", "pattern", "symbol", "marker", "text", "image",
          "style", "title", "desc", "metadata", "linearGradient", "radialGradient", "use",
          "foreignObject", "script", "rect", "circle", "ellipse"}
@@ -243,21 +254,59 @@ def _local(tag: str) -> str:
 
 
 def _length_pt(value: str | None) -> float | None:
-    m = _LENGTH.match(value or "")
+    """A width or height in pt, as compile/document.svg_size_in prints it (None: it gives
+    no size, so the picture prints at its viewBox's size)."""
+    m = _PRINT_LENGTH.fullmatch(value or "")
     if m is None or m.group(2) not in _SVG_UNITS_PT:
         return None
-    return float(m.group(1)) * _SVG_UNITS_PT[m.group(2)]
+    n = float(m.group(1)) * _SVG_UNITS_PT[m.group(2)]
+    return n if math.isfinite(n) else None
+
+
+def _length_px(value: str | None, whole: float | None = None) -> float | None:
+    """A length in CSS px, as the SVG renderer (usvg, in Typst) reads it: 96 px per inch;
+    a percentage of `whole`, the viewBox's size, and so is no length or one it can't read
+    (such as 'auto'). None: a unit it sizes by the font (em, ex), not measured here."""
+    m = _RENDER_LENGTH.fullmatch(value or "")
+    n = float(m.group(1)) if m else math.nan
+    if not math.isfinite(n):
+        return whole
+    unit = m.group(2) or ""
+    if unit == "%":
+        return n / 100 * whole if whole else None
+    if unit not in _SVG_UNITS_PX:
+        return None
+    return n * _SVG_UNITS_PX[unit]
 
 
 def _svg_scale(root) -> tuple[float, float]:
-    """Points per user unit of the drawing, each way, as it prints."""
+    """Points per user unit of the drawing, each way, as it prints. The rules are those of
+    printing: compile/document.svg_size_in gives the printed width (width AND height,
+    px or no unit = 1 pt; otherwise the viewBox at 1 unit = 1 pt) and Typst scales the
+    drawing's own size (in CSS px, 96 per inch; a missing width or height: the viewBox's)
+    to it, with the viewBox fitted into that size as SVG does (preserveAspectRatio:
+    'meet' unless it says 'slice' or 'none')."""
     box = _numbers(root.get("viewBox", ""))
     w, h = _length_pt(root.get("width")), _length_pt(root.get("height"))
+    sized = bool(w and h and w > 0 and h > 0)
     if len(box) == 4 and box[2] > 0 and box[3] > 0:
-        sx = w / box[2] if w else 1.0
-        sy = h / box[3] if h else sx
-        return sx, sy
-    return 1.0, 1.0
+        wpx = _length_px(root.get("width"), box[2])
+        hpx = _length_px(root.get("height"), box[3])
+        if not (wpx and hpx and wpx > 0 and hpx > 0):
+            return 1.0, 1.0
+        pt_per_px = (w if sized else box[2]) / wpx
+        sx, sy = wpx / box[2], hpx / box[3]
+        fit = (root.get("preserveAspectRatio") or "").split()
+        if "none" in fit:
+            return pt_per_px * sx, pt_per_px * sy
+        s = max(sx, sy) if "slice" in fit else min(sx, sy)
+        return pt_per_px * s, pt_per_px * s
+    wpx = _length_px(root.get("width"))
+    if not (sized and wpx):
+        return 1.0, 1.0                # no printed size known: fitted to its box
+    # No viewBox: 1 user unit = 1 CSS px. A px (or unitless) width prints as 1 pt per px,
+    # an absolute one (pt, mm, …) at its real size, so a px is then 0.75 pt.
+    return w / wpx, w / wpx
 
 
 def _style(elem, inherited: dict) -> dict:
@@ -429,6 +478,24 @@ def _as_array(segments) -> np.ndarray:
 
 _PAINT_STROKE = {"S", "s", "B", "B*", "b", "b*"}
 _PAINT_FILL = {"f", "F", "f*"}
+# Colour spaces whose values are plain gray, RGB or CMYK (so white can be read from them);
+# in any other (a spot colour, a palette, Lab, a pattern) '1' does not mean white.
+_DEVICE_SPACES = {"/DeviceGray", "/DeviceRGB", "/DeviceCMYK", "/G", "/RGB", "/CMYK"}
+_PLAIN_SPACES = {"/CalGray", "/CalRGB", "/ICCBased"}
+
+
+def _plain_space(name, resources) -> bool:
+    """Whether the colour space `name` (set with CS/cs) is plain gray, RGB or CMYK."""
+    name = str(name)
+    if name in _DEVICE_SPACES:
+        return True
+    try:
+        spaces = resources.get_object().get("/ColorSpace") if resources is not None else None
+        space = spaces.get_object()[name].get_object() if spaces else None
+        family = space[0] if isinstance(space, list) else space
+        return str(family) in _PLAIN_SPACES or str(family) in _DEVICE_SPACES
+    except Exception:  # noqa: BLE001 — an unknown space: its colours are not read as white
+        return False
 
 
 def pdf_segments(data: bytes, page_index: int = 0) -> np.ndarray | None:
@@ -451,10 +518,13 @@ def pdf_segments(data: bytes, page_index: int = 0) -> np.ndarray | None:
 
 
 def _pdf_walk(operations, resources, ctm: np.ndarray, collector: _Collector, reader,
-              depth: int) -> None:
+              depth: int, colours: tuple = (False, False, True, True)) -> None:
+    """`colours`: (stroke white, fill white, stroke space plain, fill space plain) at the
+    start — a form drawn with 'Do' takes on the colours (and colour spaces) set before."""
     from pypdf.generic import ContentStream
     stack: list[tuple] = []
-    stroke_white = fill_white = False
+    # (plain: the colour space is plain gray, RGB or CMYK, so its colours can be white)
+    stroke_white, fill_white, stroke_plain, fill_plain = colours
     subpaths: list[tuple[list, bool]] = []
     pieces: list = []
     cur = start = (0.0, 0.0)
@@ -468,7 +538,7 @@ def _pdf_walk(operations, resources, ctm: np.ndarray, collector: _Collector, rea
     def white(values) -> bool:
         try:
             return all(float(v) >= 0.97 for v in values) if len(values) in (1, 3) else \
-                all(float(v) <= 0.03 for v in values)   # (CMYK: no ink)
+                len(values) == 4 and all(float(v) <= 0.03 for v in values)   # (CMYK)
         except (TypeError, ValueError):
             return False
 
@@ -480,16 +550,26 @@ def _pdf_walk(operations, resources, ctm: np.ndarray, collector: _Collector, rea
         except (TypeError, ValueError):
             continue
         if op == "q":
-            stack.append((ctm, stroke_white, fill_white))
+            stack.append((ctm, stroke_white, fill_white, stroke_plain, fill_plain))
         elif op == "Q":
             if stack:
-                ctm, stroke_white, fill_white = stack.pop()
+                ctm, stroke_white, fill_white, stroke_plain, fill_plain = stack.pop()
         elif op == "cm" and len(v) == 6:
             ctm = ctm @ _matrix(*v)
         elif op in ("G", "RG", "K"):
-            stroke_white = white(operands)
+            stroke_white, stroke_plain = white(operands), True
         elif op in ("g", "rg", "k"):
-            fill_white = white(operands)
+            fill_white, fill_plain = white(operands), True
+        elif op == "CS":   # (a new colour space starts at black)
+            stroke_white = False
+            stroke_plain = bool(operands) and _plain_space(operands[0], resources)
+        elif op == "cs":
+            fill_white = False
+            fill_plain = bool(operands) and _plain_space(operands[0], resources)
+        elif op in ("SC", "SCN"):   # (a pattern name is not white)
+            stroke_white = stroke_plain and white(operands)
+        elif op in ("sc", "scn"):
+            fill_white = fill_plain and white(operands)
         elif op == "m" and len(v) == 2:
             finish(False)
             cur = start = (v[0], v[1])
@@ -512,7 +592,12 @@ def _pdf_walk(operations, resources, ctm: np.ndarray, collector: _Collector, rea
                              True))
             cur = start = (x, y)
         elif op in _PAINT_STROKE or op in _PAINT_FILL or op == "n":
-            finish(op in ("s", "b", "b*"))
+            closes = op in ("s", "b", "b*")
+            if closes and pieces and cur != start:
+                pieces.append((cur, start, True))   # (as 'h': the closing side)
+            finish(closes)
+            if closes:
+                cur = start
             if op in _PAINT_STROKE and not stroke_white:
                 collector.stroked(subpaths, ctm)
             elif op in _PAINT_FILL and not fill_white:
@@ -527,7 +612,8 @@ def _pdf_walk(operations, resources, ctm: np.ndarray, collector: _Collector, rea
                 matrix = [float(x) for x in form.get("/Matrix", [1, 0, 0, 1, 0, 0])]
                 inner = ContentStream(form, reader).operations
                 _pdf_walk(inner, form.get("/Resources", resources),
-                          ctm @ _matrix(*matrix), collector, reader, depth + 1)
+                          ctm @ _matrix(*matrix), collector, reader, depth + 1,
+                          (stroke_white, fill_white, stroke_plain, fill_plain))
             except Exception:  # noqa: BLE001
                 continue
 

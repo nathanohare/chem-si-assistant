@@ -102,7 +102,8 @@ def test_adduct_removing_missing_atoms():
         chem.ion_mz(info("C"), "[M-Na]-")
 
 
-@pytest.mark.parametrize("bad", ["M+H", "[M+H]", "[M+Xx]+", "[M+H]+junk"])
+@pytest.mark.parametrize("bad", ["M+H", "[M+H]", "[M+Xx]+", "[M+H]+junk",
+                                 "[M+H]0+", "[M+H]00+", "[M]0-", "[0M+H]+"])
 def test_bad_adducts(bad):
     with pytest.raises(chem.ChemError):
         chem.parse_adduct(bad)

@@ -64,6 +64,23 @@ def mol_pixmap(mol, size: QSize, settings: "chem.DrawingSettings | None" = None,
     return pixmap
 
 
+def generic_structure(project, compound) -> tuple:
+    """(molecule, generic atoms) of a structure.mol the project reads as no structure
+    because it has a generic atom (R, X, *: kept, e.g. for a general scheme), so the page
+    can still draw it and give its SMILES, without formula or masses. (None, []) otherwise
+    (also when the file can't be read just now). Both come from the project's one cached
+    read of the file, so they always agree."""
+    atoms = project.generic_structure_atoms(compound)
+    if not atoms:
+        return None, []
+    return project.structure_for_drawing(compound), atoms
+
+
+def generic_note(atoms: list[str]) -> str:
+    """What the page says for a structure with a generic atom (the warning's own words)."""
+    return checks.generic_structure_message(atoms)
+
+
 def fit_svg_image(path: Path, pixels: QSize) -> QImage:
     """An SVG picture (or a PDF's first page) drawn straight at the largest size that fits
     `pixels` (a vector drawing is sharp at any size); a null QImage if it can't be read."""
@@ -175,6 +192,13 @@ def paste_key() -> str:
     asking Qt for key names before then crashes on Windows."""
     return QKeySequence(QKeySequence.StandardKey.Paste).toString(
         QKeySequence.SequenceFormat.NativeText) or "Ctrl+V"
+
+
+def copy_key() -> str:
+    """"Ctrl+C" (or "⌘C" on a Mac). Like paste_key(), only call this once the application
+    is running."""
+    return QKeySequence(QKeySequence.StandardKey.Copy).toString(
+        QKeySequence.SequenceFormat.NativeText) or "Ctrl+C"
 
 
 class PasteFrame(QFrame):
@@ -380,7 +404,18 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
 
     def refresh(self) -> None:
         mol = self.project.read_structure(self.compound)
-        info = chem.mol_info(mol) if mol is not None else None
+        try:
+            info = chem.mol_info(mol) if mol is not None else None
+            problem = ""
+        except chem.ChemError as e:   # (no formula or masses)
+            info, problem = None, str(e)
+        # A structure with a generic atom (R) is read as none: still drawn, with its SMILES
+        # and a note, and Clear stays on, so it can be replaced or removed.
+        generic_mol, generic = ((None, []) if mol is not None
+                                 else generic_structure(self.project, self.compound))
+        if generic:
+            problem = generic_note(generic)
+        shown = mol if mol is not None else generic_mol
         override = self.project.structure_image_path(self.compound)
         dpr = self.image.devicePixelRatioF()
         if override is not None and override.exists():
@@ -396,23 +431,29 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
             self.image_note.setText(
                 f"Showing {who}. {picture_scale_text(self.project, self.compound)}")
             self.image_note.setWordWrap(True)
-        elif mol is not None:
-            self.image.setPixmap(mol_pixmap(mol, self.IMAGE_SIZE, drawing_settings(self.project),
-                                            dpr))
+        elif shown is not None:
+            self.image.setPixmap(mol_pixmap(shown, self.IMAGE_SIZE,
+                                            drawing_settings(self.project), dpr))
             self.image_note.setText("Taken from the reaction scheme."
                                     if self.project.structure_from_scheme(self.compound) else "")
+        elif generic:
+            self.image.setPixmap(QPixmap())
+            self.image.setText("(cannot draw this structure)")
+            self.image_note.setText("")
         else:
             self.image.setPixmap(QPixmap())
             self.image.setText("No structure yet.\n\nCopy it in ChemDraw, click here\n"
-                               "and press Ctrl+V — or type SMILES,\nopen a .mol/.sdf file, "
-                               "or drop one here.")
+                               f"and press {paste_key()} — or type SMILES,\nopen a .mol/.sdf "
+                               "file, or drop one here.")
             self.image_note.setText("")
-        self.smiles.setText(info.smiles if info else "")
+        self.smiles.setText(chem.canonical_smiles(shown) if shown is not None else "")
         if info:
             charge = f" · net charge {info.charge:+d}" if info.charge else ""
             self.info.setText(
                 f"<b>Formula</b> {formula_html(info.formula)} &nbsp; "
                 f"<b>MW</b> {info.mw:.2f} &nbsp; <b>Exact mass</b> {info.exact_mass:.4f}{charge}")
+        elif problem:
+            self.info.setText(f"<i>{html_escape(problem)}</i>")
         elif override is not None:
             self.info.setText("<i>A picture only, no structure: paste or type the structure "
                               "to get the formula and masses.</i>")
@@ -420,15 +461,16 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
             self.info.setText("")
         has_override = override is not None
         if not self.project.read_only:
-            self.buttons["Clear"].setEnabled(mol is not None)
-            self.buttons["Copy SMILES"].setEnabled(mol is not None)
+            self.buttons["Clear"].setEnabled(mol is not None or bool(generic))
+            self.buttons["Copy SMILES"].setEnabled(shown is not None)
             self.buttons["Remove picture"].setEnabled(has_override)
         self._apply_mode()
 
     # ---- compact ("saved") mode
 
     def has_content(self) -> bool:
-        return (self.project.read_structure(self.compound) is not None
+        # (a structure with a generic atom (R) counts: it is stored and drawn)
+        return (self.project.structure_for_drawing(self.compound) is not None
                 or self.project.structure_image_path(self.compound) is not None)
 
     def set_editing(self, editing: bool) -> None:
@@ -496,7 +538,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         return self.project.undo_step(f"{what} {shown}")
 
     def set_structure_text(self, text: str, picture: PastedPicture | None = None) -> None:
-        self.before_write()  # save on-screen edits before set_structure writes compound.json
+        if not self.saved_first():   # (on-screen edits saved before set_structure)
+            return
         try:
             with self._undo_step("Change the structure of"):
                 if picture is not None:
@@ -518,9 +561,21 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         self.structure_changed.emit(added)
 
     def _apply_smiles(self) -> None:
+        # Compared with the structure's SMILES (not its formula's: a structure with a generic
+        # atom has none), so Enter on the unchanged box stores nothing again (which would
+        # move a ChemDraw picture to the Trash).
+        # A structure.mol that can't be read just now (an online-only OneDrive file, or one
+        # open in another program) must not count as "no structure": nothing is stored then.
         text = self.smiles.text().strip()
-        info = self.project.structure_info(self.compound)
-        if text and (info is None or text != info.smiles):
+        try:
+            # (the molecule, or the one with a generic atom that read_structure gives as None)
+            mol = self.project.structure_for_drawing(self.compound, strict=True)
+        except OSError as e:
+            self._show_error(f"The structure file can't be read just now ({e}); try again "
+                             "in a moment. The structure was not changed.")
+            return
+        current = chem.canonical_smiles(mol) if mol is not None else ""
+        if text and text != current:
             self.set_structure_text(text)
 
     def _paste(self) -> None:
@@ -564,7 +619,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
                                 "Remove this compound's structure? It will be moved to the "
                                 "project Trash.") != QMessageBox.StandardButton.Yes:
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         try:
             with self._undo_step("Clear the structure of"):
                 self.project.clear_structure(self.compound)
@@ -579,9 +635,10 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         picture = clipboard_picture_for(self.project)
         if picture is None:
             self._show_error("The clipboard has no picture. Copy the structure as a picture "
-                             "first (in ChemDraw, select it and press Ctrl+C).")
+                             f"first (in ChemDraw, select it and press {copy_key()}).")
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         try:
             with self._undo_step("Paste a picture of"):
                 self.project.set_structure_image(self.compound, data=picture.data,
@@ -607,7 +664,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         """Store the choice of the Printed size dialog (one Edit ▸ Undo step)."""
         if own == self.project.structure_picture_bond(self.compound)[1]:
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         try:
             with self._undo_step("Change the printed size of the picture of"):
                 self.project.set_structure_picture_bond(self.compound, own)
@@ -622,7 +680,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
                                               f"Images ({patterns})")
         if not path:
             return
-        self.before_write()
+        if not self.saved_first():
+            return
         try:
             with self._undo_step("Use a picture file for"):
                 self.project.set_structure_image(self.compound, Path(path))
@@ -632,7 +691,8 @@ class StructureEditor(PasteTargetMixin, FieldEditor):
         self.structure_changed.emit([])
 
     def _remove_image(self) -> None:
-        self.before_write()
+        if not self.saved_first():
+            return
         try:
             with self._undo_step("Remove the picture of"):
                 self.project.remove_structure_image(self.compound)
@@ -787,13 +847,13 @@ class HrmsEditor(PartsEditor):
     out again when the page opens, the structure, adduct, M or the files change.
     """
 
-    MANUAL_STYLE = "QLineEdit { background: rgba(47, 128, 237, 45); }"
     files_changed = Signal()   # a report file was added or removed (saved already)
     status = Signal(str)       # a line for the status bar
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        stored = self.compound.values.get(self.defn.key) or {}
+        stored = self.compound.values.get(self.defn.key)
+        stored = stored if isinstance(stored, dict) else {}   # (a hand-edited compound.json)
         source = stored.get(ms_reports.FOUND_FROM_KEY)
         self._found_from = dict(source) if isinstance(source, dict) and \
             ms_reports.found_is_from_report(stored) else None
@@ -801,8 +861,8 @@ class HrmsEditor(PartsEditor):
         adduct_box = self.widgets["adduct"]
         for i in range(adduct_box.count()):
             adduct_box.setItemText(i, chem.adduct_display(adduct_box.itemData(i)))
-        value = self.compound.values.get(self.defn.key) or {}
-        set_part_value(adduct_box, F.Part("adduct"), value.get("adduct", "[M+H]+"))
+        value = stored
+        set_part_value(adduct_box, F.Part("adduct"), F.part_text(value.get("adduct", "[M+H]+")))
         adduct_box.setToolTip("Choose an adduct, or type your own, e.g. [M+Li]+, [2M+Na]+, "
                               "[M+H−H2O]+, [M+2H]2+")
         grid = self.layout()
@@ -812,11 +872,11 @@ class HrmsEditor(PartsEditor):
         self.species_box = QComboBox()
         self.species_box.setToolTip("This structure has more than one piece (e.g. a salt). "
                                     "Choose which one the m/z is calculated for.")
-        self._species_key = str(value.get("species", ""))
+        self._species_key = F.part_text(value.get("species", ""))
         self.species_box.activated.connect(self._species_chosen)
 
         # Manual M formula.
-        self.formula_edit = QLineEdit(str(value.get("formula", "")))
+        self.formula_edit = QLineEdit(F.part_text(value.get("formula", "")))
         self.formula_edit.setMaximumWidth(220)
         self.formula_edit.textEdited.connect(lambda *_: self.changed.emit())
         self.formula_preview = QLabel()
@@ -848,7 +908,8 @@ class HrmsEditor(PartsEditor):
         self.refresh_calculation(opening=True)
 
     def store(self) -> None:
-        old = self.compound.values.get(self.defn.key) or {}
+        old = self.compound.values.get(self.defn.key)
+        old = old if isinstance(old, dict) else {}
         super().store()
         value = self.compound.values[self.defn.key]
         value["species"] = self._species_key
@@ -868,19 +929,31 @@ class HrmsEditor(PartsEditor):
     def _files_changed(self) -> None:
         """A report file was added or removed: the project has saved the field (and filled
         or cleared the found m/z); show what it holds now."""
-        value = self.compound.values.get(self.defn.key) or {}
-        found = str(value.get("found", "") or "")
+        self._show_stored_found()
+        self.refresh_calculation()
+        self.files_changed.emit()
+
+    def structure_changed(self) -> None:
+        """The structure was changed (or cleared) and saved, with the found m/z filled or
+        cleared from the reports in the same step: show what is stored, so the page does
+        not fill it again as an edit (and an undo step) of its own. (Typing on the page
+        was saved before the structure was changed.)"""
+        self._show_stored_found()
+        self.refresh_calculation()
+
+    def _show_stored_found(self) -> None:
+        value = self.compound.values.get(self.defn.key)
+        value = value if isinstance(value, dict) else {}
+        found = F.part_text(value.get("found", ""))
         set_part_value(self.widgets["found"], F.Part("found"), found)
         self._last_found = get_part_value(self.widgets["found"])
         source = value.get(ms_reports.FOUND_FROM_KEY)
         self._found_from = dict(source) if isinstance(source, dict) and \
             ms_reports.found_is_from_report(value) else None
-        self.refresh_calculation()
-        self.files_changed.emit()
 
     def _value_on_screen(self) -> dict:
-        stored = self.compound.values.get(self.defn.key) or {}
-        value = {k: v for k, v in stored.items()}
+        stored = self.compound.values.get(self.defn.key)
+        value = dict(stored) if isinstance(stored, dict) else {}
         value.update({k: get_part_value(w) for k, w in self.widgets.items()})
         value["species"] = self._species_key
         value["formula"] = self.formula_edit.text().strip()
@@ -958,8 +1031,12 @@ class HrmsEditor(PartsEditor):
             return
         self.species_box.blockSignals(True)
         self.species_box.clear()
-        auto = choices[1]
-        self.species_box.addItem(f"Automatic: largest piece ({formula_plain(auto[1])})", "")
+        auto = sp.automatic or choices[1]
+        self.species_box.addItem(f"Automatic ({formula_plain(auto[1])})", "")
+        self.species_box.setItemData(
+            0, "The largest piece that is not a common counter-ion (halide, BF4⁻, PF6⁻, "
+               "OTf⁻, NTf2⁻, TFA⁻, BArF⁻, Na⁺, K⁺, NBu4⁺…); the largest piece if all are.",
+            Qt.ItemDataRole.ToolTipRole)
         for key, label, _info in choices:
             self.species_box.addItem(formula_plain(label), key)
         index = self.species_box.findData(self._species_key)
@@ -992,8 +1069,10 @@ class HrmsEditor(PartsEditor):
         self._fill_species(auto)
         manual = bool(self.formula_edit.text().strip())
         auto_formula = species_text = ""
+        auto_counts = None
         if auto is not None:
             auto_formula = auto.info.formula
+            auto_counts = auto.info.counts
             species_text = checks.species_label(auto.info)
         self.formula_edit.setPlaceholderText(f"auto: {formula_plain(species_text)}"
                                              if species_text else "e.g. C12H13NO")
@@ -1010,20 +1089,27 @@ class HrmsEditor(PartsEditor):
             self.calc.setText("")
             return
         if manual:
+            # (Only for a different composition: a typed C8H5[2H]3O2 for a CD3 structure
+            # is the same M, written another way.)
             differs = (f" (structure gives {formula_html(auto_formula)})"
-                       if auto_formula and auto_formula != sp.info.formula else "")
+                       if auto_counts is not None
+                       and not chem.same_formula(auto_counts, sp.info.counts) else "")
             self.formula_preview.setText(f"✎ <b>manual</b>: {formula_html(sp.info.formula)}"
                                          f"{differs}")
         else:
             self.formula_preview.setText("")
         adduct = get_part_value(self.widgets["adduct"]) or "[M+H]+"
         if sp is None:
-            self.calc.setText("<i>Add a structure (or type an M formula) to calculate the "
-                              "expected m/z.</i>")
+            generic = self.project.generic_structure_atoms(self.compound)
+            self.calc.setText(
+                f"<i>The structure has a generic atom ({html_escape(', '.join(generic))}): "
+                "type M's formula above to calculate the expected m/z.</i>" if generic else
+                "<i>Add a structure (or type an M formula) to calculate the expected "
+                "m/z.</i>")
             return
         try:
             r = checks.hrms_calc(sp.info, adduct, get_part_value(self.widgets["found"]),
-                                 float(self.project.settings.get("hrms_tolerance_ppm", 5.0)))
+                                 ms_reports.tolerance(self.project))
         except chem.ChemError as e:
             self.calc.setText(f"<span style='color:#d35400'>⚠ {e}</span>")
             return

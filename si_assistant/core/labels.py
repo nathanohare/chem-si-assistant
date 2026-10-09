@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import fields as F
 from .fileio import read_json, read_text
 from .markup import Paragraph, objects, parse, serialize
 from .page import roman
@@ -116,6 +117,14 @@ def example(rules: dict[str, dict[str, str]], kind: str, count: int = 3) -> str:
 
 def same_label(a: str, b: str) -> bool:
     return " ".join(a.split()).casefold() == " ".join(b.split()).casefold()
+
+
+def is_inline_figure(item) -> bool:
+    """Whether an item of a compound's file field (not Spectra) is printed as a figure
+    with the compound, so it takes a figure number: shown "Inline with compound" and with
+    a file name (as the file box shows it, so a hand-edited 0 counts and true does not)."""
+    return isinstance(item, dict) and item.get("placement", "inline") == "inline" \
+        and bool(F.part_text(item.get("file")))
 
 
 # ---------------------------------------------------------------------- the labels in a project
@@ -265,8 +274,11 @@ def compute(project, live: dict[str, str] | None = None) -> Labels:
         for defn in project.field_defs(compound):
             if defn.kind != "attachments" or defn.key == "spectra":
                 continue
-            for item in compound.values.get(defn.key) or []:
-                if item.get("placement", "inline") != "inline":
+            # (exactly the files compile/blocks.inline_figures prints, or labels would shift;
+            # a hand-edited item that is not {"file": …} is left out, not a crash)
+            items = compound.values.get(defn.key)
+            for item in items if isinstance(items, list) else []:
+                if not is_inline_figure(item):
                     continue
                 add("figure", str(item.get("id", "")), compound.id, index, item.get("label", ""),
                     where, str(item.get("caption", "")), ("compound", compound.id))

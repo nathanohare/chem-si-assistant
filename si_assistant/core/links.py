@@ -135,11 +135,10 @@ def mention_label(project, item_id: str, report=None, labels=None) -> str:
             from .labels import compute
             labels = compute(project)
         return labels.label(item_id) or BROKEN
-    try:
-        project.compound(item_id)
-    except KeyError:
+    report = report or project.id_report()
+    if item_id not in report.ids:   # (every compound in a Data section has an entry)
         return BROKEN
-    return (report or project.id_report()).display_id(item_id)
+    return report.display_id(item_id)
 
 
 def target_exists(project, item_id: str, labels=None) -> bool:
@@ -160,12 +159,15 @@ def citation_label(project, ids: list[str]) -> str:
     return "[" + "; ".join(labels) + "]"
 
 
-def plain_text(project, text: str) -> str:
+def plain_text(project, text: str, report=None, labels=None) -> str:
+    """The text as the editor shows it, without formatting. `report` (project.id_report)
+    and `labels` (labels.compute) can be passed in when many texts are shown at once (the
+    dashboards), so they are worked out once; otherwise only when the text needs them."""
     paragraphs = parse(text)
-    report = project.id_report() if any(mention_kind(m) == "compound"
-                                        for m in mentions(paragraphs)) else None
-    labels = None
-    if any(mention_kind(m) != "compound" for m in mentions(paragraphs)):
+    found = mentions(paragraphs)
+    if report is None and any(mention_kind(m) == "compound" for m in found):
+        report = project.id_report()
+    if labels is None and any(mention_kind(m) != "compound" for m in found):
         from .labels import compute
         labels = compute(project)
     return " ".join("".join(r.text for r in display_runs(project, p.runs, report, labels))

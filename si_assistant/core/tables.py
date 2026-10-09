@@ -27,7 +27,15 @@ from typing import Any
 
 ALIGNS = ("left", "center", "right")
 DEFAULT_ALIGN = "center"
-MAX_SIZE = 200          # rows or columns (a guard against damaged files)
+# A guard against damaged files only, far above any real SI table: a table never grows
+# past these (see Table.paste, insert_row, insert_column), so everything saved is read back.
+MAX_ROWS = 5000
+MAX_COLS = 200
+# One paste brings in at most this much (Table.paste): the table editor shows every cell, so
+# a huge range copied from Excel by mistake would otherwise freeze the program for a minute
+# or more. 1000 x 50 opens in about 3 s; Table.paste says what was left out.
+PASTE_MAX_ROWS = 1000
+PASTE_MAX_COLS = 50
 
 
 @dataclass
@@ -54,15 +62,21 @@ class Cell:
         if not isinstance(data, dict):
             return cls()
         align = str(data.get("align", ""))
-        return cls(str(data.get("text", "")), _span(data.get("colspan")),
-                   _span(data.get("rowspan")), align if align in ALIGNS else "")
+        text = data.get("text")
+        return cls("" if text is None else str(text), _span(data.get("colspan"), MAX_COLS),
+                   _span(data.get("rowspan"), MAX_ROWS), align if align in ALIGNS else "")
 
 
-def _span(value: Any) -> int:
+def _span(value: Any, limit: int) -> int:
     try:
-        return max(1, min(MAX_SIZE, int(value)))
-    except (TypeError, ValueError):
+        return max(1, min(limit, int(value)))
+    except (TypeError, ValueError, OverflowError):   # (e.g. Infinity typed into the file)
         return 1
+
+
+def _list(value: Any) -> list:
+    """A list read from a file, or [] if it holds something else (a hand-edited file)."""
+    return value if isinstance(value, list) else []
 
 
 @dataclass
@@ -89,16 +103,16 @@ class Table:
     def from_json(cls, data: Any) -> "Table":
         data = data if isinstance(data, dict) else {}
         rows = []
-        for row in (data.get("rows") or [])[:MAX_SIZE]:
+        for row in _list(data.get("rows"))[:MAX_ROWS]:
             if isinstance(row, list):
-                rows.append([None if c is None else Cell.from_json(c) for c in row[:MAX_SIZE]])
+                rows.append([None if c is None else Cell.from_json(c) for c in row[:MAX_COLS]])
         columns = [str(a) if a in ALIGNS else DEFAULT_ALIGN
-                   for a in (data.get("columns") or [])[:MAX_SIZE]]
+                   for a in _list(data.get("columns"))[:MAX_COLS]]
         try:
             header = max(0, int(data.get("header_rows", 1)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             header = 1
-        notes = [str(n) for n in data.get("footnotes") or [] if str(n).strip()]
+        notes = [str(n) for n in _list(data.get("footnotes")) if n is not None and str(n).strip()]
         table = cls(rows, columns, header, notes, str(data.get("label", "") or "").strip(),
                     str(data.get("id", "") or ""), data.get("breakable") is True)
         table.normalize()
@@ -185,7 +199,9 @@ class Table:
 
     def insert_row(self, index: int) -> None:
         """A new empty row before `index` (n_rows = at the end). A merged cell that spans
-        across that place grows by one row."""
+        across that place grows by one row. Nothing happens at MAX_ROWS."""
+        if self.n_rows >= MAX_ROWS:
+            return
         index = max(0, min(index, self.n_rows))
         new: list[Cell | None] = []
         grown = set()
@@ -205,6 +221,8 @@ class Table:
         self.normalize()
 
     def insert_column(self, index: int) -> None:
+        if self.n_cols >= MAX_COLS:   # (as insert_row)
+            return
         index = max(0, min(index, self.n_cols))
         grown = set()
         anchors = [[self.anchor(r, c) for c in range(self.n_cols)] for r in range(self.n_rows)]
@@ -310,18 +328,33 @@ class Table:
 
     # ------------------------------------------------------------------ pasting
 
-    def paste(self, r: int, c: int, block: list[list[Cell | None]]) -> None:
+    def paste(self, r: int, c: int, block: list[list[Cell | None]]) -> tuple[int, int]:
         """Put a block of cells (e.g. a table copied from Word or Excel) with its top-left
         corner at (r, c), adding rows and columns as needed. Merged cells already in that
-        area are split first."""
+        area are split first. At most PASTE_MAX_ROWS x PASTE_MAX_COLS of the block are
+        pasted, and the table grows to at most MAX_ROWS x MAX_COLS: returns the number of
+        rows and of columns of the block left out (0, 0 = all pasted)."""
         if not block:
-            return
+            return 0, 0
+        room_rows = max(0, min(PASTE_MAX_ROWS, MAX_ROWS - r))
+        room_cols = max(0, min(PASTE_MAX_COLS, MAX_COLS - c))
+        left_out = (max(0, len(block) - room_rows),
+                    max(0, max(len(row) for row in block) - room_cols))
+        block = [row[:room_cols] for row in block[:room_rows]]
+        if not block or not room_cols:
+            return left_out
+        self.normalize()
         height = len(block)
         width = max(len(row) for row in block)
-        while self.n_rows < r + height:
-            self.insert_row(self.n_rows)
-        while self.n_cols < c + width:
-            self.insert_column(self.n_cols)
+        # (new rows and columns at the end, all at once: a long paste stays quick)
+        if self.n_rows < r + height:
+            self.rows += [[Cell() for _ in range(self.n_cols)]
+                          for _ in range(r + height - self.n_rows)]
+        if self.n_cols < c + width:
+            extra = c + width - self.n_cols
+            for row in self.rows:
+                row.extend(Cell() for _ in range(extra))
+            self.columns += [self.columns[-1] if self.columns else DEFAULT_ALIGN] * extra
         for rr in range(r, r + height):
             for cc in range(c, c + width):
                 self.split(rr, cc)
@@ -330,6 +363,7 @@ class Table:
                 cell = row[dc] if dc < len(row) else Cell()
                 self.rows[r + dr][c + dc] = copy.deepcopy(cell)
         self.normalize()
+        return left_out
 
 
 def block_from_text(text: str) -> list[list[Cell | None]]:

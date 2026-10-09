@@ -19,6 +19,7 @@ remembered on this computer and shared by every text box; RichTextEdit uses
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from pathlib import Path
 
 import shiboken6
@@ -169,9 +170,25 @@ def set_project(project) -> None:
 
 # ---------------------------------------------------------------------- the underlines
 
+def qt_offsets(text: str) -> list[int]:
+    """Qt counts a character outside the BMP (𝐽 from a Word equation, an emoji) as two
+    positions, Python as one: qt_offsets(text)[i] is the Qt position of Python index i
+    (one entry more than the text, so the end of the text maps too)."""
+    out = [0]
+    for ch in text:
+        out.append(out[-1] + (2 if ord(ch) > 0xFFFF else 1))
+    return out
+
+
+def python_index(offsets: list[int], qt_position: int) -> int:
+    """The Python index of a Qt position in a text (the reverse of qt_offsets)."""
+    return max(bisect_right(offsets, qt_position) - 1, 0)
+
+
 def block_formats(block, length: int | None = None) -> list[tuple[str, bool]]:
-    """(vertical alignment, italic) of each character of a text block."""
-    n = block.length() - 1 if length is None else length
+    """(vertical alignment, italic) of each character of a text block (Python indices)."""
+    offsets = qt_offsets(block.text())
+    n = len(offsets) - 1 if length is None else length
     out = [(NORMAL, False)] * n
     it = block.begin()
     while not it.atEnd():
@@ -180,7 +197,8 @@ def block_formats(block, length: int | None = None) -> list[tuple[str, bool]]:
             fmt = frag.charFormat()
             value = (_VALIGN.get(fmt.verticalAlignment(), NORMAL), fmt.fontItalic())
             lo = frag.position() - block.position()
-            for i in range(max(lo, 0), min(lo + frag.length(), n)):
+            for i in range(python_index(offsets, max(lo, 0)),
+                           min(python_index(offsets, lo + frag.length()), n)):
                 out[i] = value
         it += 1
     return out
@@ -228,12 +246,14 @@ class CheckHighlighter(QSyntaxHighlighter):
     def highlightBlock(self, text: str) -> None:  # noqa: N802 (Qt naming)
         if not text.strip():
             return
+        q = qt_offsets(text)   # the checks give Python indices, setFormat wants Qt ones
         if self.spelling:
             for start, end in checks().speller.misspelled(text):
-                self.setFormat(start, end - start, self._spell_fmt)
+                self.setFormat(q[start], q[end] - q[start], self._spell_fmt)
         if self.formatting:
             for issue in issues_in(self.currentBlock(), text):
-                self.setFormat(issue.start, issue.end - issue.start, self._format_fmt)
+                self.setFormat(q[issue.start], q[issue.end] - q[issue.start],
+                               self._format_fmt)
 
 
 def issues_in(block, text: str | None = None) -> list[chemtext.Issue]:
@@ -249,9 +269,11 @@ def apply_fix(document: QTextDocument, block_position: int, issue: chemtext.Issu
     cursor = QTextCursor(document)
     if group:
         cursor.beginEditBlock()
+    # (Edits are made from the end of the block, so the text before each one is unchanged.)
+    q = qt_offsets(document.findBlock(block_position).text())
     for edit in sorted(issue.edits, key=lambda e: e.start, reverse=True):
-        start = block_position + edit.start
-        end = block_position + edit.end
+        start = block_position + q[edit.start]
+        end = block_position + q[edit.end]
         c = QTextCursor(document)
         if edit.text is not None:
             c.setPosition(start + 1)
@@ -259,7 +281,7 @@ def apply_fix(document: QTextDocument, block_position: int, issue: chemtext.Issu
             c.setPosition(start)
             c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
             c.insertText(edit.text, fmt)
-            end = start + len(edit.text)
+            end = start + qt_offsets(edit.text)[-1]
         if edit.valign is not None or edit.italic is not None:
             c.setPosition(start)
             c.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
@@ -313,6 +335,8 @@ def subscript_formula(document: QTextDocument, end: int) -> bool:
     local = end - block.position()
     if not block.isValid() or local <= 0 or local > block.length() - 1:
         return False
+    q = qt_offsets(block.text())
+    local = python_index(q, local)
     text = block.text()[:local]
     formats = block_formats(block, local)
     leave = checks().leave()
@@ -334,8 +358,8 @@ def subscript_formula(document: QTextDocument, end: int) -> bool:
     fmt.setVerticalAlignment(QTextCharFormat.VerticalAlignment.AlignSubScript)
     for i in digits:
         c = QTextCursor(document)
-        c.setPosition(block.position() + i)
-        c.setPosition(block.position() + i + 1, QTextCursor.MoveMode.KeepAnchor)
+        c.setPosition(block.position() + q[i])
+        c.setPosition(block.position() + q[i + 1], QTextCursor.MoveMode.KeepAnchor)
         c.mergeCharFormat(fmt)
     cursor.endEditBlock()
     return True
@@ -353,8 +377,9 @@ def add_check_actions(menu: QMenu, edit, position: int) -> None:
     spelling, formatting = highlighter.spelling, highlighter.formatting
     document = edit.document()
     block = document.findBlock(position)
-    at = position - block.position()
     text = block.text()
+    q = qt_offsets(text)   # Qt positions <-> the checks' Python indices
+    at = python_index(q, position - block.position())
     editable = not edit.isReadOnly()
     hub = checks()
     items: list[QAction | None] = []
@@ -371,8 +396,8 @@ def add_check_actions(menu: QMenu, edit, position: int) -> None:
                     act.setFont(f)
                     act.setEnabled(editable)
                     act.triggered.connect(
-                        lambda _=False, s=s, a=block.position() + start, b=block.position() + end:
-                        replace_word(document, a, b, s))
+                        lambda _=False, s=s, a=block.position() + q[start],
+                        b=block.position() + q[end]: replace_word(document, a, b, s))
                     items.append(act)
                 if not suggestions:
                     none = QAction("(no suggestions)", menu)

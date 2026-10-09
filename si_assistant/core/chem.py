@@ -17,6 +17,7 @@ Mass conventions:
 
 from __future__ import annotations
 
+import math
 import re
 from collections import Counter
 from dataclasses import dataclass, replace
@@ -100,8 +101,39 @@ def _symbol(atom: Chem.Atom) -> str:
     return atom.GetSymbol()
 
 
+def _generic_label(atom: Chem.Atom) -> str:
+    """How a generic atom is named to the user, as it was drawn: "X", "A", "Q", "M" for
+    ChemDraw/MOL query atoms, "R1", "R2" for numbered R groups (an R# with its number, or a
+    SMILES [1*]), and "R" for a plain R, R# or * (SMILES writes R as *)."""
+    if atom.HasProp("_MolFileRLabel"):
+        return f"R{atom.GetIntProp('_MolFileRLabel')}"
+    if atom.HasQuery() and atom.GetQueryType():
+        return atom.GetQueryType()                     # A, Q, X, M (and AH, QH, …)
+    symbol = atom.GetSymbol()
+    if symbol in ("*", "R", "R#"):
+        return f"R{atom.GetIsotope()}" if atom.GetIsotope() else "R"
+    return symbol
+
+
+def generic_atoms(mol: Chem.Mol) -> list[str]:
+    """Labels of the generic atoms (R, R1, X, A, Q, …) in a structure, as the user drew
+    them (see _generic_label): they have no element, so no formula or mass. Fine in a
+    general scheme, not for a compound."""
+    return sorted({_generic_label(a) for a in mol.GetAtoms() if a.GetAtomicNum() == 0})
+
+
+def check_specific(mol: Chem.Mol) -> None:
+    """Raise ChemError if the structure has a generic atom (see generic_atoms)."""
+    bad = generic_atoms(mol)
+    if bad:
+        raise ChemError(f"This structure has a generic atom ({', '.join(bad)}). "
+                        "Draw the actual group to get a formula and masses.")
+
+
 def element_counts(mol: Chem.Mol) -> Counter:
-    """Counts keyed by (symbol, isotope); isotope 0 = natural (most abundant)."""
+    """Counts keyed by (symbol, isotope); isotope 0 = natural (most abundant).
+    Raises ChemError for a structure with a generic atom."""
+    check_specific(mol)
     counts: Counter = Counter()
     for atom in Chem.AddHs(mol).GetAtoms():
         iso = atom.GetIsotope()
@@ -157,7 +189,14 @@ class MolInfo:
     counts: Counter
 
 
+def canonical_smiles(mol: Chem.Mol) -> str:
+    """Canonical SMILES (as in MolInfo.smiles). Unlike mol_info, it works for a structure
+    with a generic atom too (R is written as *)."""
+    return Chem.MolToSmiles(Chem.RemoveHs(mol))
+
+
 def mol_info(mol: Chem.Mol) -> MolInfo:
+    """Formula, masses and SMILES. Raises ChemError for a structure with a generic atom."""
     counts = element_counts(mol)
     elements = {("H" if s in ("D", "T") else s) for (s, _i) in counts}
     return MolInfo(
@@ -166,7 +205,7 @@ def mol_info(mol: Chem.Mol) -> MolInfo:
         exact_mass=counts_mass(counts),
         charge=Chem.GetFormalCharge(mol),
         elements=elements,
-        smiles=Chem.MolToSmiles(Chem.RemoveHs(mol)),
+        smiles=canonical_smiles(mol),
         counts=counts,
     )
 
@@ -175,30 +214,142 @@ def mol_info(mol: Chem.Mol) -> MolInfo:
 
 _FORMULA_TOKEN = re.compile(r"([A-Z][a-z]?)(\d*)")
 _ADDUCT = re.compile(r"^\[(\d*)M(?P<mods>(?:[+\-−][^+\-−\]]+)*)\](?P<z>\d*)(?P<sign>[+\-−])(?P<rad>[•·.]?)$")
-_MOD = re.compile(r"([+\-−])(\d*)([A-Za-z0-9]+)")
+_SUPER_DIGITS = "⁰¹²³⁴⁵⁶⁷⁸⁹"
+_MOD = re.compile(rf"([+\-−])(\d*)([A-Za-z0-9{_SUPER_DIGITS}]+)")
+# A superscript mass number in front of an element is an isotope: "⁷Li", "¹⁰⁷Ag".
+_SUPER_ISOTOPE = re.compile(rf"([{_SUPER_DIGITS}]+)([A-Z][a-z]?)")
 
 
 _ISOTOPE_TOKEN = re.compile(r"\[(\d+)([A-Z][a-z]?)\](\d*)")
 _SUBSCRIPT_DIGITS = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
+# Adducts typed or pasted with subscripts, en dashes or minus signs (e.g.
+# "[M+H–H₂O]+" from Word) are read as their plain form. Superscripts are read as the
+# charge only after "]" (the list's own "[M+Na]⁺"); before it they are isotope labels.
+_ADDUCT_TEXT = str.maketrans({**{c: str(i) for i, c in enumerate("₀₁₂₃₄₅₆₇₈₉")},
+                              "−": "-", "–": "-", "‐": "-", "‑": "-", " ": None})
+_CHARGE_TEXT = str.maketrans({**{c: str(i) for i, c in enumerate(_SUPER_DIGITS)},
+                              "⁺": "+", "⁻": "-"})
+
+
+def _isotope(symbol: str, mass_number: int) -> tuple[str, int]:
+    """The counts key for an isotope label such as [13C]. Raises ChemError."""
+    try:
+        known = _PT.GetMassForIsotope(symbol, mass_number) > 0
+    except RuntimeError:   # not an element
+        known = False
+    if symbol in ("D", "T") or not known:
+        raise ChemError(f"“{mass_number}{symbol}” is not an isotope I know.")
+    return symbol, mass_number
+
+
+def _labelled_formula(text: str) -> Counter:
+    """Counts for a formula with isotopes in brackets, e.g. "C5[13C]H6Br". Raises ChemError."""
+    counts: Counter = Counter()
+    for iso, sym, n in _ISOTOPE_TOKEN.findall(text):
+        counts[_isotope(sym, int(iso))] += int(n or 1)
+    rest = _ISOTOPE_TOKEN.sub("", text)
+    if rest:
+        counts.update(parse_formula(rest))
+    return counts
 
 
 def parse_m_formula(text: str) -> Counter:
     """Parse a formula typed by the user for M, e.g. "C12H12N", "C₁₂H₁₂N⁺", "C5[13C]H6Br".
 
-    Spaces, subscript digits and a trailing charge sign are ignored. Raises ChemError.
+    Spaces, subscript digits and a trailing charge are ignored here (m_formula_charge
+    reads the charge). Raises ChemError.
     """
-    cleaned = (text or "").translate(_SUBSCRIPT_DIGITS).replace(" ", "")
-    # Drop a trailing charge sign only (not digits: in "C6H8N2+" the 2 belongs to N).
-    cleaned = re.sub(r"[+\-−⁺⁻•·]+$", "", cleaned)
+    return parse_m_formula_and_charge(text)[0]
+
+
+# A charge typed at the end of the M formula: superscript digits, then one or more signs
+# (plain, Unicode minus or en dash, or superscript), with a radical dot before or after.
+# A plain digit before a plain sign is the last element's count ("C6H8N2+": N2, 1+), so
+# only superscript digits give the size of the charge ("C10H8N2²⁺"), or repeated signs
+# ("C10H8N2++").
+_TYPED_CHARGE = re.compile(rf"(?P<n>[{_SUPER_DIGITS}]*)(?P<signs>[+\-−–⁺⁻]+)"
+                           rf"(?P<n2>[{_SUPER_DIGITS}]*)$")
+# Charges written so that a plain digit can only be the size of the charge:
+#   after a space ("C10H8N2 2+", "C6H6 +"), in brackets ("C10H8N2(2+)"), after a caret
+#   ("C10H8N2^2+"), with the digit after the sign ("C10H8N2+2"), or after a formula in
+#   square brackets ("[C10H8N2]2+").
+_SIGNS = "+\\-−–⁺⁻"
+_DIGITS = rf"0-9{_SUPER_DIGITS}"
+_EXPLICIT_CHARGE = (
+    re.compile(rf"\(\s*(?P<n>[{_DIGITS}]*)\s*(?P<signs>[{_SIGNS}]+)\s*(?P<n2>[{_DIGITS}]*)\s*\)$"),
+    re.compile(rf"\^\s*(?P<n>[{_DIGITS}]*)\s*(?P<signs>[{_SIGNS}]+)\s*(?P<n2>[{_DIGITS}]*)$"),
+    re.compile(rf"\s+(?P<n>[{_DIGITS}]*)\s*(?P<signs>[{_SIGNS}]+)\s*(?P<n2>[{_DIGITS}]*)$"),
+    re.compile(rf"(?P<n>)(?P<signs>[{_SIGNS}])(?P<n2>[0-9]+)$"),
+)
+# "[C10H8N2]2+": the whole formula in square brackets (not an isotope label like [13C]).
+_RADICAL_MARKS = "•·."
+_BRACKETED_ION = re.compile(rf"^\[(?P<f>[A-Z].*)\][{_RADICAL_MARKS}]?(?P<n>[{_DIGITS}]*)"
+                            rf"(?P<signs>[{_SIGNS}]+)(?P<n2>[{_DIGITS}]*)$")
+_CHARGE_HINT = ("Write a charge at the end of the formula, as in C₁₀H₈N₂²⁺, C10H8N2++, "
+                "C10H8N2 2+ or C6H6+•.")
+
+
+def _charge_from(m: re.Match, text: str) -> int:
+    """The signed charge from a match with groups n, signs and n2. Raises ChemError."""
+    signs = m.group("signs").translate(str.maketrans("−–⁺⁻", "--+-"))
+    if set(signs) == {"+", "-"}:
+        raise ChemError(f"The charge at the end of “{text.strip()}” has both + and −.")
+    digits = (m.group("n") + m.group("n2")).translate(_CHARGE_TEXT)
+    if digits and (len(signs) > 1 or (m.group("n") and m.group("n2"))):
+        raise ChemError(f"The charge at the end of “{text.strip()}” can't be read: write "
+                        "it as ²⁺ or ++, not both.")
+    size = int(digits) if digits else len(signs)
+    if size == 0:
+        raise ChemError(f"The charge at the end of “{text.strip()}” is zero. {_CHARGE_HINT}")
+    return size if signs[0] == "+" else -size
+
+
+def parse_m_formula_and_charge(text: str) -> tuple[Counter, int]:
+    """(counts, charge) of a formula typed for M, e.g. "C6H8N2+" -> (C6H8N2, +1),
+    "C10H8N2²⁺", "C10H8N2++", "C10H8N2 2+", "C10H8N2(2+)", "C10H8N2+2" or "[C10H8N2]2+"
+    -> (C10H8N2, +2), "C2F3O2⁻" -> (C2F3O2, −1). A radical mark (•, · or .) before or
+    after the charge is allowed.
+
+    The charge only tells the program that M is already an ion (the "M is already
+    charged" hint); it never changes a mass: the adduct gives the ion's charge, and the
+    typed formula is M's atoms. Raises ChemError."""
+    cleaned = (text or "").translate(_SUBSCRIPT_DIGITS).strip()
+    cleaned = cleaned.rstrip(_RADICAL_MARKS + " \t")
+    charge = 0
+    m = _BRACKETED_ION.match(cleaned.replace(" ", ""))
+    if m:
+        charge = _charge_from(m, text)
+        cleaned = m.group("f")
+    else:
+        m = next((m for rx in _EXPLICIT_CHARGE if (m := rx.search(cleaned))), None)
+        if m is None:   # superscript digits or repeated signs: "C10H8N2²⁺", "C6H8N2+"
+            cleaned = cleaned.replace(" ", "")
+            m = _TYPED_CHARGE.search(cleaned)
+        if m:
+            charge = _charge_from(m, text)
+            cleaned = cleaned[:m.start()]
+    cleaned = cleaned.replace(" ", "").rstrip(_RADICAL_MARKS)
     if not cleaned:
         raise ChemError("The formula is empty.")
-    counts: Counter = Counter()
-    for iso, sym, n in _ISOTOPE_TOKEN.findall(cleaned):
-        counts[(sym, int(iso))] += int(n or 1)
-    rest = _ISOTOPE_TOKEN.sub("", cleaned)
-    if rest:
-        counts.update(parse_formula(rest))
-    return counts
+    try:
+        return _labelled_formula(cleaned), charge
+    except ChemError as e:
+        if any(c in (text or "") for c in "+-−–⁺⁻()^"):
+            raise ChemError(f"{e} {_CHARGE_HINT}") from None
+        raise
+
+
+def same_formula(a: Counter, b: Counter) -> bool:
+    """Whether two element counts are the same composition, with D the same as [2H] and
+    T the same as [3H] (a typed "[2H]" keeps its notation, but is not a different M)."""
+    def norm(counts: Counter) -> Counter:
+        out: Counter = Counter()
+        for (sym, iso), n in counts.items():
+            if sym == "H" and iso in (2, 3):
+                sym, iso = ("D" if iso == 2 else "T"), 0
+            out[(sym, iso)] += n
+        return +out
+    return norm(a) == norm(b)
 
 
 def info_from_counts(counts: Counter, charge: int = 0) -> MolInfo:
@@ -224,23 +375,126 @@ def species(mol: Chem.Mol) -> list[tuple[str, MolInfo]]:
     return [(smi, info) for smi, (_n, info) in ordered]
 
 
+# ---- common counter-ions (SPEC §13f.1): skipped by the automatic HRMS "M" of a salt
+
+# Recognised by structure: the canonical SMILES (without stereo or isotope labels) of each,
+# and of the free acid where a salt is often drawn with it (TfOH, TFA, MsOH, TsOH, HCl, HBr).
+_COUNTER_ION_SMILES = (
+    # halides (and HCl, HBr drawn next to an amine)
+    "[F-]", "[Cl-]", "[Br-]", "[I-]", "Cl", "Br",
+    # inorganic anions
+    "F[B-](F)(F)F", "F[P-](F)(F)(F)(F)F", "F[Sb-](F)(F)(F)(F)F", "F[As-](F)(F)(F)(F)F",
+    "[O-]Cl(=O)(=O)=O", "[O-][N+](=O)[O-]", "OS(=O)(=O)[O-]",
+    "[O-]S(=O)(=O)[O-]", "OS(=O)(=O)O",                     # sulfate, H2SO4
+    "[O-]C([O-])=O", "OC(=O)[O-]",                          # carbonate, bicarbonate
+    "[OH-]", "[H+]",                                        # hydroxide, a drawn proton
+    # sulfonates, sulfates, carboxylates
+    "COS(=O)(=O)[O-]",                                      # methyl sulfate (from Me2SO4)
+    "[O-]S(=O)(=O)C(F)(F)F", "OS(=O)(=O)C(F)(F)F",          # triflate, TfOH
+    "O=S(=O)([N-]S(=O)(=O)C(F)(F)F)C(F)(F)F",               # NTf2 (triflimide)
+    "[O-]C(=O)C(F)(F)F", "OC(=O)C(F)(F)F",                  # trifluoroacetate, TFA
+    "CS(=O)(=O)[O-]", "CS(=O)(=O)O",                        # mesylate, MsOH
+    "Cc1ccc(S(=O)(=O)[O-])cc1", "Cc1ccc(S(=O)(=O)O)cc1",    # tosylate, TsOH
+    # borates
+    "FC(F)(F)c1cc(cc(c1)C(F)(F)F)[B-](c1cc(cc(c1)C(F)(F)F)C(F)(F)F)"
+    "(c1cc(cc(c1)C(F)(F)F)C(F)(F)F)c1cc(cc(c1)C(F)(F)F)C(F)(F)F",          # BArF
+    "Fc1c(F)c(F)c([B-](c2c(F)c(F)c(F)c(F)c2F)(c2c(F)c(F)c(F)c(F)c2F)"
+    "c2c(F)c(F)c(F)c(F)c2F)c(F)c1F",                                       # B(C6F5)4
+    "c1ccc([B-](c2ccccc2)(c2ccccc2)c2ccccc2)cc1",                          # BPh4
+    # cations
+    "[Li+]", "[Na+]", "[K+]", "[Rb+]", "[Cs+]", "[NH4+]",
+    "C[N+](C)(C)C", "CC[N+](CC)(CC)CC", "CCCC[N+](CCCC)(CCCC)CCCC",        # NMe4, NEt4, NBu4
+    "CC[NH+](CC)CC", "CC[NH+](C(C)C)C(C)C",                 # Et3NH, iPr2NEtH (Hünig)
+    # PPN (bis(triphenylphosphine)iminium), as it is usually drawn
+    "c1ccc(cc1)P(c1ccccc1)(c1ccccc1)=[N+]=P(c1ccccc1)(c1ccccc1)c1ccccc1",
+    "c1ccc(cc1)[P+](c1ccccc1)(c1ccccc1)N=P(c1ccccc1)(c1ccccc1)c1ccccc1",
+    "c1ccc(cc1)[P+](c1ccccc1)(c1ccccc1)[N-][P+](c1ccccc1)(c1ccccc1)c1ccccc1",
+)
+
+
+def _counter_ion_key(mol: Chem.Mol) -> str:
+    """How a piece is compared with the counter-ion list: canonical SMILES without stereo
+    or isotope labels, explicit H removed."""
+    return Chem.MolToSmiles(Chem.RemoveHs(mol), isomericSmiles=False)
+
+
+def _counter_ion_keys() -> frozenset[str]:
+    keys = set()
+    for smi in _COUNTER_ION_SMILES:
+        mol = Chem.MolFromSmiles(smi)
+        if mol is not None:   # (every entry is checked by a test)
+            keys.add(_counter_ion_key(mol))
+    return frozenset(keys)
+
+
+_COUNTER_IONS = _counter_ion_keys()
+
+
+def is_counter_ion(smiles: str) -> bool:
+    """Whether a piece of a structure (its SMILES, as species gives it) is a common
+    counter-ion: a halide, BF4⁻, PF6⁻, SbF6⁻, AsF6⁻, ClO4⁻, NO3⁻, HSO4⁻, SO4²⁻, CO3²⁻,
+    HCO3⁻, OH⁻, MeSO4⁻, OTf⁻, NTf2⁻, TFA⁻, OMs⁻, OTs⁻, BArF⁻, B(C6F5)4⁻, BPh4⁻ (or TfOH,
+    TFA, MsOH, TsOH, HCl, HBr, H2SO4, or a proton drawn as H⁺), Li⁺, Na⁺, K⁺, Rb⁺, Cs⁺,
+    NH4⁺, NMe4⁺, NEt4⁺, NBu4⁺, Et3NH⁺, iPr2NEtH⁺ or PPN⁺."""
+    mol = Chem.MolFromSmiles(smiles)
+    return mol is not None and _counter_ion_key(mol) in _COUNTER_IONS
+
+
+def main_species(pieces: list[tuple[str, MolInfo]]) -> int:
+    """Index (in species' list) of the automatic M of a structure with several pieces:
+    the largest piece that is not a common counter-ion (so the cation of a triflate,
+    NTf2 or BArF salt, and the anion of a sodium or tetrabutylammonium salt), or the
+    largest piece when every piece is one (e.g. NBu4⁺ BF4⁻ itself)."""
+    return next((i for i, (smi, _info) in enumerate(pieces) if not is_counter_ion(smi)), 0)
+
+
+def main_piece(mol: Chem.Mol) -> Chem.Mol:
+    """The piece of a structure that is "the compound" once common counter-ions are left
+    out, by the same rule as main_species (the largest piece that is not a counter-ion, or
+    the largest when every piece is one); the structure itself when it is one piece.
+    For comparing structures (e.g. the manuscript check) the same way the HRMS M is chosen.
+    Works for a molecule that RDKit has not sanitised, and one with a generic atom."""
+    pieces = Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=False)
+    if len(pieces) < 2:
+        return mol
+    ordered = sorted(pieces, key=lambda m: -m.GetNumHeavyAtoms())   # (stable: as species)
+    for piece in ordered:
+        try:
+            key = _counter_ion_key(piece)
+        except Exception:  # noqa: BLE001 - an unreadable piece is not a counter-ion
+            key = ""
+        if key not in _COUNTER_IONS:
+            return piece
+    return ordered[0]
+
+
 def unique_carbons(mol: Chem.Mol) -> int:
     """Number of symmetry-distinct carbons (topological symmetry: e.g. 4 for toluene's ring
-    + 1 methyl = 5). An approximation of the number of ¹³C signals."""
-    ranks = Chem.CanonicalRankAtoms(mol, breakTies=False)
+    + 1 methyl = 5). An approximation of the number of ¹³C signals.
+    Stereo labels and atom-map numbers are ignored, so mirror-related carbons of meso and
+    cis/trans ring compounds count once; isotope labels (¹³C) still make a carbon distinct."""
+    ranks = Chem.CanonicalRankAtoms(mol, breakTies=False, includeChirality=False,
+                                    includeAtomMaps=False)
     return len({ranks[a.GetIdx()] for a in mol.GetAtoms() if a.GetSymbol() == "C"})
 
 
 def hydrogen_counts(mol: Chem.Mol) -> tuple[int, int]:
-    """(all hydrogens, hydrogens on N/O/S — exchangeable, often not seen in ¹H NMR)."""
+    """(¹H hydrogens, ¹H on N/O/S — exchangeable, often not seen in ¹H NMR).
+    Deuterium and tritium are left out (a ¹H spectrum does not show them); an H drawn as
+    its own atom counts once, on itself (GetTotalNumHs of its neighbour leaves it out)."""
     total = exchangeable = 0
     for atom in mol.GetAtoms():
-        h = atom.GetTotalNumHs()
-        if atom.GetSymbol() == "H":
-            h += 1
-        total += h
-        if atom.GetSymbol() in ("N", "O", "S"):
-            exchangeable += atom.GetTotalNumHs()
+        if atom.GetAtomicNum() == 1:
+            if atom.GetIsotope() in (2, 3):
+                continue
+            total += 1
+            if any(n.GetSymbol() in ("N", "O", "S") for n in atom.GetNeighbors()):
+                exchangeable += 1
+        else:
+            h = atom.GetTotalNumHs()   # implicit H and H counts are always ¹H
+            total += h
+            if atom.GetSymbol() in ("N", "O", "S"):
+                exchangeable += h
     return total, exchangeable
 
 
@@ -255,8 +509,8 @@ def parse_formula(text: str) -> Counter:
         raise ChemError(f"“{text}” is not a simple formula like Na, NH4 or HCOO.")
     counts: Counter = Counter()
     for sym, n in _FORMULA_TOKEN.findall(text):
-        if sym == "D":
-            counts[("D", 0)] += int(n or 1)
+        if sym in ("D", "T"):   # deuterium, tritium (as structures write them)
+            counts[(sym, 0)] += int(n or 1)
             continue
         try:
             _PT.GetAtomicNumber(sym)
@@ -280,18 +534,47 @@ class Adduct:
 
 
 def parse_adduct(label: str) -> Adduct:
-    text = label.strip().replace(" ", "").replace("−", "-")
+    text = label.strip().translate(_ADDUCT_TEXT)
+    close = text.rfind("]") + 1
+    text = text[:close] + text[close:].translate(_CHARGE_TEXT)
     m = _ADDUCT.match(text)
     if not m:
         raise ChemError(f"“{label}” is not an adduct I can read. Use the form [M+H]+, "
                         "[M+Na]+, [M-H]-, [2M+Na]+, [M+H-H2O]+ or [M+2H]2+.")
+    # Every part between M and "]" must be read (a skipped part would give a wrong ion).
+    mods = m.group("mods")
+    pieces, pos = [], 0
+    for p in _MOD.finditer(mods):
+        if p.start() != pos:
+            break
+        pieces.append(p)
+        pos = p.end()
+    if pos != len(mods):
+        raise ChemError(f"In “{label}”, I can't read “{mods[pos:]}”. Use plain formulas "
+                        "such as +Na, +NH4 or -H2O.")
     multimer = int(re.match(r"^\[(\d*)", text).group(1) or 1)
+    if multimer == 0:
+        raise ChemError(f"“{label}”: the number of M can't be 0 (use [M+H]+ or [2M+Na]+).")
+
+    def isotope(i: re.Match) -> str:   # "⁷Li" -> "[7Li]"
+        mass_number = int(i.group(1).translate(_CHARGE_TEXT))
+        try:
+            _isotope(i.group(2), mass_number)
+        except ChemError:
+            raise ChemError(f"In “{label}”, “{i.group(0)}” is not an isotope I know. A "
+                            "superscript number before an element is read as its mass "
+                            "number (as in ⁷Li); write a count as H2O or H₂O.") from None
+        return f"[{mass_number}{i.group(2)}]"
+
     delta: Counter = Counter()
-    for sign, mult, formula in _MOD.findall(m.group("mods")):
+    for sign, mult, formula in (p.groups() for p in pieces):
         n = int(mult or 1) * (1 if sign == "+" else -1)
-        for key, count in parse_formula(formula).items():
+        for key, count in _labelled_formula(_SUPER_ISOTOPE.sub(isotope, formula)).items():
             delta[key] += n * count
     z = int(m.group("z") or 1) * (1 if m.group("sign") == "+" else -1)
+    if z == 0:   # m/z would divide by 0
+        raise ChemError(f"“{label}”: the ion's charge can't be 0. "
+                        "Use e.g. [M+H]+, [M-H]- or [M+2H]2+.")
     return Adduct(label, multimer, delta, z, bool(m.group("rad")))
 
 
@@ -472,6 +755,27 @@ FONT_FILES = {
 }
 
 
+# Largest values read from project.json: well above the dialog's limits (a hand-edited
+# 30 pt font still works) but small enough that drawing cannot fail (inf, 1e300).
+_DRAWING_MAX = {"bond_length_cm": 20.0, "line_width_pt": 50.0, "font_size_pt": 200.0}
+
+
+def _setting_bool(value) -> bool | None:
+    """A hand-edited on/off setting: true/false, 0/1, or the words "true", "false", "yes",
+    "no", "on", "off", "1", "0". None for anything else (the default is kept)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("true", "1", "yes", "on"):
+            return True
+        if word in ("false", "0", "no", "off"):
+            return False
+    return None
+
+
 @dataclass(frozen=True)
 class DrawingSettings:
     """How the program draws structures (Project settings ▸ Structures, SPEC §13k.7).
@@ -493,12 +797,20 @@ class DrawingSettings:
         for name, default in out.__dict__.items():
             if name not in raw:
                 continue
-            try:
-                value = type(default)(raw[name])
-            except (TypeError, ValueError):
+            if isinstance(default, bool):   # (before the rest: a bool is also an int)
+                value = _setting_bool(raw[name])
+                if value is None:
+                    continue
+            elif isinstance(raw[name], bool):   # (float(True) would be a size of 1)
                 continue
-            if isinstance(default, float) and not value > 0:
-                continue
+            else:
+                try:
+                    value = type(default)(raw[name])
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if isinstance(default, float) and not (
+                        math.isfinite(value) and 0 < value <= _DRAWING_MAX[name]):
+                    continue
             values[name] = value
         return cls(**{**out.__dict__, **values})
 

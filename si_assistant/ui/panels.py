@@ -53,8 +53,17 @@ class SectionPanel(QWidget):
         if not name:
             self.name_edit.setText(self.section.name)
             return
-        with self.project.undo_step(f"Rename section “{self.section.name}”"):
-            self.project.rename_section(self.section.id, name)
+        old = self.section.name
+        try:
+            with self.project.undo_step(f"Rename section “{old}”"):
+                self.project.rename_section(self.section.id, name)
+        except (ProjectError, OSError) as e:
+            # The old name is back (in the box first: the warning taking the keyboard
+            # finishes the edit again, which then has nothing to save).
+            self.section.name = old
+            self.name_edit.setText(old)
+            QMessageBox.warning(self, "Could not save", str(e))
+            return
         self.renamed.emit(self.section.id, name)
         self.saved.emit("Saved")
 
@@ -108,20 +117,38 @@ class TextSectionPanel(SectionPanel):
         self._timer.setInterval(AUTOSAVE_DELAY_MS)
         self._timer.timeout.connect(self._save_text)
         self.editor.changed.connect(self._timer.start)
+        self._unsaved = False   # a save failed: tried again on flush or the next change
 
-    def _save_text(self) -> None:
+    def _save_text(self, leaving: bool = False) -> None:
         self._timer.stop()
         if self.project.read_only:
             return
-        with self.project.autosave():   # (typing: merged into one undo step)
-            self.project.write_section_text(self.section, self.editor.markup())
+        try:
+            with self.project.autosave():   # (typing: merged into one undo step)
+                self.project.write_section_text(self.section, self.editor.markup())
+        except (ProjectError, OSError) as e:
+            self._unsaved = True   # (the main window can see it before closing the page)
+            QMessageBox.warning(self, "Could not save", f"{e}\n\n" + (
+                "The latest changes on this page could not be saved, so they are lost if "
+                "the page is closed." if leaving else
+                "The text is still on the page; saving it is tried again with your next "
+                "change or when you leave the page."))
+            return
+        self._unsaved = False
         after_text_saved(self.editor)
         self.saved.emit("Saved")
 
+    def save_waiting(self) -> bool:
+        """Save typing still waiting (not the save made when leaving the page). False if
+        it failed (said so)."""
+        if self._timer.isActive() or self._unsaved:
+            self._save_text()
+        return not self._unsaved
+
     def flush(self) -> None:
         super().flush()
-        if self._timer.isActive():
-            self._save_text()
+        if self._timer.isActive() or self._unsaved:
+            self._save_text(leaving=True)
 
 
 # ---------------------------------------------------------------------- attachment section
@@ -228,6 +255,10 @@ class FileSectionPanel(PasteTargetMixin, SectionPanel):
         form.addRow("Heading:", self.heading_edit)
         form.addRow("Caption:", self.caption_edit)
         self.layout_.addLayout(form)
+        # A save of the heading/caption failed (section.json held, e.g. by OneDrive): tried
+        # again on flush; the main window asks before the page is closed.
+        self._unsaved = False
+        self._reported = None   # the (heading, caption) whose failed save was said
 
         buttons = QHBoxLayout()
         self.file_label = QLabel()
@@ -286,20 +317,36 @@ class FileSectionPanel(PasteTargetMixin, SectionPanel):
         MainWindow._set_panel)."""
         self.preview.show_file(None)
 
-    def _save_fields(self) -> None:
+    def _save_fields(self, leaving: bool = False) -> None:
         if self.project.read_only:
             return
         heading, caption = self.heading_edit.text(), self.caption_edit.text()
-        if (heading, caption) != (self.section.data.get("heading", ""),
-                                  self.section.data.get("caption", "")):
-            self.section.data["heading"] = heading
-            self.section.data["caption"] = caption
+        old = (self.section.data.get("heading", ""), self.section.data.get("caption", ""))
+        if (heading, caption) == old:
+            self._unsaved, self._reported = False, None
+            return
+        self.section.data["heading"] = heading
+        self.section.data["caption"] = caption
+        try:
             self.project.save_section(self.section)
-            self.saved.emit("Saved")
+        except (ProjectError, OSError) as e:
+            # (the old values go back, so the next flush sees the change and tries again)
+            self.section.data["heading"], self.section.data["caption"] = old
+            self._unsaved = True   # (the main window can see it before closing the page)
+            if leaving and self._reported == (heading, caption):
+                return   # (said a moment ago, e.g. as the box lost the keyboard: the
+                # main window now asks whether to leave anyway)
+            self._reported = (heading, caption)
+            QMessageBox.warning(self, "Could not save", f"{e}\n\nThe heading and caption "
+                                "are still on the page; saving them is tried again when you "
+                                "change them or leave the page.")
+            return
+        self._unsaved, self._reported = False, None
+        self.saved.emit("Saved")
 
     def flush(self) -> None:
         super().flush()
-        self._save_fields()
+        self._save_fields(leaving=True)
 
     def _choose(self) -> None:
         patterns = " ".join(f"*{ext}" for ext in FILE_SECTION_EXTENSIONS)

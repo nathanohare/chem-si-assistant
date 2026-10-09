@@ -197,26 +197,29 @@ def upgrade_old_scheme(scheme) -> None:
 def editor_data(scheme) -> dict:
     """The editor's part of scheme.json (made, empty, if there is none yet). A hand-edited
     file is tidied as it is read: lists that aren't lists become empty, texts that aren't
-    texts become text, and every step and box gets an ID."""
+    texts become text, and every step and box gets an ID. The lists are tidied in place,
+    so a list a caller already holds (find_box's) stays the one in the data."""
     data = scheme.data.get(EDITOR_KEY)
     if not isinstance(data, dict):
         data = scheme.data[EDITOR_KEY] = {}
     for key, empty in (("starting", list), ("steps", list), ("inline", dict)):
         if not isinstance(data.get(key), empty):
             data[key] = empty()
-    data["starting"] = [b for b in data["starting"] if _is_box(b)]
+    data["starting"][:] = [b for b in data["starting"] if _is_box(b)]
     steps = []
     for step in data["steps"]:
         if isinstance(step, dict):
             if not isinstance(step.get("id"), str) or not step["id"]:
                 step["id"] = new_id("st")
             products = step.get("products")
-            step["products"] = ([b for b in products if _is_box(b)]
-                                if isinstance(products, list) else [])
+            if isinstance(products, list):
+                products[:] = [b for b in products if _is_box(b)]
+            else:
+                step["products"] = []
             for which in ("top", "bottom"):
                 step[which] = _text(step.get(which))
             steps.append(step)
-    data["steps"] = steps
+    data["steps"][:] = steps
     return data
 
 
@@ -235,6 +238,9 @@ def _is_box(box) -> bool:
     for key in ("label", "yield"):
         if key in box and not isinstance(box[key], str):
             box[key] = _text(box[key])
+    for key in ("picture", "structure", "compound"):   # (hand-edited: not a name or ID)
+        if key in box and not isinstance(box[key], str):
+            del box[key]
     return True
 
 
@@ -246,12 +252,31 @@ def is_locked(scheme) -> bool:
 
 
 def set_locked(project, scheme, locked: bool) -> None:
+    """Lock ("Save scheme") or unlock ("Edit scheme") the editor. If scheme.json can't be
+    saved (e.g. held by OneDrive), the scheme in memory is put back as it was."""
     data = editor_data(scheme)
+    was = data.get("locked", _MISSING)
     if locked:
         data["locked"] = True
     else:
         data.pop("locked", None)
-    project.save_scheme(scheme)
+    try:
+        project.save_scheme(scheme)
+    except BaseException:
+        _put_back(data, "locked", was)
+        raise
+
+
+_MISSING = object()
+
+
+def _put_back(data: dict, key: str, old) -> None:
+    """Undo `data[key] = …` after a save failed (`old` is _MISSING: it was not there), so
+    memory still matches the file and a later save can't write it unseen."""
+    if old is _MISSING:
+        data.pop(key, None)
+    else:
+        data[key] = old
 
 
 def starting(scheme) -> list[dict]:
@@ -297,8 +322,9 @@ def step_number(scheme, step_id: str) -> int:
 
 
 def path_of(scheme, rel: str | None) -> Path | None:
-    """A file named in scheme.json (relative to the scheme's folder), or None."""
-    return scheme.folder / rel if rel else None
+    """A file named in scheme.json (relative to the scheme's folder), or None (also for a
+    hand-edited name that is not text)."""
+    return scheme.folder / rel if isinstance(rel, str) and rel else None
 
 
 def box_compound(project, scheme, box: dict):
@@ -354,7 +380,7 @@ def box_view(project, scheme, box: dict) -> BoxView:
     compound = box_compound(project, scheme, box)
     if compound is not None:
         picture = project.structure_image_path(compound)
-        return BoxView(box, compound, project.read_structure(compound),
+        return BoxView(box, compound, project.structure_for_drawing(compound),
                        picture if picture is not None and picture.exists() else None,
                        compound.values.get("structure") or {})
     picture = path_of(scheme, box.get("picture"))
@@ -380,6 +406,18 @@ def box_yield(project, scheme, box: dict) -> str:
 
 def yield_is_typed(box: dict) -> bool:
     return "yield" in box
+
+
+def conditions_yield_parts(project, scheme, step: dict) -> list[tuple[str, str]]:
+    """A step's yields as printed under its conditions (Layout ▸ yields under the
+    conditions): [(yield, ID label markup)] for each product with a yield. The label is ""
+    when only one product has a yield ("92%"), else "92% (3b), 5% (3c)". The scheme editor
+    and the compiler both use this, so what the editor shows is what prints."""
+    found = [(y, label_markup(project, scheme, box)) for box in step["products"]
+             if (y := box_yield(project, scheme, box))]
+    if len(found) == 1:
+        return [(found[0][0], "")]
+    return found
 
 
 def label_markup(project, scheme, box: dict) -> str:
@@ -507,6 +545,7 @@ def remove_box(project, scheme, box_id: str, delete_compound: bool = False):
     box, container, where = find_box(scheme, box_id)
     if box.get("compound"):
         unlink_box(project, scheme, box_id, delete_compound=delete_compound, copy=False)
+        box, container, where = find_box(scheme, box_id)
     entry = _trash_box(project, scheme, box, where)
     container.remove(box)
     sync_children(project, scheme, save=False)
@@ -550,8 +589,8 @@ def _trash_box(project, scheme, box: dict, where: str):
         return None
     info = {"scheme_id": scheme.id, "scheme_name": scheme.name, "where": where,
             "box": {k: v for k, v in box.items() if k != "compound"},
-            "files": {k: Path(box[k]).name for k in ("picture", "structure")
-                      if box.get(k) and path_of(scheme, box[k]).exists()}}
+            "files": {k: p.name for k in ("picture", "structure")
+                      if (p := path_of(scheme, box.get(k))) is not None and p.exists()}}
     return project._move_to_trash(files[0], kind="scheme_box", name="structure from scheme "
                                   f"“{scheme.name}”", extra=info,
                                   companions=tuple(files[1:]))
@@ -646,6 +685,9 @@ def set_box_structure(project, scheme, box_id: str, text: str, picture=None) -> 
                                          picture_ext=picture.ext)
         return project.set_structure(compound, text)
     mol = chem.parse_structure(text)
+    if picture is not None:   # (checked before the old files are removed)
+        from .project import PICTURE_FILE_EXTENSIONS
+        project._check_picture(None, picture.ext, PICTURE_FILE_EXTENSIONS)
     old_pictures = _box_files(scheme, box)
     for path in old_pictures:
         fileio.remove_file(path)
@@ -679,7 +721,9 @@ def set_box_picture(project, scheme, box_id: str, data: bytes | None = None,
         project.set_structure_image(compound, source=source, data=data, ext=ext,
                                     vector=vector, vector_ext=vector_ext)
         return
-    from .project import picture_source_path
+    from .project import PICTURE_FILE_EXTENSIONS, picture_source_path
+    # (checked before the old picture is removed: a file that can't be used changes nothing)
+    source, ext = project._check_picture(source, ext, PICTURE_FILE_EXTENSIONS)
     old = path_of(scheme, box.get("picture"))
     if old is not None and old.exists():
         original = picture_source_path(old)
@@ -748,8 +792,14 @@ def set_box_yield(project, scheme, box_id: str, text: str | None) -> None:
 def set_conditions(project, scheme, step_id: str, which: str, text: str) -> None:
     """The conditions above ("top") or under ("bottom") a step's arrow (markup)."""
     step = find_step(scheme, step_id)
-    step["top" if which == "top" else "bottom"] = text
-    project.save_scheme(scheme)
+    key = "top" if which == "top" else "bottom"
+    old = step.get(key, _MISSING)
+    step[key] = text
+    try:
+        project.save_scheme(scheme)
+    except BaseException:
+        _put_back(step, key, old)   # (the typing stays in its box, to be tried again)
+        raise
 
 
 def set_conditions_align(project, scheme, step_id: str, which: str, align: str) -> None:
@@ -781,7 +831,7 @@ def add_inline_structure(project, scheme, text: str, picture) -> str:
             mol = None
     if picture is None and mol is None:
         raise SchemeEditorError("The clipboard has no structure or picture to put in the "
-                                "conditions. Copy it in ChemDraw (Ctrl+C) first.")
+                                "conditions. Copy it in ChemDraw first.")
     sid = new_id("s")
     entry: dict[str, Any] = {}
     folder = scheme.folder / FILES_DIR
@@ -913,6 +963,8 @@ def link_new_compound(project, scheme, box_id: str, name: str = ""):
     box, _c, where = find_box(scheme, box_id)
     if box_compound(project, scheme, box) is not None:
         return box_compound(project, scheme, box)
+    # (A box with a generic structure (R, X, *: a general scheme) becomes a compound too:
+    # its structure is kept and drawn, without formula or masses, and the page warns.)
     compound = project.add_compound(scheme.section_id, _children_index(scheme, box_id),
                                     name=name, scheme_id=scheme.id)
     _give_box_files_to(project, scheme, box, compound)
@@ -933,7 +985,10 @@ def link_compound(project, scheme, box_id: str, compound_id: str) -> None:
         raise SchemeEditorError("That compound is not on this scheme page.")
     if compound_id in linked_compound_ids(scheme):
         raise SchemeEditorError("That compound is already shown by another box.")
-    if (project.read_structure(compound) is None
+    # (strict: a structure.mol that can't be read just now, e.g. offline, is not "no
+    # structure" — the box's must not be written over it; nor is one with an R/X/* atom,
+    # which the box then shows)
+    if (project.structure_for_drawing(compound, strict=True) is None
             and project.structure_image_path(compound) is None):
         _give_box_files_to(project, scheme, box, compound)
     box["compound"] = compound_id
@@ -971,37 +1026,67 @@ def _give_box_files_to(project, scheme, box: dict, compound) -> None:
         project.set_structure_image(compound, data=picture.read_bytes(),
                                     ext=picture.suffix.lower(), vector=vector,
                                     vector_ext=vector_ext)
-    if has_picture and drawing_scale.OVERRIDE_KEY in box:
-        project.set_structure_picture_bond(compound, box[drawing_scale.OVERRIDE_KEY])
+    # The box's typed bond length read as printing reads it (a hand-edited "abc" or true
+    # in scheme.json must not fail or become 1 pt).
+    bond, typed = drawing_scale.picture_bond(
+        {drawing_scale.OVERRIDE_KEY: box[drawing_scale.OVERRIDE_KEY]}
+        if drawing_scale.OVERRIDE_KEY in box else {}, None)
+    if has_picture and typed:
+        project.set_structure_picture_bond(compound, bond or 0.0)
     _clear_own_files(project, scheme, box)
 
 
-def _take_compound_files(project, scheme, box: dict, compound) -> None:
+def _take_compound_files(project, scheme, box: dict, compound,
+                         keep_old: bool = False) -> list[Path]:
     """A copy of the compound's structure and picture becomes the box's own (unlinking:
-    the scheme still shows the same structure)."""
-    _clear_own_files(project, scheme, box)
+    the scheme still shows the same structure). All or nothing: if a file can't be copied
+    (e.g. held by OneDrive), the copies made are removed and the box is left as it was
+    (OSError). Returns the files written. The box's own files from before are deleted, or
+    with `keep_old` only forgotten (the caller deletes them once the scheme is saved)."""
     folder = scheme.folder / FILES_DIR
     from .project import _unique_picture_path, picture_source_path
-    mol_path = project.structure_path(compound)
-    if mol_path.exists():
-        fileio.make_dirs(folder)
-        dest = _unique_picture_path(folder, box["id"], ".mol")
-        fileio.copy_file(mol_path, dest)
-        box["structure"] = f"{FILES_DIR}/{dest.name}"
-    picture = project.structure_image_path(compound)
-    if picture is not None and picture.exists():
-        fileio.make_dirs(folder)
-        dest = _unique_picture_path(folder, box["id"], picture.suffix.lower())
-        fileio.copy_file(picture, dest)
-        original = picture_source_path(picture)
-        if original is not None:
-            fileio.copy_file(original, dest.with_suffix(original.suffix.lower()))
-        box["picture"] = f"{FILES_DIR}/{dest.name}"
-        value = compound.values.get("structure") or {}
-        box["picture_source"] = project.structure_picture_source(compound) or "user"
-        for key in (drawing_scale.MEASURED_KEY, drawing_scale.OVERRIDE_KEY):
-            if key in value:
-                box[key] = value[key]
+    new: dict = {}
+    written: list[Path] = []
+    try:
+        mol_path = project.structure_path(compound)
+        if mol_path.exists():
+            fileio.make_dirs(folder)
+            dest = _unique_picture_path(folder, box["id"], ".mol")
+            fileio.copy_file(mol_path, dest)
+            written.append(dest)
+            new["structure"] = f"{FILES_DIR}/{dest.name}"
+        picture = project.structure_image_path(compound)
+        if picture is not None and picture.exists():
+            fileio.make_dirs(folder)
+            dest = _unique_picture_path(folder, box["id"], picture.suffix.lower())
+            fileio.copy_file(picture, dest)
+            written.append(dest)
+            original = picture_source_path(picture)
+            if original is not None:
+                kept = dest.with_suffix(original.suffix.lower())
+                fileio.copy_file(original, kept)
+                written.append(kept)
+            new["picture"] = f"{FILES_DIR}/{dest.name}"
+            value = compound.values.get("structure") or {}
+            new["picture_source"] = project.structure_picture_source(compound) or "user"
+            for key in (drawing_scale.MEASURED_KEY, drawing_scale.OVERRIDE_KEY):
+                if key in value:
+                    new[key] = value[key]
+    except BaseException:
+        for path in written:
+            try:
+                fileio.remove_file(path)
+            except OSError:
+                pass   # (the first error is the one reported)
+        raise
+    if keep_old:
+        for key in ("picture", "structure", "picture_source", drawing_scale.MEASURED_KEY,
+                    drawing_scale.OVERRIDE_KEY):
+            box.pop(key, None)
+    else:
+        _clear_own_files(project, scheme, box)
+    box.update(new)
+    return written
 
 
 def unlink_box(project, scheme, box_id: str, delete_compound: bool = False,
@@ -1012,28 +1097,109 @@ def unlink_box(project, scheme, box_id: str, delete_compound: bool = False,
     box, _c, _w = find_box(scheme, box_id)
     compound = box_compound(project, scheme, box)
     box.pop("compound", None)
-    if compound is not None:
-        if copy:
-            _take_compound_files(project, scheme, box, compound)
-        project.save_scheme(scheme)
-        if delete_compound:
-            project.delete_compound(compound.id)
+    if compound is not None and delete_compound:
+        # The page goes to the Trash first: if it can't (a file open in another program,
+        # or being synced), nothing has changed and the box stays linked. (Unlinked only
+        # in memory meanwhile, so deleting it doesn't copy its files into the box too.)
+        try:
+            entry = project.delete_compound(compound.id)
+        except Exception:
+            box["compound"] = compound.id
+            try:   # (the scheme may have been saved, unlinked, before the move failed)
+                project.save_scheme(scheme)
+            except Exception:
+                pass   # (the first error is the one reported)
+            raise
+        if copy:   # (the box's copy is taken from the compound's folder in the Trash)
+            folder = compound.folder
+            compound.folder = entry.folder / folder.name
+            try:
+                _take_compound_files(project, scheme, box, compound)
+            except OSError as e:
+                # (the page is in the Trash: the delete is done; the scheme is saved with
+                # the box unlinked and empty, and the user is told)
+                sync_children(project, scheme, save=False)
+                project.save_scheme(scheme)
+                from .project import BoxCopyFailed
+                raise BoxCopyFailed(entry, compound.name or "unnamed compound", e) from e
+            finally:
+                compound.folder = folder
+    elif compound is not None and copy:
+        _take_compound_files(project, scheme, box, compound)
     sync_children(project, scheme, save=False)
     project.save_scheme(scheme)
 
 
 def compound_leaving(project, scheme, compound_id: str) -> None:
-    """A sub-compound is about to be deleted or moved off this scheme page: the box that
-    showed it keeps a copy of its structure and picture, unlinked."""
-    if not isinstance(scheme.data.get(EDITOR_KEY), dict):
+    """A sub-compound is about to be moved off this scheme page: the box that showed it
+    keeps a copy of its structure and picture, unlinked, and the scheme is saved. All or
+    nothing: if a file can't be copied or scheme.json can't be saved (e.g. held by
+    OneDrive), the box is put back as it was (still linked, as in scheme.json) and the
+    copies made are removed (OSError)."""
+    leaving = leave_boxes(project, scheme, compound_id)
+    if leaving is None:
         return
-    for box, _where in all_boxes(scheme):
-        if box.get("compound") == compound_id:
+    try:
+        project.save_scheme(scheme)
+    except BaseException:
+        leaving.put_back()
+        raise
+    leaving.done()
+
+
+class Leaving:
+    """The boxes leave_boxes unlinked: put_back() if the scheme could not be saved, done()
+    once it is."""
+
+    def __init__(self, scheme, boxes: list[dict]):
+        self.boxes = boxes
+        self.before = [copy.deepcopy(b) for b in boxes]
+        self.old_files = [p for b in boxes for p in _box_files(scheme, b)]
+        self.written: list[Path] = []
+
+    def put_back(self) -> None:
+        """The boxes as they were (linked, as in scheme.json); the copies made removed."""
+        for box, was in zip(self.boxes, self.before):
+            box.clear()
+            box.update(copy.deepcopy(was))
+        for path in self.written:
+            try:
+                fileio.remove_file(path)
+            except OSError:
+                pass   # (the first error is the one reported; a spare copy does no harm)
+        self.written = []
+
+    def done(self) -> None:
+        """Saved: the boxes' own files from before (not used while linked) are removed."""
+        for path in self.old_files:
+            try:
+                fileio.remove_file(path)
+            except OSError:
+                pass   # (no longer used by any box: a spare file does no harm)
+
+
+def leave_boxes(project, scheme, compound_id: str) -> Leaving | None:
+    """compound_leaving without the save: the boxes linked to the compound are unlinked in
+    memory, each keeping a copy of its structure and picture. None if no box showed it.
+    The caller saves the scheme, then calls done() (or put_back() if the save failed). If
+    a file can't be copied, the boxes are put back as they were and the OSError raised."""
+    if not isinstance(scheme.data.get(EDITOR_KEY), dict):
+        return None
+    boxes = [b for b, _w in all_boxes(scheme) if b.get("compound") == compound_id]
+    if not boxes:
+        return None
+    leaving = Leaving(scheme, boxes)
+    try:
+        for box in boxes:
             compound = box_compound(project, scheme, box)
             box.pop("compound", None)
             if compound is not None:
-                _take_compound_files(project, scheme, box, compound)
-            project.save_scheme(scheme)
+                leaving.written += _take_compound_files(project, scheme, box, compound,
+                                                        keep_old=True)
+    except BaseException:
+        leaving.put_back()
+        raise
+    return leaving
 
 
 def start_with_compound(project, scheme, compound) -> None:

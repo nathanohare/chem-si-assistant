@@ -47,7 +47,7 @@ def chips(edit):
         while not it.atEnd():
             fmt = it.fragment().charFormat()
             if fmt.objectType() == rich_text.LINK_OBJECT:
-                out.append(fmt.property(rich_text.LINK_LABEL))
+                out.append(edit.chip_label(fmt))   # (the label shown)
             it += 1
         block = block.next()
     return out

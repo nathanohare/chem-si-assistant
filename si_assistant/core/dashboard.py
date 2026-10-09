@@ -17,7 +17,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import checks
+from . import checks, chem
 from . import fields as F
 from .markup import parse
 
@@ -131,6 +131,14 @@ class Row:
         return len(self.compound.flags)
 
     @property
+    def compact_id_warnings(self) -> list[str]:
+        """The warnings to show on the ID cell in the compact view, which hides the
+        structure column: the ID warnings, then the structure's own (e.g. a generic atom),
+        so a row kept by the "warnings" filter always shows why."""
+        s_cell = self.cells.get("structure")
+        return self.id_warnings + (list(s_cell.warnings) if s_cell is not None else [])
+
+    @property
     def warning_count(self) -> int:
         # Per-nucleus cells ("nmr:13C") repeat their field's warnings: count each field once.
         return len(self.id_warnings) + sum(len(c.warnings) for k, c in self.cells.items()
@@ -159,6 +167,23 @@ def available_columns(section) -> list[str]:
 SPLIT_FIELDS = ("nmr", "spectra")
 
 
+def _items(value) -> list[dict]:
+    """The reports / files of an "nmr" or "spectra" value; a hand-edited value that is not
+    a list (or an entry that is not a dictionary) counts as none, and a nucleus, text,
+    label or type that is not text (null, a list…) is read as F.part_text reads it."""
+    if not isinstance(value, list):
+        return []
+    return [{**v, **{k: F.part_text(v[k]) for k in ("nucleus", "text", "label", "type")
+                     if k in v and not isinstance(v[k], str)}}
+            for v in value if isinstance(v, dict)]
+
+
+def _parts(value) -> dict:
+    """A parts / citations value; a hand-edited value that is not a dictionary counts as
+    empty."""
+    return value if isinstance(value, dict) else {}
+
+
 def view_settings(section) -> dict:
     """A section's (or the project's) dashboard view choices; a hand-edited value that is
     not a dictionary counts as none."""
@@ -177,7 +202,7 @@ def _nucleus_order(n: str) -> tuple:
 def nmr_nuclei(section) -> list[str]:
     found = set(F.DEFAULT_NMR_NUCLEI)
     for c in section.compounds:
-        found |= {r.get("nucleus", "") for r in c.values.get("nmr") or [] if r.get("nucleus")}
+        found |= {r.get("nucleus", "") for r in _items(c.values.get("nmr")) if r.get("nucleus")}
     return sorted(found, key=_nucleus_order)
 
 
@@ -185,7 +210,7 @@ def spectrum_types(section) -> list[str]:
     nmr = nmr_nuclei(section)
     found = {n for n in nmr if n in F.SPECTRUM_TYPES}
     for c in section.compounds:
-        found |= {i.get("type", "") for i in c.values.get("spectra") or [] if i.get("type")}
+        found |= {i.get("type", "") for i in _items(c.values.get("spectra")) if i.get("type")}
     order = list(F.SPECTRUM_TYPES)
     return sorted(found, key=lambda t: (order.index(t) if t in order else len(order), t))
 
@@ -229,10 +254,10 @@ def field_label(section, key: str) -> str:
 
 # ---------------------------------------------------------------------- summaries
 
-def _plain(markup_text: str, limit: int = 40, project=None) -> str:
+def _plain(markup_text: str, limit: int = 40, project=None, report=None, labels=None) -> str:
     if project is not None:
         from .links import plain_text
-        text = plain_text(project, markup_text)
+        text = plain_text(project, markup_text, report, labels)
     else:
         text = " ".join(p.plain_text for p in parse(markup_text)).strip()
     return _shorten(text, limit)
@@ -243,27 +268,38 @@ def _shorten(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
-def field_summary(project, compound, defn: F.FieldDef) -> str:
+def field_summary(project, compound, defn: F.FieldDef, report=None, labels=None) -> str:
+    """A cell's short summary. `report` and `labels` (for the mentions in texts) can be
+    passed in when summarising many compounds, so they are worked out once."""
     value = compound.values.get(defn.key)
     if defn.key == "procedure":
-        own = _plain(project.read_compound_text(compound, defn.key), 200, project)
+        own = _plain(project.read_compound_text(compound, defn.key), 200, project, report,
+                     labels)
         gp = project.compound_gp(compound)
         return _shorten(f"{gp.get('name', '')} · {own}" if gp and own else
                         (gp.get("name", "") if gp else own), 40)
     if defn.kind == "richtext":
-        return _plain(project.read_compound_text(compound, defn.key), project=project)
+        return _plain(project.read_compound_text(compound, defn.key), project=project,
+                      report=report, labels=labels)
     if defn.kind == "citations":
-        ids = (value or {}).get("refs") or []
+        ids = _parts(value).get("refs") or []
         from . import references
         labels = [references.short_label(project.reference(i)) if project.reference(i)
                   else "⚠ missing" for i in ids]
         return _shorten("; ".join(labels), 40)
     if defn.kind == "structure":
-        info = project.structure_info(compound)
-        return info.formula if info else ""
+        try:
+            info = project.structure_info(compound)
+        except chem.ChemError:   # (no formula)
+            return ""
+        if info is None:
+            # A structure with a generic atom (R): stored and drawn, but no formula.
+            atoms = project.generic_structure_atoms(compound)
+            return f"no formula ({', '.join(atoms)})" if atoms else ""
+        return info.formula
 
     if defn.kind == "nmr":
-        reports = value or []
+        reports = _items(value)
         done = [F.nucleus_label(r.get("nucleus", "")) for r in reports if str(r.get("text", "")).strip()]
         todo = [F.nucleus_label(r.get("nucleus", "")) for r in reports if not str(r.get("text", "")).strip()]
         text = " ".join(done)
@@ -271,19 +307,19 @@ def field_summary(project, compound, defn: F.FieldDef) -> str:
             text += f" (empty: {' '.join(todo)})"
         return text.strip()
     if defn.kind == "private":
-        items = value or []
+        items = value if isinstance(value, list) else []
         return f"{len(items)} item{'s' if len(items) != 1 else ''}" if items else ""
     if defn.kind == "attachments":
-        items = value or []
+        items = value if isinstance(value, list) else []
         if not items:
             return ""
         if defn.key == "spectra":
-            return ", ".join(F.nucleus_label(i.get("type", "")) for i in items)
+            return ", ".join(F.nucleus_label(i.get("type", "")) for i in _items(items))
         return f"{len(items)} file{'s' if len(items) != 1 else ''}"
     if defn.kind == "parts":
-        value = value or {}
+        value = _parts(value)
         if defn.key == "hrms":
-            found = str(value.get("found", "")).strip()
+            found = F.part_text(value.get("found")).strip()
             if not found:
                 return ""
             result, _problem = checks.compound_hrms(project, compound)
@@ -291,7 +327,7 @@ def field_summary(project, compound, defn: F.FieldDef) -> str:
             return f"{found}{ppm}"
         pieces = []
         for part in defn.parts:
-            v = str(value.get(part.key, "")).strip()
+            v = F.part_text(value.get(part.key)).strip()
             if not v or (part.default and v == part.default and part.key not in defn.required_parts()):
                 continue
             if part.key.endswith("unit") and pieces:
@@ -305,15 +341,18 @@ def field_summary(project, compound, defn: F.FieldDef) -> str:
 
 # ---------------------------------------------------------------------- rows
 
-def build_rows(project, section, id_report=None) -> list[Row]:
+def build_rows(project, section, id_report=None, labels=None) -> list[Row]:
     id_report = id_report or project.id_report()
+    if labels is None:   # (the figure/table/scheme labels, once for all compounds)
+        from .labels import compute
+        labels = compute(project)
     required = section.required_keys()
     # (worked out once for the section, not per compound)
     columns = available_columns(section) + list(FIXED_KEYS)
     split = [k for base in SPLIT_FIELDS for k in split_keys(section, base)]
     rows = []
     for compound in section.compounds:
-        active = checks.active_warnings(project, compound, id_report)
+        active = checks.active_warnings(project, compound, id_report, labels)
         warnings: dict[str, list[str]] = {}
         for w in active:
             warnings.setdefault(w.field, []).append(w.message)
@@ -328,7 +367,7 @@ def build_rows(project, section, id_report=None) -> list[Row]:
                 state = FILLED
             else:
                 state = MISSING if key in required else EMPTY
-            cells[key] = Cell(state, field_summary(project, compound, defn),
+            cells[key] = Cell(state, field_summary(project, compound, defn, id_report, labels),
                               compound.flags.get(key), warnings.get(key, []))
         for key in split:
             cells[key] = _split_cell(compound, key, defs, required, cells)
@@ -345,7 +384,7 @@ def _split_cell(compound, key: str, defs: dict, required: set, cells: dict) -> C
     if base not in defs or parent is None:
         return Cell(NOT_USED)
     flag, warnings = parent.flag, parent.warnings
-    reports = [r for r in compound.values.get("nmr") or [] if r.get("nucleus") == sub] \
+    reports = [r for r in _items(compound.values.get("nmr")) if r.get("nucleus") == sub] \
         if "nmr" in defs else []
     if base == "nmr":
         if not reports:
@@ -356,7 +395,7 @@ def _split_cell(compound, key: str, defs: dict, required: set, cells: dict) -> C
             summary = ", ".join(labels) if labels else (f"{len(done)} reports" if len(done) > 1 else "")
             return Cell(FILLED, summary, flag, warnings)
         return Cell(MISSING if "nmr" in required else EMPTY, flag=flag, warnings=warnings)
-    items = [i for i in compound.values.get("spectra") or [] if i.get("type") == sub]
+    items = [i for i in _items(compound.values.get("spectra")) if i.get("type") == sub]
     if items:
         return Cell(FILLED, f"{len(items)} files" if len(items) > 1 else "", flag, warnings)
     if reports:  # there is an NMR report for this nucleus, so a spectrum is expected
@@ -394,13 +433,14 @@ SECTION_SEPARATOR = " › "
 
 # Plain names for the checks (core/checks.py), in the order they are shown.
 CHECK_LABELS = {
-    "id": "Compound IDs", "hrms": "HRMS", "c13": "¹³C signal count",
+    "id": "Compound IDs", "structure": "Generic atoms in structures", "hrms": "HRMS", "c13": "¹³C signal count",
     "h1": "¹H integration", "impurity": "Solvent or impurity peaks",
     "coupling": "Large J values",
     "yield": "Yield vs mass", "spectra": "Spectra vs NMR reports",
     "frequency": "NMR frequencies", "heteroatom": "Missing heteroatom NMR",
     "gp": "General procedures", "mention": "Deleted mentions",
-    "citation": "Missing references", "label": "Duplicate labels",
+    "citation": "Missing references",
+    "reference": "References that can't be printed as typed", "label": "Duplicate labels",
     "object": "Missing figure or table files",
     "gp_name": "Duplicate procedure names",
 }
@@ -530,8 +570,10 @@ class ProjectSummary:
 
 def project_rows(project, id_report=None) -> list[tuple[Any, list[Row]]]:
     """Every Data section (nested ones too, in tree order) with its dashboard rows."""
+    from .labels import compute
     id_report = id_report or project.id_report()
-    return [(s, build_rows(project, s, id_report)) for s in project.data_sections()]
+    labels = compute(project)
+    return [(s, build_rows(project, s, id_report, labels)) for s in project.data_sections()]
 
 
 def missing_fields(section, row: Row) -> list[str]:

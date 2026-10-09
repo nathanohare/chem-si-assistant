@@ -210,29 +210,41 @@ def manual_order(compound) -> list[tuple[str, str]]:
             if isinstance(e, (list, tuple)) and len(e) == 2]
 
 
+def list_value(compound, key: str) -> list:
+    """A compound's list value (the Spectra field, its NMR reports, …), or [] when it is
+    missing or not a list (a compound.json edited by hand)."""
+    value = compound.values.get(key)
+    return value if isinstance(value, list) else []
+
+
 def spectrum_items(project, compound, automatic: bool = False) -> list[tuple[str, dict]]:
     """(field key, item) of everything printed in the Spectra section for a compound, in
     order: the order set by hand if there is one (files not in it follow), or else the
     Spectra field by type, then files placed in the Spectra section. `automatic`: always
     the automatic order."""
     order = {t: i for i, t in enumerate(F.SPECTRUM_TYPES)}
-    items = [("spectra", item) for item in (compound.values.get("spectra") or [])
+    items = [("spectra", item) for item in list_value(compound, "spectra")
              if "spectra" in compound.field_keys and isinstance(item, dict)]
     items.sort(key=lambda t: order.get(t[1].get("type", ""), len(order)))
     for defn in project.field_defs(compound):
         if defn.kind == "attachments" and defn.key != "spectra":
-            items += [(defn.key, i) for i in compound.values.get(defn.key) or []
+            items += [(defn.key, i) for i in list_value(compound, defn.key)
                       if isinstance(i, dict) and i.get("placement") == "appendix"]
     manual = {} if automatic else {k: n for n, k in enumerate(manual_order(compound))}
     if manual:   # (a stable sort: files not in the order keep theirs, after the rest)
-        items.sort(key=lambda t: manual.get((t[0], str(t[1].get("file", ""))), len(manual)))
+        items.sort(key=lambda t: manual.get((t[0], F.part_text(t[1].get("file"))), len(manual)))
     return items
 
 
 def moved(project, compound, index: int, step: int) -> list[tuple[str, str]] | None:
     """The compound's spectrum files in print order, (field key, file name), with the one
-    at `index` moved `step` places (-1 up, +1 down); None if it can't move that way."""
-    files = [(k, str(i.get("file", ""))) for k, i in spectrum_items(project, compound)]
+    at `index` moved `step` places (-1 up, +1 down); None if it can't move that way.
+    The same list as the files of spectra_of (an item with no file name is left out)."""
+    files: list[tuple[str, str]] = []
+    for k, i in spectrum_items(project, compound):
+        name = F.part_text(i.get("file"))
+        if name and (k, name) not in files:
+            files.append((k, name))
     new = index + step
     if not (0 <= index < len(files) and 0 <= new < len(files)):
         return None
@@ -248,9 +260,9 @@ def guess_pasted_type(compound) -> str:
     nucleus of ¹H, ¹³C, ¹⁹F, ³¹P, ¹¹B that has a peak report with text but no spectrum
     yet; else ¹H when the compound has no spectra at all; else "Other". The user confirms
     it in a chooser, so it only saves a click."""
-    have = {str(i.get("type", "")) for i in compound.values.get("spectra") or []
+    have = {str(i.get("type", "")) for i in list_value(compound, "spectra")
             if isinstance(i, dict)}
-    reported = {str(r.get("nucleus", "")) for r in compound.values.get("nmr") or []
+    reported = {str(r.get("nucleus", "")) for r in list_value(compound, "nmr")
                 if isinstance(r, dict) and str(r.get("text", "")).strip()}
     for nucleus in PASTE_GUESS_ORDER:
         if nucleus in reported and nucleus not in have:
@@ -264,9 +276,44 @@ def compounds_with_spectra(project) -> list:
     return [c for c in project.all_compounds() if spectrum_items(project, c)]
 
 
+class PdfUnreadable(ValueError):
+    """A PDF that pypdf can't read; `encrypted`: it is password-protected (encrypted)."""
+
+    def __init__(self, message: str, encrypted: bool = False):
+        super().__init__(message)
+        self.encrypted = encrypted
+
+
+# What pypdf says about a password-protected PDF (or one encrypted with AES when the
+# 'cryptography' package is missing).
+_ENCRYPTED_ERRORS = ("DependencyError", "FileNotDecryptedError", "WrongPasswordError")
+
+_page_counts: dict[tuple, int | tuple[str, bool]] = {}
+
+
 def pdf_page_count(path: Path) -> int:
-    from pypdf import PdfReader
-    return len(PdfReader(str(path)).pages)
+    """How many pages a PDF has. Remembered until the file changes (its path, date and
+    size), so an edit, undo, Trash restore or OneDrive sync is counted again. A damaged
+    or password-protected PDF raises PdfUnreadable (also remembered); a file that can't
+    be read at all right now (locked, online-only while offline) raises OSError, and
+    nothing is remembered."""
+    st = Path(path).stat()
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    n = _page_counts.get(key)
+    if n is None:
+        from pypdf import PdfReader
+        try:
+            n = len(PdfReader(str(path)).pages)
+        except OSError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a damaged (or encrypted) PDF
+            n = (str(e) or type(e).__name__, type(e).__name__ in _ENCRYPTED_ERRORS)
+        if len(_page_counts) > 2000:
+            _page_counts.clear()
+        _page_counts[key] = n
+    if isinstance(n, tuple):
+        raise PdfUnreadable(*n)
+    return n
 
 
 @dataclass
@@ -294,28 +341,52 @@ def unreadable_message(name: str) -> str:
             "Export it again and replace it on the compound page.")
 
 
+def encrypted_message(name: str) -> str:
+    """What is said when a spectrum PDF is password-protected (encrypted)."""
+    return (f"{name} is password-protected (encrypted), so it can't be read. Save an "
+            "unprotected copy (e.g. Print ▸ Save as PDF) and replace it on the compound page.")
+
+
+def unreadable_now_message(name: str) -> str:
+    """What is said when a spectrum file is there but can't be read at the moment (open
+    in another program, an online-only OneDrive file while offline, no permission): the
+    file itself may be fine."""
+    return (f"{name} could not be read just now (it may be open in another program, or not "
+            "yet downloaded by OneDrive). Close it there or make it available offline, then "
+            "open this page again or compile again.")
+
+
 _svg_checked: dict[tuple, bool] = {}
 
 
-def svg_readable(path: Path) -> bool:
-    """Whether an SVG file is a whole, readable SVG drawing (a damaged one would stop
-    Typst from making the PDF at all). Remembered until the file changes."""
+def svg_state(path: Path) -> bool | None:
+    """True if an SVG file is a whole, readable SVG drawing, False if it is damaged (or
+    not an SVG), None if it can't be read just now (locked, offline). Remembered until the
+    file changes; "can't be read just now" is not remembered."""
     import xml.etree.ElementTree as ET
     try:
         st = Path(path).stat()
     except OSError:
-        return False
+        return None
     key = (str(path), st.st_mtime_ns, st.st_size)
     if key not in _svg_checked:
         try:
             root = ET.parse(path).getroot()
             ok = root.tag.rsplit("}", 1)[-1] == "svg"
-        except (ET.ParseError, OSError, ValueError):
+        except OSError:
+            return None   # locked / offline / being synced: tried again next time
+        except (ET.ParseError, ValueError):
             ok = False
         if len(_svg_checked) > 500:
             _svg_checked.clear()
         _svg_checked[key] = ok
     return _svg_checked[key]
+
+
+def svg_readable(path: Path) -> bool:
+    """Whether an SVG file is a whole, readable SVG drawing (a damaged one would stop
+    Typst from making the PDF at all). Remembered until the file changes."""
+    return svg_state(path) is True
 
 
 def spectra_of(project, compound, page_count=pdf_page_count, problems: list | None = None,
@@ -325,10 +396,15 @@ def spectra_of(project, compound, page_count=pdf_page_count, problems: list | No
     whose `problem` says so; a missing file is kept (the caller reports it)."""
     out = []
     for key, item in spectrum_items(project, compound):
-        path = project.attachment_path(compound, key, item.get("file", ""))
+        name = F.part_text(item.get("file"))   # (a hand-edited file name may be a number)
+        if not name:
+            continue
+        path = project.attachment_path(compound, key, name)
         pages: list[int | None] = [None]
-        if path.suffix.lower() == ".svg" and path.exists() and not svg_readable(path):
-            message = unreadable_message(path.name)
+        state = svg_state(path) if path.suffix.lower() == ".svg" and path.exists() else True
+        if state is not True:
+            message = (unreadable_now_message(path.name) if state is None
+                       else unreadable_message(path.name))
             if problems is not None:
                 problems.append(message)
             if keep_unreadable:
@@ -337,8 +413,12 @@ def spectra_of(project, compound, page_count=pdf_page_count, problems: list | No
         if path.suffix.lower() == ".pdf" and path.exists():
             try:
                 pages = list(range(1, page_count(path) + 1))
-            except Exception:  # noqa: BLE001 — report and keep going
-                message = unreadable_message(path.name)
+            except Exception as e:  # noqa: BLE001 — report and keep going
+                encrypted = getattr(e, "encrypted", False) or \
+                    type(e).__name__ in _ENCRYPTED_ERRORS
+                message = (unreadable_now_message(path.name) if isinstance(e, OSError)
+                           else encrypted_message(path.name) if encrypted
+                           else unreadable_message(path.name))
                 if problems is not None:
                     problems.append(message)
                 if keep_unreadable:
@@ -380,7 +460,7 @@ def nmr_nucleus(item: dict, compound=None) -> str | None:
         if re.search(rf"(?<![0-9A-Za-z]){re.escape(n)}(?![a-z])", stem):
             return n
     if compound is not None:
-        found = {str(r.get("nucleus", "")) for r in compound.values.get("nmr") or []
+        found = {str(r.get("nucleus", "")) for r in list_value(compound, "nmr")
                  if isinstance(r, dict)}
         found = sorted(n for n in found if n and n not in own_type and is_nucleus(n))
         if len(found) == 1:
@@ -407,8 +487,8 @@ def written_solvent(text: str) -> str:
 def nmr_conditions(compound, nucleus: str) -> tuple[str, str]:
     """(frequency "400 MHz", solvent as written in the report, e.g. "CDCl3" or "MeOD")
     from the compound's NMR report for this nucleus, as far as it says."""
-    for report in compound.values.get("nmr") or []:
-        if report.get("nucleus") != nucleus:
+    for report in list_value(compound, "nmr"):
+        if not isinstance(report, dict) or report.get("nucleus") != nucleus:
             continue
         text = " ".join(p.plain_text for p in parse(str(report.get("text", ""))))
         freq = re.search(r"(\d{2,4}(?:\.\d+)?)\s*MHz", text)
@@ -608,8 +688,13 @@ class CropCache:
             return None
         try:
             found = _valid_box(self.detect(path, page))
-        except Exception:  # noqa: BLE001 — an unreadable file is simply not cropped
-            found = None
+            if found is None:
+                # "Nothing to cut" from a file that can't even be opened now (a picture
+                # that is locked, or an online-only OneDrive file while offline): raises.
+                with open(path, "rb"):
+                    pass
+        except Exception:  # noqa: BLE001 — can't be read just now: not cropped, and not
+            return None    # remembered, so it is measured again next time
         if key is not None:
             data[key] = list(found) if found else None
             self._dirty = True

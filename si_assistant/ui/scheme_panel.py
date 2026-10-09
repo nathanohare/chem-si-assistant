@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBo
                                QSplitter, QTabBar, QToolButton, QVBoxLayout, QWidget)
 
 from ..core import scheme_editor as se
-from ..core.project import Project, ProjectError, SchemePage
+from ..core.project import BoxCopyFailed, Project, ProjectError, SchemePage
 from .compound_panel import CompoundPanel
 
 
@@ -20,6 +20,7 @@ class SchemePanel(QWidget):
     saved = Signal(str)
     compound_selected = Signal(str)      # tab changed: keep the tree selection in step
     view_spectra = Signal(str)           # a compound's "View spectra page": compound id
+    read_back = Signal()                 # a scheme change failed part-way (see the editor)
 
     def __init__(self, project: Project, scheme: SchemePage, user_name: Callable[[], str],
                  select_compound: str | None = None, collapsed: bool = False,
@@ -94,6 +95,8 @@ class SchemePanel(QWidget):
         from .scheme_editor_ui import SchemeEditorWidget
         self.editor = SchemeEditorWidget(project, scheme, own_bar=False)
         self.editor.saved.connect(self.saved)
+        self.editor.read_back.connect(self.read_back)
+        self.editor.before_change = self._before_editor_change
         self.editor.compounds_changed.connect(self._editor_compounds_changed)
         self.editor.height_changed.connect(self.fit_divider)
         self.editor.layout_changed.connect(self._update_label_placeholder)
@@ -200,16 +203,41 @@ class SchemePanel(QWidget):
         self.name_edit.setToolTip(self.scheme.name)
 
     def _commit_name(self) -> None:
+        """The name typed (its box was left): saved, or a warning if it can't be."""
+        try:
+            self._save_name()
+        except (ProjectError, OSError) as e:
+            self._say_once(self.name_edit, "Could not save the name", e)
+
+    def _say_once(self, edit: QLineEdit, title: str, e: Exception) -> None:
+        """The save of the text typed in `edit` (the name or label) failed: said, unless it
+        was said for the same text a moment ago. Remembered, so leaving the page doesn't
+        say it again (the main window then only asks whether to leave anyway)."""
+        text = edit.text().strip()
+        if getattr(edit, "_said", None) == text:
+            return
+        edit._said = text
+        QMessageBox.warning(self, title, f"{e}\n\nWhat you typed is still in its box; "
+                            "saving it is tried again when you change it or leave the page.")
+
+    def _save_name(self) -> None:
+        """Raises ProjectError/OSError when scheme.json can't be saved (e.g. held)."""
         name = self.name_edit.text().strip()
         if not self.name_edit.hasFocus():
             self.name_edit.setCursorPosition(0)   # (clicked away: show the start again)
-        if self.project.read_only or name == self.scheme.name:
+        if self.project.read_only:
+            return
+        if name == self.scheme.name:
+            self.name_edit._unsaved = False   # (nothing (more) to save)
             return
         if not name:
             self.name_edit.setText(self.scheme.name)
             self._show_name_start()
+            self.name_edit._unsaved = False
             return
-        self.project.rename_scheme(self.scheme.id, name)
+        self._saving_scheme_value("name", lambda: self.project.rename_scheme(self.scheme.id,
+                                                                             name),
+                                  self.name_edit)
         self.name_edit.setToolTip(self.scheme.name)
         self.labels_changed.emit()
         self.saved.emit("Saved")
@@ -240,34 +268,91 @@ class SchemePanel(QWidget):
         self.label_edit.setStyleSheet("QLineEdit { color: #d35400; }" if duplicate else "")
 
     def _commit_label(self) -> None:
-        label = self.label_edit.text().strip()
-        if self.project.read_only or label == str(self.scheme.data.get("label", "")):
-            return
         try:
-            self.project.set_scheme_label(self.scheme.id, label)
+            self._save_label()
         except (ProjectError, OSError) as e:
-            QMessageBox.warning(self, "Could not save the label", str(e))
+            self._say_once(self.label_edit, "Could not save the label", e)
+
+    def _save_label(self) -> None:
+        """Raises ProjectError/OSError when scheme.json can't be saved (e.g. held)."""
+        label = self.label_edit.text().strip()
+        if self.project.read_only:
             return
+        if label == str(self.scheme.data.get("label", "")):
+            self.label_edit._unsaved = False   # (nothing (more) to save)
+            return
+        self._saving_scheme_value("label", lambda: self.project.set_scheme_label(
+            self.scheme.id, label), self.label_edit)
         self._update_label_placeholder()
+
+    _MISSING = object()
+
+    def _saving_scheme_value(self, key: str, save: Callable[[], None],
+                             edit: QLineEdit) -> None:
+        """`save` puts the value typed in `edit` in scheme.json. If that fails (the file is
+        held), the scheme in memory goes back to what scheme.json still has: the box keeps
+        the typing, which is tried again (and is not written unseen by another save); its
+        _unsaved tells the main window, which asks before the page is closed."""
+        before = self.scheme.data.get(key, self._MISSING)
+        try:
+            save()
+        except (ProjectError, OSError):
+            if before is self._MISSING:
+                self.scheme.data.pop(key, None)
+            else:
+                self.scheme.data[key] = before
+            edit._unsaved = True
+            raise
+        edit._unsaved, edit._said = False, None
         self.labels_changed.emit()
         self.saved.emit("Saved")
 
     # ------------------------------------------------------------------ sub-pages (tabs)
 
-    def _fill_tabs(self, select: str | None = None) -> None:
+    def _fill_tabs(self, select: str | None = None, held: str | None = None) -> None:
+        """`held`: the compound on show whose typing could not be saved a moment ago, in
+        the same action: it stays on show, without trying (and waiting) again."""
+        # Save typing still waiting on the page on show (it is replaced below), unless that
+        # compound has just been removed: saving it would re-create its folder.
+        old, keep = self.compound_panel, None
+        if old is not None:
+            try:
+                alive = self.project.compound(old.compound.id) is old.compound
+            except KeyError:
+                alive = False
+            if alive and old.compound.id == held:
+                keep = held
+            elif alive:
+                try:
+                    old.flush()
+                except (ProjectError, OSError) as e:
+                    # (its file is held, e.g. by OneDrive: that page stays on show with its
+                    # typing, which is tried again with the next edit or when it is left)
+                    keep = old.compound.id
+                    self.saved.emit(f"Could not save ({e}). It is tried again with your next "
+                                    "edit or when you leave this page.")
         self.tabs.blockSignals(True)
         while self.tabs.count():
             self.tabs.removeTab(0)
         report = self.project.id_report()
         for child in self.scheme.children:
-            i = self.tabs.addTab(f"{report.display_id(child.id)}  {child.name or '(unnamed)'}")
+            # ('&&': a name like "R&D" shows its "&", not an Alt+ shortcut)
+            i = self.tabs.addTab(f"{report.display_id(child.id)}  "
+                                 f"{(child.name or '(unnamed)').replace('&', '&&')}")
             self.tabs.setTabData(i, child.id)
-        self.tabs.blockSignals(False)
         ids = [c.id for c in self.scheme.children]
+        if keep in ids:
+            select = keep
         index = ids.index(select) if select in ids else (0 if ids else -1)
         if index >= 0:
-            self.tabs.setCurrentIndex(index)
-        self._show_compound(ids[index] if index >= 0 else None)
+            self.tabs.setCurrentIndex(index)   # (quietly: the page is built once, below)
+        self.tabs.blockSignals(False)
+        cid = ids[index] if index >= 0 else None
+        if cid is None or cid != keep:
+            self._show_compound(cid)
+        if cid:
+            # (the main window keeps the tree and its page place, used for undo, on this tab)
+            self.compound_selected.emit(cid)
 
     def _refresh_tab_texts(self) -> None:
         report = self.project.id_report()
@@ -277,7 +362,8 @@ class SchemePanel(QWidget):
                 c = self.project.compound(cid)
             except KeyError:
                 continue
-            self.tabs.setTabText(i, f"{report.display_id(cid)}  {c.name or '(unnamed)'}")
+            self.tabs.setTabText(i, f"{report.display_id(cid)}  "
+                                    f"{(c.name or '(unnamed)').replace('&', '&&')}")
 
     def undo_context(self) -> tuple:
         """(merge key, label) of the undo step for this page's saves (SPEC §13k.11): the
@@ -293,7 +379,10 @@ class SchemePanel(QWidget):
         return self.tabs.tabData(i) if i >= 0 else None
 
     def has_compound(self, cid: str) -> bool:
-        return any(self.tabs.tabData(i) == cid for i in range(self.tabs.count()))
+        return cid in self._tab_ids()
+
+    def _tab_ids(self) -> list[str]:
+        return [self.tabs.tabData(i) for i in range(self.tabs.count())]
 
     def select_compound(self, cid: str) -> None:
         for i in range(self.tabs.count()):
@@ -302,10 +391,41 @@ class SchemePanel(QWidget):
                 return
 
     def _tab_changed(self, index: int) -> None:
-        self.flush()
+        try:
+            self._flush_scheme()
+        except (ProjectError, OSError) as e:
+            # (the scheme's own file: the tab can still change, the compound page on show
+            # is saved by itself below)
+            self.saved.emit(f"Could not save the scheme page ({e}). It is tried again with "
+                            "your next edit or when you leave this page.")
+        try:
+            self._flush_compound()
+        except (ProjectError, OSError) as e:
+            # (the tab on show can't be saved, e.g. held by OneDrive: it stays on show with
+            # its typing, which is tried again with the next edit or when it is left)
+            self.saved.emit(f"Could not save the compound page on show ({e}). It is tried "
+                            "again with your next edit or when you leave this page.")
+            shown = self.compound_panel.compound.id if self.compound_panel else None
+            if shown is not None:
+                self.tabs.blockSignals(True)
+                self.select_compound(shown)
+                self.tabs.blockSignals(False)
+                # The tree, and the page's place for undo, go back to it too (the switch may
+                # have come from a click in the tree, which sets both to the compound
+                # clicked once this returns: so this is done just after).
+                QTimer.singleShot(0, self, lambda: self._still_on_show(shown))
+            return
         cid = self.tabs.tabData(index) if index >= 0 else None
         self._show_compound(cid)
         if cid:
+            self.compound_selected.emit(cid)
+
+    def _still_on_show(self, cid: str) -> None:
+        """After a tab change that could not happen: the main window's tree selection
+        follows the compound still on show."""
+        panel = self.compound_panel
+        if panel is not None and panel.compound.id == cid \
+                and self.current_compound_id() == cid:
             self.compound_selected.emit(cid)
 
     def _show_compound(self, cid: str | None) -> None:
@@ -342,44 +462,163 @@ class SchemePanel(QWidget):
         self.add_menu.setToolTipsVisible(True)
 
     def add_compound(self) -> None:
-        self.flush()
-        index = self.tabs.currentIndex() + 1 if self.tabs.currentIndex() >= 0 else None
+        # (typing waiting to be saved: its own undo step first)
         try:
-            compound = self.project.add_compound(self.scheme.section_id, index,
-                                                 scheme_id=self.scheme.id)
+            self._flush_scheme()
+        except (ProjectError, OSError) as e:
+            # (the new compound is listed in scheme.json: it can't be added either now)
+            QMessageBox.warning(
+                self, "Could not save",
+                f"The scheme page could not be saved yet ({e}), so no compound was added. "
+                "Try again in a moment (its file may be open in another program or being "
+                "synced).")
+            return
+        held = None
+        try:
+            self._flush_compound()
+        except (ProjectError, OSError) as e:
+            # (carries on: the page on show then stays on show with its typing)
+            held = self.compound_panel.compound.id if self.compound_panel else None
+            QMessageBox.warning(
+                self, "Could not save",
+                f"The typing on the compound page on show could not be saved yet ({e}). "
+                "The new compound is added as a tab; the page you were typing on stays open "
+                "until it can be saved (its file may be open in another program or being "
+                "synced). Try again in a moment.")
+        index = self.tabs.currentIndex() + 1 if self.tabs.currentIndex() >= 0 else None
+        scheme, shown = self.scheme, self.current_compound_id()
+        # (undone: the tab that was on show; redone: the new compound)
+        where = ([("compound", shown)] if shown else []) + \
+            [("scheme", scheme.id), ("section", scheme.section_id)]
+        try:
+            with self.project.undo_step("New compound", where) as step:
+                compound = self.project.add_compound(scheme.section_id, index,
+                                                     scheme_id=scheme.id)
+                if step is not None:   # (None when the project keeps no history)
+                    step.where.insert(0, ("compound", compound.id))
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not add compound", str(e))
+            if [c.id for c in scheme.children] != self._tab_ids():
+                # (added in memory but not saved: its tab shows it as it is)
+                self._fill_tabs(shown, held=held)
+                self.labels_changed.emit()
             return
-        self._fill_tabs(compound.id)
+        self._fill_tabs(compound.id, held=held)
         self.labels_changed.emit()
-        if self.compound_panel is not None:
+        if self.compound_panel is not None and self.compound_panel.compound is compound:
             self.compound_panel.focus_field("name")
 
     def _close_tab(self, index: int) -> None:
         cid = self.tabs.tabData(index)
         compound = self.project.compound(cid)
+        shown = self.project.id_report().display_id(cid)   # (before renumbering)
         if QMessageBox.question(
                 self, "Delete compound",
-                f"Delete “{self.project.id_report().display_id(cid)} "
+                f"Delete “{shown} "
                 f"{compound.name or '(unnamed)'}” from this scheme?\n\nIt will be moved to the "
                 "project Trash and can be restored. Compounds after it will be renumbered."
         ) != QMessageBox.StandardButton.Yes:
             return
-        self.flush()
-        self._show_compound(None)
         try:
-            self.project.delete_compound(cid)
+            self._flush_scheme()
+        except (ProjectError, OSError) as e:
+            # (deleting changes scheme.json too: it would stop half-way)
+            QMessageBox.warning(
+                self, "Could not save",
+                f"The scheme page could not be saved yet ({e}), so nothing was deleted. Try "
+                "again in a moment (its file may be open in another program or being "
+                "synced).")
+            return
+        on_show = self.current_compound_id()
+        held = None
+        try:
+            self._flush_compound()
+        except (ProjectError, OSError) as e:
+            panel = self.compound_panel
+            held = panel.compound.id if panel is not None else None
+            if panel is None or panel.compound.id != cid:
+                # (closing the page on show would throw its typing away: nothing deleted)
+                QMessageBox.warning(
+                    self, "Could not save",
+                    f"The typing on the compound page on show could not be saved yet ({e}), "
+                    "so nothing was deleted. Try again in a moment (its file may be open in "
+                    "another program or being synced).")
+                return
+            # The typing waiting is on the very compound being deleted: it goes with it. Its
+            # page stays until the delete has worked (a held file usually stops the move to
+            # the Trash too: the page, and its typing still waiting, are then kept).
+        else:
+            self._show_compound(None)
+        scheme = self.scheme
+        try:
+            with self.project.undo_step(f"Delete compound {shown}",
+                                        [("compound", cid), ("scheme", scheme.id),
+                                         ("section", scheme.section_id)]):
+                self.project.delete_compound(cid)
+        except BoxCopyFailed as e:   # (deleted: only its box in the scheme is left empty)
+            QMessageBox.warning(self, "Scheme box left empty", str(e))
         except (ProjectError, OSError) as e:
             QMessageBox.warning(self, "Could not delete", str(e))
-        self._fill_tabs()
+        # (the page that was on show, if it is still there; its typing that could not be
+        # saved just now is not tried, and waited on, again)
+        self._fill_tabs(on_show, held=held)
         self.editor.rebuild()   # (its box keeps a copy of the structure, unlinked)
         self.labels_changed.emit()
 
     # ------------------------------------------------------------------ saving
 
     def flush(self) -> None:
-        self._commit_name()
-        self._commit_label()
-        self.editor.flush()
+        """Save all typing waiting on the page. Both parts are tried (a held scheme.json
+        doesn't stop the compound tab's typing from being saved); the first failure is
+        raised (ProjectError/OSError). A failure of the scheme's own typing that was said a
+        moment ago (as its box was left, or by the conditions' autosave), with nothing typed
+        since, is not raised again: the main window sees it waiting (_unsaved) and only
+        asks whether to leave anyway."""
+        failed = None
+        for part in (self._flush_scheme, self._flush_compound):
+            try:
+                part()
+            except (ProjectError, OSError) as e:
+                if part == self._flush_scheme and self._scheme_failures_said():
+                    continue
+                failed = failed or e
+        if failed is not None:
+            raise failed
+
+    def _scheme_failures_said(self) -> bool:
+        """Each name, label or conditions box whose save failed was said, with nothing
+        typed in it since (False if none is marked as waiting)."""
+        edits = [e for e in (self.name_edit, self.label_edit)
+                 if getattr(e, "_unsaved", False) is True]
+        steps = [s for s in self.editor.steps if s._unsaved]
+        if not edits and not steps:
+            return False
+        return (all(getattr(e, "_said", None) == e.text().strip() for e in edits)
+                and all(s.failures_said() for s in steps))
+
+    def _flush_scheme(self) -> None:
+        """Save the scheme page's own typing: its name, label, and the scheme editor's. All
+        are tried (the first failure is raised)."""
+        failed = None
+        for part in (self._save_name, self._save_label, self.editor.flush):
+            try:
+                part()
+            except (ProjectError, OSError) as e:
+                failed = failed or e
+        if failed is not None:
+            raise failed
+
+    def _before_editor_change(self) -> None:
+        """Before a scheme editor change: the scheme's name and label typed are saved first
+        (a change that fails part-way reads the project back from its files, which would
+        drop them), then the compound tab's typing. Raises ProjectError/OSError if one
+        can't be saved yet: the change is then not made."""
+        self._save_name()
+        self._save_label()
+        self._flush_compound()
+
+    def _flush_compound(self) -> None:
+        """Save the compound tab's typing now (before the scheme editor changes the
+        compounds: its tab is then rebuilt without saving)."""
         if self.compound_panel is not None:
             self.compound_panel.flush()

@@ -49,11 +49,14 @@ DESK = "#d9dce1"           # around the spectrum
 _last_shown: dict[str, tuple] = {}
 
 _pages: OrderedDict[tuple, QImage] = OrderedDict()   # rendered spectrum pages
-PAGE_CACHE_SIZE = 24
+_pages_bytes = 0                                      # their size in memory
+PAGE_CACHE_BYTES = 80 * 1024 * 1024   # about 7 pasted-picture pages or 17 PDF pages
 
 
 def page_image(path: Path, page: int | None) -> QImage:
-    """A spectrum page drawn for the screen (kept until the file changes)."""
+    """A spectrum page drawn for the screen (kept until the file changes). A page that
+    can't be drawn (empty picture) is not kept: the file may be readable next time."""
+    global _pages_bytes
     try:
         st = path.stat()
     except OSError:
@@ -61,12 +64,30 @@ def page_image(path: Path, page: int | None) -> QImage:
     key = (str(path), st.st_mtime_ns, st.st_size, page)
     image = _pages.get(key)
     if image is None:
-        image = render_page(path, page, SCREEN_DPI)
+        try:
+            image = render_page(path, page, SCREEN_DPI)
+        except OSError:
+            return QImage()   # locked, or an online-only OneDrive file while offline
+        if image.isNull():
+            return image
         _pages[key] = image
-        while len(_pages) > PAGE_CACHE_SIZE:
-            _pages.popitem(last=False)
+        _pages_bytes += image.sizeInBytes()
+        # The oldest pages go above the budget, but the newest one is always kept.
+        while _pages_bytes > PAGE_CACHE_BYTES and len(_pages) > 1:
+            _old_key, old = _pages.popitem(last=False)
+            _pages_bytes -= old.sizeInBytes()
     _pages.move_to_end(key)
     return image
+
+
+def _openable(path: Path) -> bool:
+    """Whether a file can be opened at all just now (not locked, not an online-only
+    OneDrive file while offline)."""
+    try:
+        with open(path, "rb"):
+            return True
+    except OSError:
+        return False
 
 
 _SUP = str.maketrans("0123456789", "⁰¹²³⁴⁵⁶⁷⁸⁹")
@@ -105,7 +126,7 @@ def structure_source(project: Project, compound: Compound):
 
     if project.settings.get("compile_structures", "pictures") == "pictures" and has_picture:
         return as_picture()
-    mol = project.read_structure(compound)
+    mol = project.structure_for_drawing(compound)   # (also one with an R group)
     if mol is None:
         return as_picture() if has_picture else None
     text, size = drawn_structure(mol, chem.DrawingSettings.from_settings(project.settings))
@@ -394,9 +415,14 @@ class SpectrumCanvas(QWidget):
             self.box_resized.emit(self.values["struct_scale"])
         self.update()
 
+    def _interactive(self) -> bool:
+        """The box can be dragged or resized only while it is drawn: the page can be
+        changed and a spectrum is shown (not a "missing" or "could not be opened" note)."""
+        return self.editable and not self.image.isNull()
+
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = event.position()
-        if self.editable and event.button() == Qt.MouseButton.LeftButton:
+        if self._interactive() and event.button() == Qt.MouseButton.LeftButton:
             handle = self._handle_at(pos)
             if handle is not None:
                 self.start_resize(handle, pos)
@@ -409,8 +435,9 @@ class SpectrumCanvas(QWidget):
         if self._mode:
             self.drag_to(pos)
             return
-        handle = self._handle_at(pos) if self.editable else None
-        over = self.editable and self.box_rect().contains(pos)
+        ok = self._interactive()
+        handle = self._handle_at(pos) if ok else None
+        over = ok and self.box_rect().contains(pos)
         if handle in ("top-left", "bottom-right"):
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         elif handle is not None:
@@ -469,6 +496,7 @@ class SpectraPagePanel(QWidget):
 
     saved = Signal(str)            # status-bar message (the live preview updates too)
     open_compound = Signal(str)    # "Compound page" was clicked: compound id
+    spectra_changed = Signal()     # a spectrum was added: the tree's warnings may change
 
     def __init__(self, project: Project, compound: Compound, parent: QWidget | None = None):
         super().__init__(parent)
@@ -628,6 +656,10 @@ class SpectraPagePanel(QWidget):
         self._timer.setSingleShot(True)
         self._timer.setInterval(SAVE_DELAY_MS)
         self._timer.timeout.connect(self._save)
+        self._unsaved = False   # a save failed: tried again on flush or the next change
+        # The header or caption typed whose save failed is marked on its box (_unsaved:
+        # the main window asks before the page is closed); the text whose failure was said.
+        self._reported_text: dict[str, str] = {}
 
         self._fill_list()
         if not self.spectra:
@@ -915,6 +947,7 @@ class SpectraPagePanel(QWidget):
             self.settings_box.setEnabled(True)
             self.text_box.setEnabled(True)
         self._reload_spectra()
+        self.spectra_changed.emit()
         self.saved.emit(outcome.message)
 
     # ------------------------------------------------------------------ the order of the files
@@ -947,10 +980,24 @@ class SpectraPagePanel(QWidget):
         self.auto_order_btn.setEnabled(editable and manual)
 
     def _reload_spectra(self) -> None:
-        """Read the compound's spectra again (after the order changed) and show the same one."""
+        """Read the compound's spectra again (after the order changed) and show the same one.
+        A header or caption typed for it that could not be saved stays in its box, still
+        waiting to be saved (it is not lost unseen)."""
+        waiting = None
+        if self._text_waits() and self.current is not None:
+            waiting = (self._spectrum_key(self.current),
+                       [(edit, edit.text()) for edit in (self.header_edit, self.caption_edit)
+                        if getattr(edit, "_unsaved", False) is True],
+                       dict(self._reported_text))
         self.spectra = S.spectra_of(self.project, self.compound, keep_unreadable=True)
         self.current = None
         self._fill_list()
+        if waiting is not None and self.current is not None \
+                and self._spectrum_key(self.current) == waiting[0]:
+            for edit, text in waiting[1]:
+                edit.setText(text)
+                edit._unsaved = True
+            self._reported_text.update(waiting[2])
 
     def move_file(self, step: int) -> None:
         """Print the shown spectrum's file (all its pages) one place earlier (-1) or later
@@ -1005,6 +1052,17 @@ class SpectraPagePanel(QWidget):
 
     def _show_spectrum(self, row: int) -> None:
         self.flush()
+        shown = next((i for i, sp in enumerate(self.spectra) if sp is self.current), -1)
+        if self._text_waits() and 0 <= shown != row and not self._show_other_anyway():
+            # (the header or caption typed for this spectrum could not be saved: it stays
+            # on show, so the typing is not lost; tried again on the next flush)
+            self.list.blockSignals(True)
+            self.list.setCurrentRow(shown)
+            self.list.blockSignals(False)
+            return
+        for edit in (self.header_edit, self.caption_edit):
+            edit._unsaved = False   # (another spectrum's texts are shown below)
+        self._reported_text.clear()
         if not 0 <= row < len(self.spectra):
             return
         sp = self.spectra[row]
@@ -1030,6 +1088,7 @@ class SpectraPagePanel(QWidget):
         else:
             self.canvas.image = page_image(sp.path, sp.page)
             self.canvas.message = ("" if not self.canvas.image.isNull() else
+                                   S.unreadable_now_message(name) if not _openable(sp.path) else
                                    f"{name} could not be opened (it may be damaged). Export it "
                                    "again and replace it on the compound page.")
         self._load_texts()
@@ -1073,6 +1132,7 @@ class SpectraPagePanel(QWidget):
             return
         # (a dragged position belongs to its page, so it shows only when changing the page)
         dragged = self.scope_key() == "page" and self._page_own().keys() >= {"x", "y"}
+        self._unsaved = False   # (the controls now show what is saved)
         self._set_controls({**self.inherited(), **self.own()}, dragged)
         self._update_states()
 
@@ -1295,9 +1355,12 @@ class SpectraPagePanel(QWidget):
         if self.read_only or self.current is None:
             return
         wanted = self._wanted_own()
-        if wanted == self.own():
+        # (after a failed save the setting is already in memory, only not on disk: written
+        # again even though it looks unchanged)
+        if wanted == self.own() and not self._unsaved:
             return
-        if self._write(wanted):
+        self._unsaved = not self._write(wanted)
+        if not self._unsaved:
             self._after_save()
 
     def _after_save(self, message: str = "Saved") -> None:
@@ -1307,13 +1370,32 @@ class SpectraPagePanel(QWidget):
         self.saved.emit(message)
 
     def flush(self) -> None:
-        if self._timer.isActive():
+        if self._timer.isActive() or self._unsaved:
             self._save()
         if self.current is not None and not self.read_only:
             for key, edit in ((S.HEADER_KEY, self.header_edit),
                               (S.CAPTION_KEY, self.caption_edit)):
                 if edit.text().strip() != str(self.current.item.get(key, "") or "").strip():
-                    self._commit_text(key)
+                    self._commit_text(key, again=True)
+
+    def _text_waits(self) -> bool:
+        """The header or caption typed could not be saved (kept, to be tried again)."""
+        return any(getattr(edit, "_unsaved", False) is True
+                   for edit in (self.header_edit, self.caption_edit))
+
+    def _show_other_anyway(self) -> bool:
+        """Another spectrum was chosen while the header or caption typed for this one could
+        not be saved: asks whether to show it anyway (the typing is then lost). Warnings
+        never block: going on is always possible; No stays on this spectrum."""
+        answer = QMessageBox.question(
+            self, "Changes not saved",
+            "The header or caption typed for this spectrum could not be saved yet (its file "
+            "may be open in another program, or being synced by OneDrive).\n\nShow the other "
+            "spectrum anyway? What you typed is then lost.\n\nChoose No to stay on this "
+            "spectrum: saving is tried again when you change the text or leave the page.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return answer == QMessageBox.StandardButton.Yes
 
     def _box_moved(self, x: float, y: float) -> None:
         """The box was dragged: its new centre is this page's own (whatever the scope)."""
@@ -1345,7 +1427,8 @@ class SpectraPagePanel(QWidget):
         self._loading = False
         self._timer.stop()
         wanted = self._wanted_own()
-        if self._write(wanted):
+        self._unsaved = not self._write(wanted)
+        if not self._unsaved:
             self._after_save("Structure resized")
 
     def reset_row(self, row: str) -> None:
@@ -1393,20 +1476,33 @@ class SpectraPagePanel(QWidget):
             return False
         return True
 
-    def _commit_text(self, key: str) -> None:
+    def _commit_text(self, key: str, again: bool = False) -> None:
+        """Save the header or caption typed. If that fails (the file is held, e.g. by
+        OneDrive), the compound in memory keeps what is saved and the box keeps the typing,
+        marked to be tried again. `again` (a flush): a failure already said for the same
+        text a moment ago (e.g. as the box lost the keyboard) is not said twice."""
         sp = self.current
         if self.read_only or sp is None:
             return
         edit = self.header_edit if key == S.HEADER_KEY else self.caption_edit
         text = edit.text().strip()
         if text == str(sp.item.get(key, "") or "").strip():
+            edit._unsaved = False
+            self._reported_text.pop(key, None)
             return
         try:
             self.project.set_spectrum_text(self.compound, sp.field_key, sp.item.get("file", ""),
                                            key, text)
         except (ProjectError, OSError) as e:
-            QMessageBox.warning(self, "Could not save", str(e))
+            edit._unsaved = True   # (the main window can see it before closing the page)
+            if not (again and self._reported_text.get(key) == text):
+                self._reported_text[key] = text
+                QMessageBox.warning(self, "Could not save", f"{e}\n\nThe text is still in "
+                                    "its box; saving it is tried again when you change it or "
+                                    "leave the page.")
             return
+        edit._unsaved = False
+        self._reported_text.pop(key, None)
         self._update_canvas()
         self.saved.emit("Saved")
 

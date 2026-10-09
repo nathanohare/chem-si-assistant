@@ -15,12 +15,16 @@ order of first appearance when compiling; the journal style sets the format.
 
 from __future__ import annotations
 
+import datetime
+import ipaddress
 import json
 import re
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
+from urllib.parse import urlsplit
 
 from .ids import new_id
 
@@ -44,15 +48,22 @@ def blank(type_: str = "article") -> dict[str, Any]:
 
 
 def clean(ref: dict[str, Any]) -> dict[str, Any]:
-    """Fill in missing keys and tidy values (always returns a new dict)."""
-    out = blank(ref.get("type") if ref.get("type") in TYPES else "article")
-    out["id"] = ref.get("id") or out["id"]
+    """Fill in missing keys and tidy values (always returns a new dict). A hand-edited
+    references.json with a value of the wrong kind (e.g. "authors": null) falls back to
+    the default instead of stopping the project from opening."""
+    t = ref.get("type")
+    out = blank(t if isinstance(t, str) and t in TYPES else "article")
+    rid = ref.get("id")
+    if rid not in (None, "") and not isinstance(rid, (list, dict, bool)):
+        out["id"] = str(rid)   # (a number becomes text, so citations still find it)
     for f in FIELDS:
         value = ref.get(f, out[f])
         if f == "authors":
             if isinstance(value, str):
                 value = [a.strip() for a in re.split(r"\s*;\s*|\s+and\s+", value) if a.strip()]
-            out[f] = [str(a).strip() for a in value if str(a).strip()]
+            elif not isinstance(value, (list, tuple)):
+                value = []   # (null, a number…)
+            out[f] = [str(a).strip() for a in value if a is not None and str(a).strip()]
         else:
             out[f] = str(value).strip() if value is not None else ""
     out["doi"] = normalise_doi(out["doi"])
@@ -114,6 +125,41 @@ def find_duplicate(refs: list[dict[str, Any]], ref: dict[str, Any]) -> dict[str,
                 == ref["title"].strip().lower() and r.get("year") == ref.get("year")):
             return r
     return None
+
+
+def new_references(existing: list[dict[str, Any]],
+                   found: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The references of `found` (e.g. an imported file) that are neither in `existing`
+    nor earlier in `found`, by the rules of find_duplicate (same DOI; without a DOI, same
+    title and year), cleaned and given ids not used yet. One pass, so a large import does
+    not compare every reference with every other one."""
+    dois: set[str] = set()
+    titles: set[tuple[str, str]] = set()
+    ids: set[str] = set()
+
+    def remember(r: dict[str, Any]) -> None:
+        doi = normalise_doi(r.get("doi", "")).lower()
+        if doi:
+            dois.add(doi)
+        title = (r.get("title") or "").strip().lower()
+        if title:
+            titles.add((title, r.get("year")))
+        ids.add(r.get("id"))
+
+    for r in existing:
+        remember(r)
+    out = []
+    for raw in found:
+        ref = clean(raw)
+        doi = ref["doi"].lower()
+        title = ref["title"].strip().lower()
+        if (doi in dois) if doi else (bool(title) and (title, ref["year"]) in titles):
+            continue
+        while ref["id"] in ids:
+            ref["id"] = new_id("r")
+        remember(ref)
+        out.append(ref)
+    return out
 
 
 # ---------------------------------------------------------------------- Crossref
@@ -329,39 +375,206 @@ def parse_file_text(text: str) -> list[dict[str, Any]]:
 
 # ---------------------------------------------------------------------- Typst
 
+def hayagriva_date(text: str) -> tuple[str, bool]:
+    """(the date Typst can print for a Year as typed, or "", and whether the typed text
+    said more than that): "2010" → ("2010", False), "in press" → ("", True), "2010a" →
+    ("2010", True), "2010-13" → ("2010", True)."""
+    # Digits typed in another script (full-width ２０１０ from a Japanese or Chinese keyboard,
+    # Arabic-Indic…) are the same year: Typst reads only 0-9.
+    t = re.sub(r"\d", lambda d: str(unicodedata.decimal(d.group())), text.strip())
+    m = re.fullmatch(r"(-?[0-9]{4})(?:-([0-9]{2})(?:-([0-9]{2}))?)?", t)
+    if m:
+        y, mo, d = m.groups()
+        try:
+            if d:
+                datetime.date(int(y), int(mo), int(d))
+            elif mo and not 1 <= int(mo) <= 12:
+                raise ValueError
+            return t, False
+        except ValueError:
+            return y, True
+    m = re.search(r"(?<![0-9])[0-9]{4}(?![0-9])", t)
+    return (m.group(0) if m else ""), True
+
+
+def _host_char(c: str) -> bool:
+    # (digits of other scripts, e.g. Arabic-Indic, are refused by Typst in a host name;
+    # accents typed as a separate mark are allowed, but not at the start of a part)
+    return (c in "-_." or (c.isascii() and c.isalnum()) or c.isalpha()
+            or unicodedata.category(c).startswith("M"))
+
+
+def _host_ok(host: str, bracketed: bool) -> bool:
+    """Whether Typst accepts this host name (as urlsplit gives it: lower case, no [ ]).
+    Letters of any script, digits, "-", "_" and "." are accepted; anything that Typst may
+    refuse (a space or symbol, a name mixing right-to-left and left-to-right letters, a
+    last part that is a number but not a real IP address) is not."""
+    if bracketed:   # an IPv6 address, e.g. [::1]
+        try:
+            ipaddress.IPv6Address(host)
+            return "%" not in host
+        except ValueError:
+            return False
+    if not host or not all(map(_host_char, host)):
+        return False
+    last = unicodedata.normalize("NFKC", host.rstrip(".").rsplit(".", 1)[-1])
+    if re.fullmatch(r"[0-9]+|0x[0-9a-f]*", last):
+        try:   # (read as an IP address)
+            ipaddress.IPv4Address(host)
+            return True
+        except ValueError:
+            return False
+    labels = host.split(".")
+    if any(label.startswith("xn--") for label in labels):   # (an international name, encoded)
+        try:
+            labels = [label.encode("ascii").decode("idna") if label.startswith("xn--")
+                      else label for label in labels]
+        except UnicodeError:
+            return False
+        host = ".".join(labels)
+        if not all(map(_host_char, host)):
+            return False
+    if any(unicodedata.category(label[:1]).startswith("M") for label in labels if label):
+        return False
+    if not host.isascii():
+        try:
+            host.encode("idna")   # (also checks each right-to-left part)
+        except UnicodeError:
+            return False
+    if any(unicodedata.bidirectional(c) in ("R", "AL", "AN") for c in host):
+        # A right-to-left name: its parts in Latin letters must start with a letter and
+        # end with a letter or digit.
+        if any(label.isascii() and not (label[0].isalpha() and label[-1].isalnum())
+               for label in labels if label):
+            return False
+    return True
+
+
+def hayagriva_url(text: str) -> str:
+    """The web address as Typst can print it ("www." gets "https://"), or "" when it
+    cannot (no http/https/ftp, no host or one Typst refuses, a bad port…)."""
+    t = text.strip()
+    if re.match(r"(?i)www\.", t):
+        t = "https://" + t
+    try:
+        parts = urlsplit(t)
+        parts.port                      # (raises ValueError for a bad port)
+        ok = (parts.scheme.lower() in ("http", "https", "ftp") and bool(parts.hostname)
+              and _host_ok(parts.hostname, parts.netloc.rpartition("@")[2].startswith("["))
+              and not any(unicodedata.category(c) == "Cc" for c in t))
+    except ValueError:
+        ok = False
+    return t if ok else ""
+
+
+def printing_problems(ref: dict[str, Any]) -> list[str]:
+    """What in a reference cannot be printed as typed (for the Warnings panel): the SI
+    still compiles, using what can be printed."""
+    r = clean(ref)
+    problems = []
+    if r["year"]:
+        date, more = hayagriva_date(r["year"])
+        if more:
+            problems.append(f"the year “{r['year']}” is not a plain year (e.g. 2010); "
+                            + (f"only {date} is printed" if date else "it is left out"))
+    if r["url"] and not hayagriva_url(r["url"]):
+        problems.append(f"the web address “{r['url']}” cannot be printed as a link (it "
+                        "needs to be a full address such as https://www.example.org/page), "
+                        "so it is left out")
+    for a in r["authors"]:
+        if ";" in a or a.count(",") >= 3:
+            problems.append(f"the author line “{a}” looks like several authors; put one "
+                            "author per line")
+    return problems
+
+
+_NOT_YAML = re.compile("[\x7f-\x84\x86-\x9f￾￿]")   # refused even inside quotes
+
+
+def _unbrace(text: str) -> str:
+    """Escape only the { and } Hayagriva would refuse as unmatched. Matched pairs stay:
+    they keep capitals such as {CO} out of the journal style's title case."""
+    stack, bad, i = [], set(), 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "{":
+            stack.append(i)
+        elif c == "}":
+            if stack:
+                stack.pop()
+            else:
+                bad.add(i)
+        i += 1
+    bad.update(stack)
+    return "".join("\\" + c if k in bad else c for k, c in enumerate(text))
+
+
+def _person(author: str) -> str | dict[str, str]:
+    """Hayagriva reads "Last, First" and "Last, Jr, First"; with more commas (several
+    authors pasted on one line) it would stop the whole compile, so the name is given in
+    its explicit form."""
+    if author.count(",") <= 2:
+        return author
+    name, given = author.split(",", 1)
+    return {"name": name.strip(), "given-name": given.strip()}
+
+
 def to_hayagriva(refs: list[dict[str, Any]]) -> str:
     """The references as a Hayagriva bibliography (Typst's own format). Written as JSON,
-    which is valid YAML, so no character in a title can break the file."""
+    which is valid YAML. Anything Hayagriva would refuse (a year such as "in press", a web
+    address without https://, an unmatched brace, characters YAML forbids) is changed so
+    that one reference can never stop the SI from compiling; printing_problems() names
+    those for the Warnings panel."""
     out: dict[str, Any] = {}
     for ref in refs:
         r = clean(ref)
         entry: dict[str, Any] = {
             "type": {"article": "article", "book": "book", "chapter": "chapter",
                      "thesis": "thesis", "web": "web"}.get(r["type"], "misc")}
+        extra = []   # typed text that cannot go where it was typed: kept in the note
         if r["title"]:
-            entry["title"] = r["title"]
+            entry["title"] = _unbrace(r["title"])
         if r["authors"]:
-            entry["author"] = r["authors"]
+            entry["author"] = [_person(a) for a in _split_authors(r["authors"])]
         if r["year"]:
-            entry["date"] = r["year"]
+            date, more = hayagriva_date(r["year"])
+            if date:
+                entry["date"] = date
+            if more:
+                extra.append(r["year"])
         if r["pages"]:
             entry["page-range"] = r["pages"]
         if r["doi"]:
             entry["serial-number"] = {"doi": r["doi"]}
         if r["url"]:
-            entry["url"] = r["url"]
+            url = hayagriva_url(r["url"])
+            if url:
+                entry["url"] = url
+            else:
+                extra.append(r["url"])
         if r["publisher"]:
-            entry["publisher"] = r["publisher"]
-        if r["note"]:
-            entry["note"] = r["note"]
+            entry["publisher"] = _unbrace(r["publisher"])
+        note = "; ".join(([r["note"]] if r["note"] else []) + extra)
+        if note:
+            entry["note"] = _unbrace(note)
         if r["journal"] or r["volume"] or r["issue"]:
             parent: dict[str, Any] = {"type": "periodical" if r["type"] == "article" else "book"}
             if r["journal"]:
-                parent["title"] = r["journal"]
+                parent["title"] = _unbrace(r["journal"])
             if r["volume"]:
                 parent["volume"] = r["volume"]
             if r["issue"]:
                 parent["issue"] = r["issue"]
             entry["parent"] = parent
         out[r["id"]] = entry
-    return json.dumps(out, ensure_ascii=False, indent=1)
+    text = json.dumps(out, ensure_ascii=False, indent=1)
+    # (these characters can only be inside strings, where the \u escape is allowed)
+    return _NOT_YAML.sub(lambda m: "\\u%04x" % ord(m.group()), text)
+
+
+def _split_authors(authors: list[str]) -> list[str]:
+    """Several authors typed on one line with ";" between them are printed as several."""
+    return [a.strip() for line in authors for a in line.split(";") if a.strip()]

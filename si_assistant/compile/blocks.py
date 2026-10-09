@@ -17,8 +17,9 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..core import chem, checks, procedures
+from ..core import chem, checks, ms_reports, procedures
 from ..core import fields as F
+from ..core.labels import is_inline_figure
 from ..core.markup import CITE, NORMAL, SUB, SUPER, Paragraph, Run, parse
 from ..core.project import DEFAULT_GP_SENTENCE
 from .text import charge_runs, format_chemistry, format_nmr, formula_runs, linked
@@ -63,7 +64,17 @@ def _dash_ranges(text: str) -> str:
 
 
 def _value(compound, key: str) -> dict:
-    return compound.values.get(key) or {}
+    """A field's stored value ({} when it is empty, or not of the right kind: e.g.
+    compound.json edited by hand)."""
+    v = compound.values.get(key)
+    return v if isinstance(v, dict) else {}
+
+
+def _items(compound, key: str) -> list[dict]:
+    """A list field's items (peak reports, attached files), leaving out anything that is
+    not one."""
+    v = compound.values.get(key)
+    return [i for i in v if isinstance(i, dict)] if isinstance(v, list) else []
 
 
 def _bold_prefix(runs: list[Run], n: int) -> list[Run]:
@@ -106,15 +117,15 @@ def nmr_sentence(report: dict, use_helpers: bool, link=None) -> list[Run]:
     """One peak report as a sentence, starting with its bold "¹H NMR". `link(nucleus)`
     gives the Typst label of the compound's spectrum of that nucleus, or "" (SPEC
     §13l.7): the bold "¹H NMR" then links to it."""
-    runs = [r for p in parse(str(report.get("text", ""))) for r in p.runs + [R(" ")]][:-1]
+    runs = [r for p in parse(F.part_text(report.get("text"))) for r in p.runs + [R(" ")]][:-1]
     if not _plain(runs).strip():
         return []
     if use_helpers:
         runs = format_nmr(runs)
     text = _plain(runs)
     m = _NMR_HEADER.match(text)
-    label = str(report.get("label", "")).strip()
-    nucleus = str(report.get("nucleus", "") or "")
+    label = F.part_text(report.get("label")).strip()
+    nucleus = F.part_text(report.get("nucleus"))
     if m:
         header_length = m.end()
         runs = _bold_prefix(runs, m.end())
@@ -163,16 +174,18 @@ def _split_at(runs: list[Run], index: int) -> list[Run]:
 
 def hrms_sentence(project, compound) -> list[Run]:
     value = _value(compound, "hrms")
-    found = checks.parse_number(str(value.get("found", "")))
-    ion = str(value.get("ionization", "")).strip()
-    adduct = str(value.get("adduct", "")).strip() or "[M+H]+"
+    found_text = F.part_text(value.get("found"))
+    found = checks.parse_number(found_text)
+    ion = F.part_text(value.get("ionization")).strip()
+    adduct = F.part_text(value.get("adduct")).strip() or "[M+H]+"
     runs = [R("HRMS", bold=True)] + ([R(f" ({ion})")] if ion else []) + \
            [R(" "), R("m/z", italic=True), R(": ")] + charge_runs(adduct)
     try:
-        sp = checks.hrms_species(project.read_structure(compound), value)
-        result = checks.hrms_calc(sp.info, adduct, str(value.get("found", "")),
-                                  float(project.settings.get("hrms_tolerance_ppm", 5.0))) if sp else None
-    except chem.ChemError:
+        sp = checks.hrms_species(project.read_structure(compound, strict=True), value)
+        result = checks.hrms_calc(sp.info, adduct, found_text,
+                                  ms_reports.tolerance(project)) if sp else None
+    except (chem.ChemError, OSError):
+        # (OSError: structure.mol can't be read just now; the compile's notes say so)
         result = None
     if result is not None:
         peak = result.matched if (result.matched is not None and not result.out_of_tolerance) \
@@ -188,7 +201,7 @@ def hrms_sentence(project, compound) -> list[Run]:
 
 
 def _parts_sentence(project, compound, defn: F.FieldDef, use_helpers: bool) -> list[Run]:
-    v = {k: str(x).strip() for k, x in _value(compound, defn.key).items()}
+    v = {k: F.part_text(x).strip() for k, x in _value(compound, defn.key).items()}
     key = defn.key
     fmt = format_chemistry if use_helpers else (lambda runs: runs)
     if key == "rf":
@@ -235,11 +248,21 @@ def _parts_sentence(project, compound, defn: F.FieldDef, use_helpers: bool) -> l
     if key == "ea":
         if not v.get("calcd") and not v.get("found"):
             return []
-        info = project.structure_info(compound)
-        runs = [R("Anal. Calcd")]
-        if info is not None:
-            runs += [R(" for ")] + formula_runs(info.formula)
-        runs.append(R(f": {v.get('calcd', '')}."))
+        runs = [R("Anal.")]
+        if v.get("calcd"):   # (without calculated values: only what was found)
+            runs.append(R(" Calcd"))
+            if v.get("formula"):   # typed: e.g. a solvate the values were calculated for
+                runs += [R(" for ")] + typed_formula_runs(v["formula"])
+            else:
+                try:
+                    info = project.structure_info(compound, strict=True)
+                except (chem.ChemError, OSError):
+                    # (e.g. a generic atom (R), or structure.mol can't be read just now:
+                    # the compile's notes say so) no formula to give
+                    info = None
+                if info is not None:
+                    runs += [R(" for ")] + formula_runs(info.formula)
+            runs.append(R(f": {v['calcd']}" + ("." if v.get("found") else "")))
         if v.get("found"):
             runs.append(R(f" Found: {v['found']}"))
         return _end_sentence(runs)
@@ -249,6 +272,26 @@ def _parts_sentence(project, compound, defn: F.FieldDef, use_helpers: bool) -> l
         text = " ".join(x for x in (v.get("text", ""), v.get("value", ""), v.get("unit", "")) if x)
         return _end_sentence([R(f"{defn.label}: ")] + fmt([R(text)])) if text else []
     return []
+
+
+_FORMULA_PIECE = re.compile(r"(\d+(?:\.\d+)?)?((?:\[\d+[A-Z][a-z]?\]|[A-Z][a-z]?|\d+)+)")
+
+
+def typed_formula_runs(text: str) -> list[Run]:
+    """A formula typed by the user, which may be a solvate or salt: "C12H15NO·0.25H2O"
+    prints with only the atom counts as subscripts (the 0.25 stays as it is). Anything
+    that isn't a plain formula is printed exactly as typed."""
+    pieces = re.split(r"\s*([·•∙])\s*", text.strip())
+    out: list[Run] = []
+    for i, piece in enumerate(pieces):
+        if i % 2:   # the dot between the parts
+            out.append(R(piece))
+            continue
+        m = _FORMULA_PIECE.fullmatch(piece)
+        if not m:
+            return [R(text.strip())]
+        out += ([R(m.group(1))] if m.group(1) else []) + formula_runs(m.group(2))
+    return out
 
 
 def ee_sentence(v: dict[str, str], fmt=lambda runs: runs) -> list[Run]:
@@ -281,10 +324,10 @@ def ee_sentence(v: dict[str, str], fmt=lambda runs: runs) -> list[Run]:
 
 
 def state_and_yield(compound) -> list[Run]:
-    state = str(_value(compound, "physical_state").get("text", "")).strip() \
+    state = F.part_text(_value(compound, "physical_state").get("text")).strip() \
         if "physical_state" in compound.field_keys else ""
     y = _value(compound, "yield") if "yield" in compound.field_keys else {}
-    mass, unit, pct = (str(y.get(k, "")).strip() for k in ("mass", "mass_unit", "percent"))
+    mass, unit, pct = (F.part_text(y.get(k)).strip() for k in ("mass", "mass_unit", "percent"))
     amounts = ", ".join(x for x in (f"{mass} {unit}".strip() if mass else "",
                                     f"{pct}%" if pct else "") if x)
     if state:
@@ -310,9 +353,10 @@ def gp_sentence(project, compound, problems: list[str] | None = None) -> list[Ru
 
 def citation_sentence(project, compound, key: str = "references") -> list[Run]:
     """"Spectral data matched those reported in the literature.¹²" """
-    value = compound.values.get(key) or {}
-    ids = [i for i in value.get("refs") or []]
-    text = str(value.get("text", "")).strip()
+    value = _value(compound, key)
+    refs = value.get("refs")
+    ids = [i for i in refs if isinstance(i, str) and i] if isinstance(refs, list) else []
+    text = F.part_text(value.get("text")).strip()
     if not ids and not text:
         return []
     runs = [r for p in parse(text) for r in p.runs] if text else []
@@ -377,7 +421,7 @@ def generated_paragraphs(project, compound, use_helpers: bool = True,
                 did_state = True
             continue
         if defn.kind == "nmr":
-            for report in compound.values.get("nmr") or []:
+            for report in _items(compound, "nmr"):
                 data += _with_space(nmr_sentence(report, use_helpers, nmr_link))
             continue
         if defn.key == "hrms":
@@ -399,10 +443,13 @@ def inline_figures(project, compound) -> list[Figure]:
     for defn in project.field_defs(compound):
         if defn.kind != "attachments" or defn.key == "spectra":
             continue
-        for item in compound.values.get(defn.key) or []:
-            if item.get("placement", "inline") == "inline":
-                figures.append(Figure(project.attachment_path(compound, defn.key, item["file"]),
-                                      str(item.get("caption", ""))))
+        # (the same items as core/labels counts: is_inline_figure, so each gets its own
+        # figure label)
+        for item in _items(compound, defn.key):
+            if is_inline_figure(item):
+                figures.append(Figure(project.attachment_path(compound, defn.key,
+                                                              F.part_text(item["file"])),
+                                      F.part_text(item.get("caption"))))
     return figures
 
 

@@ -1,8 +1,8 @@
 """Where the program's own files are, from the source code or in a packaged program
 (SPEC §13m, Phase 8).
 
-The program's built-in files (journal styles, word lists, icons) sit inside the
-`si_assistant` package; LICENSE, THIRD_PARTY_NOTICES.md and the user guide (docs/) sit
+The program's built-in files (journal styles, word lists, icons, the example project) sit
+inside the `si_assistant` package; LICENSE, THIRD_PARTY_NOTICES.md and the user guide (docs/) sit
 next to it. Run from the source code, that is the project folder.
 In a program packaged with PyInstaller (the installers), the same files are unpacked into
 the program's own data folder (`sys._MEIPASS`) with the same layout, so every path is
@@ -48,6 +48,63 @@ def top_level(*parts: str) -> Path:
 def user_guide() -> Path:
     """The user guide (Markdown; its pictures are in docs/images/)."""
     return top_level(*USER_GUIDE)
+
+
+# The example project shipped with the program (Help ▸ Open example project…): made by
+# tools/make_example_project.py. It is never opened or changed itself: the program copies
+# it to a folder the user chooses and opens the copy.
+EXAMPLE = ("example", "Example project")
+EXAMPLE_PDF = ("example", "Example SI.pdf")   # the SI compiled from it (Help menu)
+EXAMPLE_COPY_NAME = "Chem SI Assistant example"
+# Left behind by a program that had the example open (the build/ folder with the undo
+# history, snapshots, Trash, the lock, half-written files): never shipped, never copied.
+NOT_COPIED = ("build", "trash", "snapshots", "*.lock", ".tmp-*")
+
+
+def example_project() -> Path:
+    """The example Project Folder shipped with the program."""
+    return resource(*EXAMPLE)
+
+
+def example_pdf() -> Path:
+    """The SI compiled from the example project (Help ▸ View the example SI (PDF))."""
+    return resource(*EXAMPLE_PDF)
+
+
+def free_folder(parent: Path, name: str = EXAMPLE_COPY_NAME) -> Path:
+    """`parent`/`name`, or "name (2)", "name (3)"… when that is taken: a folder that
+    does not exist yet (nothing is ever written over)."""
+    parent = Path(parent)
+    folder, n = parent / name, 2
+    while folder.exists():
+        folder = parent / f"{name} ({n})"
+        n += 1
+    return folder
+
+
+def copy_example_project(parent: Path, source: Path | None = None) -> Path:
+    """Copy the example project into a new folder in `parent` (see free_folder) and
+    return that folder. Every copied file and folder is made writable: the program's own
+    folder may be read-only (Program Files, a macOS app, an AppImage), and its files would
+    otherwise be copied read-only too. Raises OSError (e.g. no permission to write in
+    `parent`); a half-made copy is removed again."""
+    import shutil
+    import stat
+    source = example_project() if source is None else Path(source)
+    if not source.is_dir():
+        raise FileNotFoundError(f"The example project is missing:\n{source}")
+    dest = free_folder(parent)
+    try:
+        shutil.copytree(source, dest, copy_function=shutil.copyfile,
+                        ignore=shutil.ignore_patterns(*NOT_COPIED))
+        for path in [dest, *dest.rglob("*")]:
+            mode = path.stat().st_mode
+            if not mode & stat.S_IWUSR:
+                path.chmod(stat.S_IMODE(mode) | stat.S_IWUSR)
+    except OSError:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    return dest
 
 
 def user_data_dir(environ=None, platform: str | None = None, home: Path | None = None) -> Path:

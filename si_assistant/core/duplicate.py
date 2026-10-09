@@ -81,6 +81,9 @@ def _fill_copy(project: Project, original: Compound, new: Compound, keys: set[st
         if defn.kind == "nmr":
             new.values[defn.key] = project.default_nmr_reports()
     project.save_compound(new)
+    # A copied structure gets its automatic ¹⁹F/³¹P/¹¹B report boxes, as a structure set
+    # any other way does (SPEC §13.3); none without one. (Saves the compound if it adds.)
+    project.ensure_heteroatom_reports(new)
 
 
 def _copy_structure(project: Project, original: Compound, new: Compound) -> None:
@@ -117,10 +120,16 @@ def duplicate_compound(project: Project, compound: Compound, keys, copies: int =
     section = project.section(compound.section_id)
     top = project.scheme(compound.scheme_id) if compound.scheme_id else compound
     out = []
-    for n in range(1, copies + 1):
-        new = project.add_compound(section.id, _place_index(project, section, top, n, place))
-        _fill_copy(project, compound, new, keys)
-        out.append(new)
+    try:
+        for n in range(1, copies + 1):
+            new = project.add_compound(section.id, _place_index(project, section, top, n, place),
+                                       save_owner=False)
+            out.append(new)
+            _fill_copy(project, compound, new, keys)
+    finally:
+        # section.json is saved once, also if a copy failed half-way, so its list of
+        # compounds always matches the compound folders on disk.
+        project.save_section(section)
     return out
 
 
@@ -137,34 +146,59 @@ def duplicate_scheme(project: Project, scheme: SchemePage, keys, copies: int = 1
     for n in range(1, copies + 1):
         new = project.add_scheme(section.id, _place_index(project, section, scheme, n, place),
                                  copy_name(scheme.name, n, copies))
-        editor = copy.deepcopy(se.editor_data(scheme))
-        editor.pop("locked", None)
-        new.data[se.EDITOR_KEY] = editor
-        files = scheme.folder / se.FILES_DIR
-        if files.is_dir():
-            for f in files.iterdir():
-                if f.is_file():
-                    fileio.make_dirs(new.folder / se.FILES_DIR, exist_ok=True)
-                    fileio.copy_file(f, new.folder / se.FILES_DIR / f.name)
         mapping = {}
-        for child in scheme.children:
-            copied = project.add_compound(section.id, None, scheme_id=new.id)
-            _fill_copy(project, child, copied, keys)
-            mapping[child.id] = copied.id
-        for box, _where in se.all_boxes(new):
-            if box.get("compound") in mapping:
-                box["compound"] = mapping[box["compound"]]
-            elif box.get("compound"):
-                box.pop("compound")   # (linked to a compound no longer on the page)
-            label = str(box.get("label") or "")
-            for old, copied_id in mapping.items():   # (an ID label naming one of them)
-                label = label.replace("@{" + old + "}", "@{" + copied_id + "}")
-            if label:
-                box["label"] = label
-        se.sync_children(project, new, save=False)
-        project.save_scheme(new)
+        try:
+            # The drawing's files first, then the drawing: if a file can't be copied (open
+            # in another program, a full disk), the copy keeps its empty drawing, and is
+            # still saved below as it is in memory (never with boxes linked to the
+            # original's compounds).
+            files = scheme.folder / se.FILES_DIR
+            if files.is_dir():
+                for f in files.iterdir():
+                    if f.is_file():
+                        fileio.make_dirs(new.folder / se.FILES_DIR, exist_ok=True)
+                        fileio.copy_file(f, new.folder / se.FILES_DIR / f.name)
+            editor = copy.deepcopy(se.editor_data(scheme))
+            editor.pop("locked", None)
+            new.data[se.EDITOR_KEY] = editor
+            for child in scheme.children:
+                copied = project.add_compound(section.id, None, scheme_id=new.id,
+                                              save_owner=False)
+                mapping[child.id] = copied.id   # (linked even if filling it fails)
+                _fill_copy(project, child, copied, keys)
+        finally:
+            # Saved once, also if a copy failed half-way, so the copy's list of compounds
+            # always matches the compound folders on disk, and scheme.json what is in
+            # memory (its boxes linked only to the compounds copied).
+            _follow_copies(new, mapping)
+            se.sync_children(project, new, save=False)
+            project.save_scheme(new)
         out.append(new)
     return out
+
+
+def _follow_copies(new: SchemePage, mapping: dict[str, str]) -> None:
+    """The copied scheme's boxes show the copied compounds; an ID label or conditions
+    mentioning one of the original's compounds name its copy instead. (IDs are random,
+    c-xxxxxxxx, so an exact replacement can't touch anything else.)"""
+    from . import scheme_editor as se
+
+    def follow(text: str) -> str:
+        for old, copied_id in mapping.items():
+            text = text.replace("@{" + old + "}", "@{" + copied_id + "}")
+        return text
+
+    for box, _where in se.all_boxes(new):
+        if box.get("compound") in mapping:
+            box["compound"] = mapping[box["compound"]]
+        elif box.get("compound"):
+            box.pop("compound")   # (linked to a compound no longer on the page)
+        label = follow(str(box.get("label") or ""))   # (an ID label naming one of them)
+        if label:
+            box["label"] = label
+    for step in se.steps(new):   # (conditions naming one of them, e.g. an intermediate)
+        for which in ("top", "bottom"):
+            step[which] = follow(step[which])
 
 
 def check_copies(copies) -> int:

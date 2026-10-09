@@ -647,11 +647,18 @@ class _State:
 
 
 # Qt's SVG renderer (the screen, auto-crop and the self-check) silently leaves out a
-# <path> with more than about 32,000 segments; Typst has no such limit. Long lines are
-# therefore written as several <path> elements of at most PIECE_SEGMENTS segments, which
-# looks the same (round joins).
+# <path> with more than about 32,000 segments; Typst has no such limit. Long lines (and
+# long runs of curves) are therefore written as several <path> elements of at most
+# PIECE_SEGMENTS segments, which looks the same (round joins).
 CHUNK_SEGMENTS = 4000
 PIECE_SEGMENTS = 16000
+
+
+def _check_xy(x: float, y: float) -> None:
+    """_PathData._check for one point, without NumPy (one LINETO record at a time)."""
+    if not (math.isfinite(x) and math.isfinite(y) and abs(x) <= MAX_COORD
+            and abs(y) <= MAX_COORD):
+        raise ValueError("coordinates out of range")
 
 
 class _PathData:
@@ -681,7 +688,7 @@ class _PathData:
             raise ValueError("coordinates out of range")
 
     def move(self, x: float, y: float) -> None:
-        self._check((x, y))
+        _check_xy(x, y)
         ix, iy = int(round(x)), int(round(y))
         self.start = (ix, iy)
         self._add(f"M{ix} {iy}", 0, (ix, iy))
@@ -716,6 +723,26 @@ class _PathData:
             self.cur = (int(ends[at + len(chunk) - 1, 0]), int(ends[at + len(chunk) - 1, 1]))
             self._add("l" + _ints(chunk.ravel().tolist()), len(chunk), before)
 
+    def line(self, x: float, y: float) -> None:
+        """lines() for one point (a LINETO record), without NumPy: the same path data."""
+        if self.cur is None:
+            self.move(x, y)
+            return
+        _check_xy(x, y)
+        ix, iy = int(round(x)), int(round(y))
+        cx, cy = self.cur
+        if ix == cx and iy == cy:
+            return
+        more = _ints((ix - cx, iy - cy))
+        last = self.parts[-1] if self.parts else None
+        if last is not None and last[0].startswith("l") and last[1] + 1 <= CHUNK_SEGMENTS:
+            self.parts[-1] = (last[0] + ("" if more.startswith("-") else " ") + more,
+                              last[1] + 1, last[2], last[3])
+            self.segments += 1
+        else:
+            self._add("l" + more, 1, self.cur)
+        self.cur = (ix, iy)
+
     def curves(self, pts: np.ndarray) -> None:
         """Cubic Béziers from the current point: `pts` holds 3 points per curve."""
         n = len(pts) // 3
@@ -727,9 +754,13 @@ class _PathData:
         r = np.rint(pts[: 3 * n]).astype(np.int64).reshape(n, 3, 2)
         starts = np.vstack((np.array([self.cur], np.int64), r[:-1, 2]))
         rel = r - starts[:, None, :]
-        before = self.cur
-        self.cur = (int(r[-1, 2, 0]), int(r[-1, 2, 1]))
-        self._add("c" + _ints(rel.ravel().tolist()), 3 * n, before)
+        step = CHUNK_SEGMENTS // 3   # (in parts, as lines(), so pieces() can split them)
+        for at in range(0, n, step):
+            chunk = rel[at: at + step]
+            before = self.cur
+            end = r[at + len(chunk) - 1, 2]
+            self.cur = (int(end[0]), int(end[1]))
+            self._add("c" + _ints(chunk.ravel().tolist()), 3 * len(chunk), before)
 
     def close(self) -> None:
         if self.parts and self.parts[-1][0] != "z":
@@ -780,6 +811,7 @@ class _Converter:
         self.clip_defs: dict[tuple, str] = {}      # clip shape → id
         self.clip_shapes: dict[str, str] = {}      # id → <clipPath> body
         self.patterns: dict[tuple, str] = {}       # pattern key → id
+        self.pattern_bitmaps: list = []            # (kept, so their id() is never reused)
         self.pattern_defs: list[str] = []
         self.path: _PathData | None = None         # between BEGINPATH and ENDPATH…
         self.path_open = False
@@ -1228,6 +1260,7 @@ class _Converter:
         pid = f"p{len(self.patterns) + 1}"
         self.patterns[key] = pid
         bm = brush.pattern
+        self.pattern_bitmaps.append(bm)   # (a freed bitmap's id could be a later one's)
         w, h = bm.width * self.px_units[0], bm.height * self.px_units[1]
         self.pattern_defs.append(
             f'<pattern id="{pid}" patternUnits="userSpaceOnUse" width="{_n(w)}" '
@@ -1530,7 +1563,7 @@ class _Converter:
                 target.move(*pts[i])
                 i += 1
             elif base == 0x02:   # PT_LINETO
-                target.lines(pts[i:i + 1])
+                target.line(*pts[i])
                 i += 1
             elif base == 0x04 and i + 2 < count:   # PT_BEZIERTO (three points)
                 target.curves(pts[i:i + 3])
@@ -1551,17 +1584,17 @@ class _Converter:
     def _line_to(self, rec: bytes) -> None:
         x, y = struct.unpack_from("<ii", rec, 8)
         start = self.pt(*self.st.cur)
-        end = np.array([self.pt(x, y)])
+        end = self.pt(x, y)
         self.st.cur = (float(x), float(y))
         if self.path_open:
             if self.path.cur is None:
                 self.path.move(*start)
-            self.path.lines(end)
+            self.path.line(*end)
             self.path_figures = True
             return
         p = _PathData()
         p.move(*start)
-        p.lines(end)
+        p.line(*end)
         if len(p.parts) == 1:   # (a line of no length)
             return
         self._shape(p, fill=False, stroke=True, closed=False)

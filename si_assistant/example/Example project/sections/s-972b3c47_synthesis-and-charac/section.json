@@ -1,0 +1,82 @@
+{
+  "id": "s-972b3c47",
+  "type": "data",
+  "name": "Synthesis and Characterization",
+  "id_table": [
+    "2a",
+    "2b",
+    "2c",
+    "2d",
+    "2e",
+    "2f",
+    "3"
+  ],
+  "default_fields": [
+    {
+      "key": "structure",
+      "required": true
+    },
+    {
+      "key": "name",
+      "required": false
+    },
+    {
+      "key": "procedure",
+      "required": true
+    },
+    {
+      "key": "scale",
+      "required": true
+    },
+    {
+      "key": "yield",
+      "required": true
+    },
+    {
+      "key": "physical_state",
+      "required": true
+    },
+    {
+      "key": "purification",
+      "required": false
+    },
+    {
+      "key": "rf",
+      "required": false
+    },
+    {
+      "key": "nmr",
+      "required": true
+    },
+    {
+      "key": "hrms",
+      "required": true
+    },
+    {
+      "key": "spectra",
+      "required": true
+    },
+    {
+      "key": "references",
+      "required": false
+    }
+  ],
+  "compound_order": [
+    "k-730d7f01",
+    "c-26c39a99",
+    "c-cf3f4417",
+    "c-e2e36085",
+    "c-1eebe878",
+    "c-ad564675",
+    "c-bfbaadc9",
+    "k-95c635ac"
+  ],
+  "general_procedures": [
+    {
+      "id": "gp-cb78be13",
+      "name": "General Procedure A",
+      "title": "Reduction of aryl methyl ketones with NaBH4",
+      "sentence": "Prepared according to {GP} from {ketone} ({ketone ID}, {mass}, {scale}). The crude product was purified by {purification}."
+    }
+  ]
+}

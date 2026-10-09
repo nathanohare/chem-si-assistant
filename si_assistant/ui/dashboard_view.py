@@ -3,11 +3,8 @@
 from __future__ import annotations
 
 import html
-import tempfile
-import zlib
-from pathlib import Path
 
-from PySide6.QtCore import QEvent, QSize, Qt, Signal
+from PySide6.QtCore import QBuffer, QByteArray, QEvent, QIODevice, QSize, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QHBoxLayout, QLabel,
                                QMenu, QPushButton, QTableWidget, QTableWidgetItem, QToolButton,
@@ -26,7 +23,10 @@ STRUCT_TIP_ROLE = Qt.ItemDataRole.UserRole + 2   # set: the tooltip shows the st
 LEGEND = ("✔ filled · ○ empty · ✖ empty but required · — not used for this compound · "
           "⚑ flagged · ⚠ warning. Click any cell to open that compound at that field.")
 
-_thumb_cache: dict[tuple, QPixmap] = {}
+# (file, screen scale) -> (file's mtime and size, drawing settings, picture). One entry
+# per file: a newer picture replaces the old one, so the cache does not grow with every
+# structure edit or change of drawing style.
+_thumb_cache: dict[tuple, tuple[tuple, QPixmap]] = {}
 
 
 def thumbnail(project: Project, compound, dpr: float = 1.0) -> QPixmap | None:
@@ -39,21 +39,30 @@ def thumbnail(project: Project, compound, dpr: float = 1.0) -> QPixmap | None:
         st = path.stat()
     except FileNotFoundError:
         return None
-    drawing = drawing_settings(project)
-    key = (path, st.st_mtime_ns, st.st_size, THUMB.width(), dpr,
-           drawing if path.suffix == ".mol" else None)
-    if key not in _thumb_cache:
-        if path.suffix == ".mol":
-            mol = project.read_structure(compound)
-            if mol is None:
-                return None
-            _thumb_cache[key] = mol_pixmap(mol, THUMB, drawing, dpr)
-        else:
-            _thumb_cache[key] = picture_pixmap(path, THUMB, dpr)
-    return _thumb_cache[key]
+    drawing = drawing_settings(project) if path.suffix == ".mol" else None
+    key = (str(path), THUMB.width(), round(dpr, 3))
+    stamp = (st.st_mtime_ns, st.st_size, drawing)
+    cached = _thumb_cache.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    if path.suffix == ".mol":
+        mol = project.structure_for_drawing(compound)   # (also one with an R group)
+        if mol is None:
+            return None
+        pixmap = mol_pixmap(mol, THUMB, drawing, dpr)
+    else:
+        pixmap = picture_pixmap(path, THUMB, dpr)
+    if pixmap.isNull():
+        # (not kept: a picture that cannot be read just now - a OneDrive file not yet
+        #  downloaded, or one open in another program - is tried again next time)
+        return None
+    _thumb_cache[key] = (stamp, pixmap)
+    return pixmap
 
 
-_tooltip_dir = Path(tempfile.gettempdir()) / "si_assistant_tooltips"
+# file -> (file's mtime and size, drawing settings, the <img> tag). The picture is put in
+# the tooltip itself (a data: address), so no picture files are left in the temp folder.
+_tooltip_cache: dict[str, tuple[tuple, str]] = {}
 
 
 def structure_tooltip(project: Project, compound) -> str:
@@ -65,21 +74,26 @@ def structure_tooltip(project: Project, compound) -> str:
         st = source.stat()
     except FileNotFoundError:
         return f"<b>{name}</b><br><i>no structure yet</i>"
-    _tooltip_dir.mkdir(exist_ok=True)
-    drawing = drawing_settings(project)
-    style = f"_{zlib.crc32(repr(drawing).encode()):08x}" if source.suffix == ".mol" else ""
-    path = _tooltip_dir / f"{compound.id}_{st.st_mtime_ns}_{st.st_size}{style}.png"
-    if not path.exists():
+    drawing = drawing_settings(project) if source.suffix == ".mol" else None
+    stamp = (st.st_mtime_ns, st.st_size, drawing)
+    cached = _tooltip_cache.get(str(source))
+    if cached is None or cached[0] != stamp:
         size = QSize(240, 170)
         if source.suffix == ".mol":
-            mol = project.read_structure(compound)
+            mol = project.structure_for_drawing(compound)   # (also one with an R group)
             if mol is None:
                 return f"<b>{name}</b>"
             pixmap = mol_pixmap(mol, size, drawing)
         else:
             pixmap = picture_pixmap(source, size)
-        pixmap.save(str(path), "PNG")
-    return f"<b>{name}</b><br><img src='{path.as_uri()}'>"
+        data = QByteArray()
+        buffer = QBuffer(data)
+        buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+        if pixmap.isNull() or not pixmap.save(buffer, "PNG"):
+            return f"<b>{name}</b>"   # (not kept: tried again on the next hover)
+        img = f"<img src='data:image/png;base64,{bytes(data.toBase64()).decode()}'>"
+        cached = _tooltip_cache[str(source)] = (stamp, img)
+    return f"<b>{name}</b><br>{cached[1]}"
 
 
 def _item(text: str = "", tooltip: str = "") -> QTableWidgetItem:
@@ -277,19 +291,25 @@ class DashboardView(QWidget):
         for r, row in enumerate(shown):
             cid = row.compound.id
             # ID (its structure tooltip is drawn when first hovered: see eventFilter)
+            # (the compact view hides the structure column: its warnings show here)
+            id_ws = row.compact_id_warnings if compact else row.id_warnings
             id_item = _item(row.display_id + (" 🔒" if row.compound.id_override else "")
-                            + (" ⚠" if row.id_warnings else ""))
+                            + (" ⚠" if id_ws else ""))
             id_item.setData(STRUCT_TIP_ROLE, "".join(f"<br>⚠ {html.escape(w, quote=False)}"
-                                                     for w in row.id_warnings))
-            if row.id_warnings and colours.get(D.WARNING) is not None:
+                                                     for w in id_ws))
+            if id_ws and colours.get(D.WARNING) is not None:
                 id_item.setBackground(QBrush(colours[D.WARNING]))
             f = id_item.font()
             f.setBold(True)
             id_item.setFont(f)
             # Structure (the thumbnail is also the structure field's cell)
             s_cell = row.cells["structure"]
-            pixmap = thumbnail(self.project, row.compound, self.devicePixelRatioF())
-            s_item = _item("" if pixmap else f"{s_cell.icons} no structure", s_cell.tooltip)
+            # (the compact view hides this column: no thumbnails are drawn for it; the
+            #  ID/name hover tooltip draws its own picture when needed)
+            pixmap = None if compact else thumbnail(self.project, row.compound,
+                                                    self.devicePixelRatioF())
+            s_item = _item(s_cell.icons if compact else
+                           ("" if pixmap else f"{s_cell.icons} no structure"), s_cell.tooltip)
             if pixmap is not None:
                 s_item.setData(Qt.ItemDataRole.DecorationRole, pixmap)
                 if s_cell.flag is not None or s_cell.warnings:
@@ -389,7 +409,8 @@ class DashboardView(QWidget):
         self.columns_menu.clear()
         shown = set(D.chosen_columns(self.section))
         for key in D.available_columns(self.section):
-            act = self.columns_menu.addAction(D.field_label(self.section, key))
+            # ("Yield & ee" would lose its "&" to an Alt+ shortcut)
+            act = self.columns_menu.addAction(D.field_label(self.section, key).replace("&", "&&"))
             act.setCheckable(True)
             act.setChecked(key in shown)
             act.toggled.connect(lambda on, k=key: self._toggle_column(k, on))

@@ -385,6 +385,7 @@ class SpectraSectionPanel(SectionPanel):
         self._timer.setSingleShot(True)
         self._timer.setInterval(SAVE_DELAY_MS)
         self._timer.timeout.connect(self._save)
+        self._unsaved = False   # a save failed: tried again on flush or the next change
         for box in (self.per_page, self.orientation, self.corner, self.link_style):
             box.currentIndexChanged.connect(self._changed)
         for check in (self.header_line, self.spectrum_frame, self.auto_crop, self.same_size,
@@ -487,18 +488,24 @@ class SpectraSectionPanel(SectionPanel):
         if self.project.read_only:
             return
         values = self.values()
-        if values == self.project.spectra_defaults():
+        # (after a failed save the defaults are already in memory, only not on disk:
+        # written again even though they look unchanged)
+        if values == self.project.spectra_defaults() and not self._unsaved:
             return
         try:
             self.project.set_spectra_defaults(values)
         except (ProjectError, OSError) as e:
-            QMessageBox.warning(self, "Could not save", str(e))
+            self._unsaved = True
+            QMessageBox.warning(self, "Could not save", f"{e}\n\nThe settings are still on the "
+                                "page; they are saved again with your next change or when you "
+                                "leave the page.")
             return
+        self._unsaved = False
         self.saved.emit("Saved")
 
     def flush(self) -> None:
         super().flush()
-        if self._timer.isActive():
+        if self._timer.isActive() or self._unsaved:
             self._save()
 
     def _show_overridden(self) -> None:

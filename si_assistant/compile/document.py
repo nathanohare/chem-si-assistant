@@ -10,14 +10,18 @@
     anything unticked in the Compile window (export_excluded) is left out
 
 Everything is written to build/: SI.typ (readable, for advanced users), style.typ and
-assets/ (structure drawings). Typst's root is the project folder, so every path in
-the document is relative to it.
+assets/ (structure drawings; a Preview's go to assets-preview/). Typst's root is the
+project folder, so every path in the document is relative to it.
 """
 
 from __future__ import annotations
 
+import hashlib
+import math
 import re
 import shutil
+import struct
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import date
@@ -28,6 +32,7 @@ from ..core import chem
 from ..core import drawing_scale
 from ..core import fields as F
 from ..core import front
+from ..core.ids import is_device_name
 from ..core import labels as label_rules
 from ..core import ms_reports
 from ..core import page as page_setup
@@ -58,6 +63,7 @@ SPECTRA_HEADING = "Spectra"   # the heading of the spectra of a preview (or of a
 HRMS_HEADING = "HRMS reports"   # the Spectra section's sub-section of HRMS reports (§13n.3)
 HRMS_PAGE_IN = 7.4              # a report's PDF page or picture: at most this high (inches)
 HRMS_KEEP_LINES = 70            # a listing this short is kept on one page
+HRMS_SAMPLE = 2                 # reports in the Spectra section's live preview (its sample)
 PAGE_BREAK = "#pagebreak(weak: true)"
 
 # Links in the PDF (SPEC §13l.7). `si-link` makes a link only when its target is in the
@@ -86,7 +92,8 @@ class CompileOptions:
     # Preview one page (PREVIEW_KINDS): ("front", "cover"|"toc"|"general"), ("section", id)
     # (a section with its sub-sections), ("compound", id), ("scheme", id) or ("spectra",
     # compound id) (a compound's spectra pages), ("hrms", "") (the Spectra section's HRMS
-    # reports). Exclusions are then ignored.
+    # reports). Exclusions are then ignored, except by the table of contents preview,
+    # which lays out the SI as exported.
     only: tuple[str, str] | None = None
     # A preview of a compound, scheme or section also shows its compounds' spectra (the
     # toolbar Preview); the live preview pane leaves them out (SPEC §13k.8).
@@ -126,7 +133,8 @@ class BuildResult:
 _SVG_UNITS_IN = {"": 1 / 72, "px": 1 / 72, "pt": 1 / 72, "pc": 1 / 6, "mm": 1 / 25.4,
                  "cm": 1 / 2.54, "in": 1.0}
 _SVG_TAG = re.compile(r"<svg\b[^>]*>", re.S)
-_SVG_LENGTH = r"""\s{name}\s*=\s*['"]\s*([\d.]+(?:[eE][-+]?\d+)?)\s*([a-z%]*)\s*['"]"""
+# The same number rule as drawing_scale, so a drawing counts as "sized" in both places.
+_SVG_LENGTH = r"""\s{name}\s*=\s*['"]""" + drawing_scale.PRINT_LENGTH + r"""['"]"""
 
 
 def svg_size_in(text: str) -> tuple[float, float] | None:
@@ -143,30 +151,334 @@ def svg_size_in(text: str) -> tuple[float, float] | None:
             size = []
             break
         size.append(float(m.group(1)) * _SVG_UNITS_IN[m.group(2)])
-    if len(size) == 2 and size[0] > 0 and size[1] > 0:
+    if len(size) == 2 and all(math.isfinite(s) and s > 0 for s in size):
         return size[0], size[1]
     box = re.search(r"""\sviewBox\s*=\s*['"]\s*([-\d.eE+]+)[\s,]+([-\d.eE+]+)[\s,]+"""
                     r"""([\d.eE+]+)[\s,]+([\d.eE+]+)\s*['"]""", root)
     if box is not None:
-        w, h = float(box.group(3)), float(box.group(4))
-        if w > 0 and h > 0:
+        try:
+            w, h = float(box.group(3)), float(box.group(4))
+        except ValueError:          # such as "1.2.3"
+            w = h = 0.0
+        if math.isfinite(w) and math.isfinite(h) and w > 0 and h > 0:
             return w / 72, h / 72
     return None
+
+
+class CompileError(Exception):
+    """The PDF could not be made. The message is shown to the user (compile.run, which
+    also raises it when Typst fails)."""
+
+
+class PdfUnreadable(ValueError):
+    """A PDF that pypdf can't read; `encrypted`: it is password-protected (encrypted)."""
+
+    def __init__(self, message: str, encrypted: bool = False):
+        super().__init__(message)
+        self.encrypted = encrypted
+
+
+# What pypdf says about a password-protected PDF (or one encrypted with AES when the
+# 'cryptography' package is missing).
+_ENCRYPTED_ERRORS = ("DependencyError", "FileNotDecryptedError", "WrongPasswordError")
+
+# Each PDF's pages, kept between builds (the live preview builds the whole SI again and
+# again) until the file changes: keyed by its path, size and modification time, so an
+# edit, undo, Trash restore or a OneDrive sync is read afresh. A damaged PDF is remembered
+# too; a file that can't be read at all right now (locked, or online-only while offline)
+# is not.
+_PDF_INFO: dict[tuple, tuple] = {}
+_PDF_INFO_MAX = 2000
+
+
+def pdf_page_sizes(path: Path) -> list[tuple[float, float] | None]:
+    """(width, height) in pt of each page of a PDF as Typst and QtPdf draw it (its CropBox,
+    turned by /Rotate); None for a page whose box can't be read. Raises OSError, or
+    PdfUnreadable when the file is not a readable PDF."""
+    st = Path(path).stat()
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    hit = _PDF_INFO.get(key)
+    if hit is None:
+        from pypdf import PdfReader
+        try:
+            pages = PdfReader(str(path)).pages
+            n = len(pages)
+        except OSError:
+            raise
+        except Exception as e:  # noqa: BLE001 — a damaged (or encrypted) PDF
+            hit = ("error", str(e) or type(e).__name__, type(e).__name__ in _ENCRYPTED_ERRORS)
+        else:
+            sizes: list[tuple[float, float] | None] = []
+            for i in range(n):
+                try:
+                    pg = pages[i]
+                    box = pg.cropbox   # (pypdf falls back to the MediaBox)
+                    w, h = abs(float(box.width)), abs(float(box.height))
+                    if (pg.rotation or 0) % 180:
+                        w, h = h, w
+                    sizes.append((w, h))
+                except Exception:  # noqa: BLE001 — only this page's shape is unknown
+                    sizes.append(None)
+            hit = ("ok", sizes)
+        if len(_PDF_INFO) >= _PDF_INFO_MAX:
+            _PDF_INFO.clear()
+        _PDF_INFO[key] = hit
+    if hit[0] == "error":
+        raise PdfUnreadable(hit[1], hit[2])
+    return hit[1]
+
+
+def pdf_page_count(path: Path) -> int:
+    """How many pages a PDF has (see pdf_page_sizes; raises the same way)."""
+    return len(pdf_page_sizes(path))
+
+
+def pdf_page_size(path: Path, page: int) -> tuple[float, float] | None:
+    """(width, height) in pt of page `page` (from 1) of a PDF; None if unknown."""
+    try:
+        sizes = pdf_page_sizes(path)
+    except Exception:  # noqa: BLE001 — unknown size: the caller falls back
+        return None
+    return sizes[page - 1] if 1 <= page <= len(sizes) else None
 
 
 def pdf_size_in(path: Path) -> tuple[float, float] | None:
     """The size of a PDF's first page in inches, as Typst prints it (its CropBox, turned
     by /Rotate); None if it can't be read."""
-    try:
-        from pypdf import PdfReader
-        page = PdfReader(str(path)).pages[0]
-        box = page.cropbox
-        w, h = abs(float(box.width)), abs(float(box.height))
-        if (page.rotation or 0) % 180:
-            w, h = h, w
-    except Exception:  # noqa: BLE001 — unknown size: the caller falls back
+    size = pdf_page_size(path, 1)
+    if size is None:
         return None
+    w, h = size
     return (w / 72, h / 72) if w > 0 and h > 0 else None
+
+
+# Checking PNG, JPEG and GIF pictures before they go to Typst: a damaged one would stop
+# Typst from making the PDF at all, with a message that doesn't say which file it was.
+# Only the file's structure is read (a PNG's data is unpacked, not decoded: a damaged
+# stream or a row with an unknown filter fails), as far as Typst is strict: Typst prints
+# a JPEG cut short, stray bytes between a JPEG's headers, or a GIF without its end marker,
+# so those pass. Typst chooses how to read a picture by its extension, so a JPEG named
+# .png fails too (it is then printed from a PNG copy: Document.usable_image).
+
+_PNG_DEPTHS = {0: (1, 2, 4, 8, 16), 2: (8, 16), 3: (1, 2, 4, 8), 4: (8, 16), 6: (8, 16)}
+_PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+_ADAM7 = ((0, 8, 0, 8), (4, 8, 0, 8), (0, 4, 4, 8), (2, 4, 0, 4), (0, 2, 2, 4),
+          (1, 2, 0, 2), (0, 1, 1, 2))   # (x start, x step, y start, y step) of each pass
+
+
+def _png_rows(width: int, height: int, bits: int, interlaced: bool):
+    """(rows, bytes per row with its filter byte) of each pass of a PNG's picture data."""
+    passes = _ADAM7 if interlaced else ((0, 1, 0, 1),)
+    for x0, dx, y0, dy in passes:
+        w, h = -(-(width - x0) // dx), -(-(height - y0) // dy)
+        if w > 0 and h > 0:
+            yield h, 1 + -(-(w * bits) // 8)
+
+
+class _PngData:
+    """Follows a PNG's picture data as its IDAT chunks are read, as far as Typst is
+    strict: the zlib stream must unpack (its checksum and anything after its end are not
+    checked), each row must start with a known filter (0-4), and no row may be missing."""
+
+    def __init__(self, ihdr: bytes):
+        width, height, depth, kind, method, filtering, interlace = struct.unpack(
+            ">IIBBBBB", ihdr)
+        if (not 0 < width < 1 << 31 or not 0 < height < 1 << 31
+                or depth not in _PNG_DEPTHS.get(kind, ()) or method or filtering
+                or interlace > 1):
+            raise ValueError("not a picture Typst can read")
+        self.passes = list(_png_rows(width, height, depth * _PNG_CHANNELS[kind],
+                                     bool(interlace)))
+        self.need = sum(rows * size for rows, size in self.passes)
+        self.palette = kind != 3   # (an indexed picture needs its PLTE before IDAT)
+        self.starts = self._starts()
+        self.at = next(self.starts, None)   # where the next row starts (unpacked)
+        self.out = 0                        # how much has been unpacked
+        self.head = b""                     # the zlib header (2 bytes)
+        self.inflate = zlib.decompressobj(-15)   # (the deflate data after it)
+
+    def _starts(self):
+        pos = 0
+        for rows, size in self.passes:
+            for _ in range(rows):
+                yield pos
+                pos += size
+
+    def feed(self, data: bytes) -> None:
+        """The next IDAT chunk's data (ValueError or zlib.error: damaged)."""
+        if len(self.head) < 2:
+            need = 2 - len(self.head)
+            self.head, data = self.head + data[:need], data[need:]
+            if len(self.head) < 2:
+                return
+            cmf, flg = self.head
+            if cmf & 0x0F != 8 or (cmf << 8 | flg) % 31:
+                raise ValueError("not a zlib stream")
+        while not self.complete() and not self.inflate.eof:
+            block = self.inflate.decompress(data, 1 << 20)   # (at most 1 MB at a time)
+            data = self.inflate.unconsumed_tail
+            if not block and not data:
+                break   # (all of this chunk is unpacked)
+            end = self.out + len(block)
+            while self.at is not None and self.at < end:
+                if block[self.at - self.out] > 4:
+                    raise ValueError("unknown row filter")
+                self.at = next(self.starts, None)
+            self.out = end
+
+    def complete(self) -> bool:
+        return self.out >= self.need
+
+
+def _png_ok(f) -> bool:
+    if f.read(8) != b"\x89PNG\r\n\x1a\n":
+        return False
+    first = True
+    data: _PngData | None = None
+    while True:
+        head = f.read(8)
+        if len(head) < 8:
+            return False   # ends before IEND (Typst fails too)
+        n, kind = struct.unpack(">I4s", head)
+        if first and (kind != b"IHDR" or n != 13):
+            return False
+        first = False
+        if kind == b"IEND":
+            return data is not None and data.complete()
+        if kind[0] < 0x61:   # a critical chunk (IHDR, PLTE, IDAT): Typst checks its checksum
+            crc = zlib.crc32(kind)
+            left = n
+            while left:
+                block = f.read(min(left, 1 << 20))
+                if not block:
+                    return False
+                crc = zlib.crc32(block, crc)
+                left -= len(block)
+                if kind == b"IHDR":
+                    data = _PngData(block)   # (ValueError: not a picture Typst reads)
+                elif kind == b"PLTE" and data is not None:
+                    data.palette = True
+                elif kind == b"IDAT" and data is not None:
+                    if not data.palette:
+                        return False
+                    data.feed(block)
+            if f.read(4) != struct.pack(">I", crc):
+                return False
+        else:
+            f.seek(n + 4, 1)   # skip the data and its checksum (not checked by Typst)
+
+
+def _jpeg_ok(f) -> bool:
+    """The headers are whole up to the start of the picture data."""
+    if f.read(2) != b"\xff\xd8":
+        return False
+    frame = False   # (a frame header has been read)
+    while True:
+        while True:   # (stray bytes before a marker are skipped, as Typst does)
+            block = f.read(4096)
+            if not block:
+                return False
+            at = block.find(b"\xff")
+            if at >= 0:
+                f.seek(at + 1 - len(block), 1)   # (just after the 0xFF)
+                break
+        m = f.read(1)
+        while m == b"\xff":   # (fill bytes)
+            m = f.read(1)
+        if not m or m[0] == 0xD9:
+            return False
+        if m[0] == 0x01 or 0xD0 <= m[0] <= 0xD7:
+            continue
+        length = f.read(2)
+        if len(length) < 2:
+            return False
+        size = struct.unpack(">H", length)[0]
+        body = f.read(size - 2) if size >= 2 else b""
+        if size < 2 or len(body) < size - 2:
+            return False
+        if 0xC0 <= m[0] <= 0xCF and m[0] not in (0xC4, 0xC8, 0xCC):
+            # the frame header (SOF): Typst needs its width and height
+            if len(body) < 6 or body[1:3] == b"\0\0" or body[3:5] == b"\0\0":
+                return False
+            frame = True
+        if m[0] == 0xDA:
+            return frame and len(f.read(1)) == 1   # some picture data follows
+
+
+def _gif_ok(f) -> bool:
+    """The header and colour table are whole, up to the first frame."""
+    head = f.read(13)
+    if len(head) < 13 or head[:6] not in (b"GIF87a", b"GIF89a"):
+        return False
+    if head[10] & 0x80:
+        size = 3 * 2 ** ((head[10] & 7) + 1)
+        if len(f.read(size)) < size:
+            return False
+    while True:
+        b = f.read(1)
+        if not b or b[0] not in (0x21, 0x2C):
+            return False
+        if b[0] == 0x2C:   # the first frame
+            d = f.read(9)
+            if len(d) < 9:
+                return False
+            if d[8] & 0x80:
+                size = 3 * 2 ** ((d[8] & 7) + 1)
+                if len(f.read(size)) < size:
+                    return False
+            return len(f.read(2)) == 2
+        if not f.read(1):   # an extension: its kind, then its sub-blocks
+            return False
+        while True:
+            s = f.read(1)
+            if not s:
+                return False
+            if s[0] == 0:
+                break
+            if len(f.read(s[0])) < s[0]:
+                return False
+
+
+_RASTER_CHECKS = {".png": _png_ok, ".jpg": _jpeg_ok, ".jpeg": _jpeg_ok, ".gif": _gif_ok}
+_RASTER_MAGIC = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"),
+                 (b"GIF87a", ".gif"), (b"GIF89a", ".gif"))
+_raster_checked: dict[tuple, bool] = {}
+
+
+def raster_readable(path: Path) -> bool | None:
+    """Whether Typst can read this PNG, JPEG or GIF picture (True for other types); None
+    if the file can't be read right now (e.g. open in another program, or an online-only
+    OneDrive file while offline). Remembered until the file changes (None is not)."""
+    check = _RASTER_CHECKS.get(Path(path).suffix.lower())
+    if check is None:
+        return True
+    try:
+        st = Path(path).stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+        hit = _raster_checked.get(key)
+        if hit is not None:
+            return hit
+        with open(path, "rb") as f:
+            ok = bool(check(f))
+    except OSError:
+        return None
+    except (ValueError, struct.error, zlib.error):
+        ok = False
+    if len(_raster_checked) > 2000:
+        _raster_checked.clear()
+    _raster_checked[key] = ok
+    return ok
+
+
+def raster_kind(path: Path) -> str | None:
+    """The extension a PNG, JPEG or GIF picture should have, from its first bytes (None:
+    none of those)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(8)
+    except OSError:
+        return None
+    return next((ext for magic, ext in _RASTER_MAGIC if head.startswith(magic)), None)
 
 
 # Structure drawings kept between builds, so the live preview (which builds the whole SI
@@ -190,24 +502,41 @@ def drawn_structure(mol, drawing: chem.DrawingSettings) -> tuple[str, tuple | No
     return text, _DRAWN[key][2]
 
 
+# A value of the wrong kind (e.g. compound.json edited by hand) shows up as one of these.
+_BAD_VALUE = (AttributeError, TypeError, KeyError, ValueError)
+
+
 class Builder:
     def __init__(self, project: Project, options: CompileOptions, image_info,
-                 folder: Path | None = None, root: Path | None = None):
+                 folder: Path | None = None, root: Path | None = None, *, name: str = "SI"):
         """`image_info(path) -> (width_px, height_px, dpi) | None` reads raster images
         (supplied by the UI layer, which has Qt); `convert(path, dest)` is optional.
 
         The source, style and drawings go to `folder` (default: the project's build/).
         `root` is Typst's root folder (default: the project folder); it must contain both
-        the project and `folder` (the live preview builds in a temporary folder)."""
+        the project and `folder` (the live preview builds in a temporary folder). `name`:
+        the source's name (SI.typ); each name has its own drawings folder, so a Preview
+        never deletes the drawings SI.typ (kept for compiling by hand) points to."""
         self.project = project
         self.options = options
         self.image_info = image_info
         self.build = Path(folder) if folder is not None else project.folder / BUILD_DIR
         self.root = Path(root) if root is not None else project.folder
-        self.assets = self.build / "assets"
+        self.assets = self.build / ("assets" if name == "SI" else f"assets-{name}")
         self.empty = False
         self.last_page_label = ""   # see BuildResult
         self.svg_sizes: dict[Path, tuple[float, float] | None] = {}   # drawn structures
+        # Worked out once in this build (a Builder makes one build, so nothing goes stale):
+        # a compound's structure code, drawn for its block and again on each spectrum, and
+        # pictures converted to PNG.
+        self._structure_codes: dict[tuple, str | None] = {}
+        self._generic_noted: set[str] = set()   # (compounds whose generic atom is noted)
+        # (structure.mol unreadable: the note said for each compound, and whether it says
+        # the drawing was left out too)
+        self._unreadable_noted: dict[str, tuple[str, bool]] = {}
+        self._converted: dict[Path, Path] = {}
+        self._device_copies: dict[Path, Path] = {}   # see typst_safe
+        self._root_resolved: Path | None = None
         self.warnings: list[str] = []
         self.report = project.id_report()
         self.converter = None
@@ -292,26 +621,81 @@ class Builder:
 
     def rel(self, path: Path) -> str:
         """Path as Typst sees it: from Typst's root folder, with forward slashes."""
-        return "/" + Path(path).resolve().relative_to(self.root.resolve()).as_posix()
+        if self._root_resolved is None:
+            self._root_resolved = self.root.resolve()
+        return "/" + Path(path).resolve().relative_to(self._root_resolved).as_posix()
+
+    def shown_path(self, path: Path) -> str:
+        """A file's name as the warnings give it: from the project folder when it is in it."""
+        try:
+            return Path(path).relative_to(self.project.folder).as_posix()
+        except ValueError:
+            return Path(path).name
 
     def usable_image(self, path: Path) -> Path | None:
         if not path.exists():
-            self.warnings.append(f"Missing file (left out): {path.relative_to(self.project.folder)}")
+            self.warnings.append(f"Missing file (left out): {self.shown_path(path)}")
             return None
-        if (path.suffix.lower() == ".svg" and path not in self.svg_sizes   # (not our drawings)
-                and not spectra_mod.svg_readable(path)):
+        if self._root_resolved is None:
+            self._root_resolved = self.root.resolve()
+        if not path.resolve().is_relative_to(self._root_resolved):
+            # (Typst only reads files inside its root folder)
+            self.warnings.append(f"{path.name} is outside the project folder; left out.")
+            return None
+        if path.suffix.lower() == ".svg" and path not in self.svg_sizes:   # (not our drawings)
             # (a damaged SVG would stop Typst from making the PDF at all)
-            self.warnings.append(f"{path.name} could not be read as an SVG drawing (it may be "
-                                 "damaged); left out.")
+            state = spectra_mod.svg_state(path)
+            if state is not True:
+                self.warnings.append(
+                    f"{path.name} could not be read just now (it may be open in another "
+                    "program, or not yet downloaded by OneDrive); left out." if state is None
+                    else f"{path.name} could not be read as an SVG drawing (it may be "
+                         "damaged); left out.")
+                return None
+        # A damaged PNG, JPEG or GIF would stop Typst too. One that fails the check (a JPEG
+        # saved as .png, a WebP…, or one damaged in a way Qt can live with) is still
+        # printed, from a PNG copy; only one Qt can't read either is left out.
+        readable = raster_readable(path)
+        if readable is None:
+            self.warnings.append(
+                f"{self.shown_path(path)} could not be read just now (it may be open in "
+                "another program, or not yet downloaded by OneDrive); left out.")
             return None
-        if path.suffix.lower() in TYPST_IMAGE_TYPES:
-            return path
+        damaged = not readable
+        if not damaged and path.suffix.lower() in TYPST_IMAGE_TYPES:
+            return self.typst_safe(path)
         if self.converter is not None:  # e.g. TIFF -> PNG
+            done = self._converted.get(path)
+            if done is not None:
+                return done
             dest = self.assets / (path.stem + "_" + str(abs(hash(str(path))) % 10**8) + ".png")
             if self.converter(path, dest):
+                self._converted[path] = dest
+                if damaged and raster_kind(path) == path.suffix.lower().replace(".jpeg",
+                                                                                ".jpg"):
+                    self.warnings.append(
+                        f"{self.shown_path(path)} may be damaged; it was printed from a copy "
+                        "the program could read. Check it in the PDF.")
                 return dest
-        self.warnings.append(f"Cannot place {path.name} (unsupported image type); left out.")
+        self.warnings.append(
+            f"{self.shown_path(path)} could not be read as a picture (it may be damaged); "
+            "left out." if damaged else
+            f"Cannot place {path.name} (unsupported image type); left out.")
         return None
+
+    def typst_safe(self, path: Path) -> Path:
+        """`path`, or a copy in build/assets/ when a folder or file name between Typst's root
+        and it is a Windows device name (Typst refuses those). The stored file keeps its
+        name; the copy is made again at every build (assets/ starts empty)."""
+        if not any(is_device_name(part) for part in Path(self.rel(path)).parts):
+            return path
+        dest = self._device_copies.get(path)
+        if dest is None:
+            digest = hashlib.sha1(str(Path(path).resolve()).encode("utf-8")).hexdigest()[:12]
+            dest = self.assets / f"{digest}{Path(path).suffix.lower()}"
+            shutil.copyfile(path, dest)   # always overwrite: never reuse an earlier build's copy
+            self._device_copies[path] = dest
+        return dest
 
     def natural_size_in(self, path: Path) -> tuple[float, float] | None:
         if path in self.svg_sizes:   # a structure drawn by this build
@@ -363,7 +747,63 @@ class Builder:
     def structure_image(self, compound: Compound, max_in, scale: float = 1.0) -> str | None:
         """The compound's structure: its picture (pictures mode) or an ACS drawing, at its
         natural size (a pasted vector picture: at the project's bond length) but no bigger
-        than `max_in`, then times `scale`."""
+        than `max_in`, then times `scale`. Worked out once per size in a build (it is shown
+        with the compound and again on each of its spectra)."""
+        key = (compound.id, tuple(max_in), float(scale))
+        if key not in self._structure_codes:
+            self._structure_codes[key] = self._structure_image(compound, max_in, scale)
+        return self._structure_codes[key]
+
+    def structure_readable(self, compound: Compound) -> bool:
+        """False when the compound's structure.mol is there but can't be read just now (open
+        in another program, or an online-only OneDrive file while offline): it is then left
+        out, with its formula and masses, and the notes say so (once per compound). Never
+        silently: "no structure" would be wrong. The compile goes on (warnings never
+        block). The note names the drawing only once it really is left out
+        (_note_unreadable: a pasted picture is printed instead, and some compounds are
+        printed without a drawing)."""
+        try:
+            self.project.read_structure(compound, strict=True)
+            return True
+        except OSError:
+            self._note_unreadable(compound)
+            return False
+
+    def _note_unreadable(self, compound: Compound, drawing_left_out: bool = False) -> None:
+        """The note for an unreadable structure.mol: one per compound, saying what was left
+        out (the drawing is added to it when it is left out too)."""
+        noted = self._unreadable_noted.get(compound.id)
+        if noted is not None and (noted[1] or not drawing_left_out):
+            return
+        what = ("structure drawing, calculated formula and masses were" if drawing_left_out
+                else "calculated formula and masses were")
+        text = (f"{self.report.display_id(compound.id)} ({compound.name or 'no name'}): "
+                "its structure file could not be read just now (it may be open in another "
+                f"program, or not yet downloaded by OneDrive), so its {what} left out. Close "
+                "it there or make it available offline, then compile again.")
+        if noted is not None and noted[0] in self.warnings:
+            self.warnings[self.warnings.index(noted[0])] = text   # (in its place)
+        else:
+            self.warnings.append(text)
+        self._unreadable_noted[compound.id] = (text, drawing_left_out)
+
+    def _note_generic(self, compound: Compound) -> list[str]:
+        """The note for a structure with a generic atom (R, X, …): once per compound,
+        whatever is printed for it (its drawing, a pasted ChemDraw picture, or nothing):
+        it has no calculated formula or masses. Returns the generic atoms ([] if none)."""
+        atoms = self.project.generic_structure_atoms(compound)
+        if atoms and compound.id not in self._generic_noted:
+            self._generic_noted.add(compound.id)
+            self.warnings.append(
+                f"{self.report.display_id(compound.id)} "
+                f"({compound.name or 'no name'}): its structure has a generic atom "
+                f"({', '.join(atoms)}), so it has no calculated formula or masses (it is "
+                "printed as drawn; a formula typed in its HRMS field is still used for the "
+                "calculated m/z).")
+        return atoms
+
+    def _structure_image(self, compound: Compound, max_in, scale: float) -> str | None:
+        self._note_generic(compound)   # (also when its pasted picture is printed)
         picture = self.project.structure_image_path(compound)
         if picture is not None and picture.exists():
             sized = {"scale": scale, "pdf_natural": True,
@@ -372,12 +812,35 @@ class Builder:
             img = self.image(picture, max_in, **sized)
             if img:
                 return img[0]
-        mol = self.project.read_structure(compound)
+        if not self.structure_readable(compound):
+            # (said in the notes; its picture, if it has one, is printed instead)
+            if picture is not None and picture.exists():
+                img = self.image(picture, max_in, **sized)
+                if img:
+                    return img[0]
+            self._note_unreadable(compound, drawing_left_out=True)
+            return None
+        try:
+            mol = self.project.read_structure(compound, strict=True)
+        except OSError:   # (unreadable a moment after it was read)
+            self._note_unreadable(compound, drawing_left_out=True)
+            return None
         if mol is None:
             if picture is not None and picture.exists():  # a picture but no structure
                 img = self.image(picture, max_in, **sized)
-                return img[0] if img else None
-            return None
+                if img:
+                    return img[0]
+            if not self.project.generic_structure_atoms(compound):
+                return None
+            # A generic atom (R, X, e.g. a general structure): drawn as it is, as on the
+            # compound's page, and said in the notes (_note_generic: no formula or masses).
+            try:
+                mol = self.project.structure_for_drawing(compound, strict=True)
+            except OSError:   # (unreadable a moment after it was read)
+                self._note_unreadable(compound, drawing_left_out=True)
+                return None
+            if mol is None:
+                return None
         svg = self.assets / f"{compound.id}.svg"
         text, size = drawn_structure(mol, self.drawing)
         svg.write_text(text, encoding="utf-8")
@@ -634,13 +1097,8 @@ class Builder:
         draw."""
         try:
             if page is not None:
-                from pypdf import PdfReader
-                pg = PdfReader(str(path)).pages[page - 1]
-                box = pg.cropbox   # (pypdf falls back to the MediaBox)
-                w, h = abs(float(box.width)), abs(float(box.height))
-                if (pg.rotation or 0) % 180:
-                    w, h = h, w
-                return h / w if w else None
+                size = pdf_page_size(path, page)
+                return size[1] / size[0] if size and size[0] else None
             size = self.natural_size_in(path)
             return size[1] / size[0] if size and size[0] else None
         except Exception:  # noqa: BLE001 — unknown shape: fall back to filling the frame
@@ -648,20 +1106,44 @@ class Builder:
 
     def pdf_pages(self, path: Path) -> list[int]:
         try:
-            from pypdf import PdfReader
-            return list(range(1, len(PdfReader(str(path)).pages) + 1))
+            return list(range(1, pdf_page_count(path) + 1))
+        except PdfUnreadable as e:
+            if e.encrypted:
+                self.warnings.append(f"{path.name} is password-protected (encrypted), so its "
+                                     "pages can't be counted; left out. Save an unprotected "
+                                     "copy (e.g. Print ▸ Save as PDF) and use that instead.")
+            else:
+                self.warnings.append(f"Could not read the PDF {path.name}: {e}")
+            return []
         except Exception as e:  # noqa: BLE001 — report and keep going
             self.warnings.append(f"Could not read the PDF {path.name}: {e}")
             return []
+
+    def bad_value(self, compound: Compound, e: Exception, where: str = "") -> CompileError:
+        """The error for a value of the wrong kind in a compound (e.g. compound.json
+        edited by hand), saying which compound it is (and `where`, e.g. its Spectra field),
+        rather than stopping with a bare Python error."""
+        return CompileError(
+            f"{self.report.display_id(compound.id)} ({compound.name or 'no name'}): a value "
+            f"in its compound.json{where} could not be read ({type(e).__name__}: {e}). "
+            "Correct or clear that value on the compound's page (or in the file) and "
+            "compile again.")
 
     def compound(self, compound: Compound, show_structure: bool = True, level: int = 2) -> str:
         """A compound block. Its title is a heading at `level` (one below its section's),
         drawn by the style's si-compound-title: never numbered, in the table of contents
         only when the TOC goes down to compounds."""
         display_id = self.report.display_id(compound.id)
-        block: CompoundBlock = compound_block(self.project, compound, display_id,
-                                              self.options.format_text,
-                                              self.nmr_link(compound))
+        # (an unreadable structure.mol is said in the notes, also when no structure is
+        # drawn: the HRMS and elemental analysis sentences then have no calculated formula)
+        if self.structure_readable(compound):
+            self._note_generic(compound)   # (the same for a generic atom: R, X)
+        try:
+            block: CompoundBlock = compound_block(self.project, compound, display_id,
+                                                  self.options.format_text,
+                                                  self.nmr_link(compound))
+        except _BAD_VALUE as e:
+            raise self.bad_value(compound, e) from e
         outlined = "true" if self.toc_rank >= 4 else "false"
         title = f"#si-compound-title({level}, {outlined})[{runs_to_typst(block.title)}]"
         label = self.compound_label(compound)
@@ -815,19 +1297,24 @@ class Builder:
                                  "this one was left out.")
             return lead
         preview = self.options.only is not None
-        skip = frozenset() if preview else frozenset(self.options.excluded)
+        # The table of contents preview lays out the SI as chosen in the Compile window (as
+        # whole_document_for_toc does for the other sections: its page numbers must be the
+        # SI's own); other previews show everything.
+        honour = not preview or self.options.only[0] == "front"
+        skip = frozenset(self.options.excluded) if honour else frozenset()
         compounds = self.included_compounds(self.project.top_sections, skip)
         # Only a preview of this section (or of a section holding it) shows a sample: the
         # table of contents preview needs every page to number what comes after it.
         sample = preview and self.options.only[0] == "section"
+        limit = self.options.spectra_limit if sample else 0
         heading = "\n\n".join(x for x in (lead, self.section_heading(level, [Run(section.name)]))
                               if x)
-        pages = self.spectra_pages(compounds, heading,
-                                   limit=self.options.spectra_limit if sample else 0)
+        pages = self.spectra_pages(compounds, heading, limit=limit)
         # SPEC §13n.3: the HRMS reports, in a sub-section after every compound's spectra.
-        # Without spectra, the section's heading goes on the reports' first page.
+        # Without spectra, the section's heading goes on the reports' first page. The live
+        # preview's sample shows only the first few (the HRMS reports page shows them all).
         hrms = "" if front.HRMS_KEY in skip else self.hrms_reports_block(
-            compounds, level + 1, new_page=bool(pages))
+            compounds, level + 1, new_page=bool(pages), limit=HRMS_SAMPLE if limit else 0)
         if not hrms:
             return pages or lead
         if not pages:
@@ -837,18 +1324,23 @@ class Builder:
     # ------------------------------------------------------------------ HRMS reports (§13n.3)
 
     def hrms_reports_block(self, compounds: list[Compound], level: int,
-                           heading: bool = True, new_page: bool = True) -> str:
+                           heading: bool = True, new_page: bool = True, limit: int = 0) -> str:
         """The sub-section "HRMS reports" of the Spectra section: the report files of the
         compounds whose reports are printed (the section's "Print HRMS reports", or the
-        compound's own choice), compound by compound in tree order. "" if none."""
+        compound's own choice), compound by compound in tree order. "" if none. `limit`:
+        at most this many reports (0 = all; the live preview's sample)."""
         parts = []
-        for compound in compounds:
-            if not ms_reports.prints_reports(self.project, compound):
-                continue
-            for item in ms_reports.report_items(compound):
-                code = self.hrms_report(compound, str(item.get("file", "")))
-                if code:
-                    parts.append(code)
+        items = [(compound, item) for compound in compounds
+                 if ms_reports.prints_reports(self.project, compound)
+                 for item in ms_reports.report_items(compound)]
+        for compound, item in items:
+            if limit and len(parts) >= limit:
+                self.warnings.append(f"The live preview shows the first {limit} HRMS reports; "
+                                     "the HRMS reports page and the full SI have them all.")
+                break
+            code = self.hrms_report(compound, str(item.get("file", "")))
+            if code:
+                parts.append(code)
         if not parts:
             return ""
         # (a first PDF page goes under the heading, not on the next page)
@@ -919,7 +1411,11 @@ class Builder:
         """A data file (mzML, mzXML, mzData, netCDF): its largest peaks near the expected
         m/z (the monoisotopic m/z of the chosen ion), with the one used as found marked."""
         data = ms_reports.read_report(path)
-        peaks = ms_reports.expected_peaks(self.project, compound)
+        try:
+            peaks = ms_reports.expected_peaks(self.project, compound)
+        except OSError:   # (structure.mol unreadable just now: said in the notes)
+            self.structure_readable(compound)
+            peaks = None   # (the largest peaks are listed, not centred on the expected m/z)
         centre = None
         if peaks:
             centre = next((p.mz for p in peaks if p.monoisotopic), peaks[0].mz)
@@ -1023,8 +1519,12 @@ class Builder:
         defaults = self.project.spectra_defaults()
         entries: list[spectra_mod.Spectrum] = []
         problems: list[str] = []
-        for compound in compounds:
-            entries += spectra_mod.spectra_of(self.project, compound, problems=problems)
+        for compound in compounds:   # (page counts remembered between builds: pdf_page_sizes)
+            try:
+                entries += spectra_mod.spectra_of(self.project, compound,
+                                                  page_count=pdf_page_count, problems=problems)
+            except _BAD_VALUE as e:
+                raise self.bad_value(compound, e, " (its spectra)") from e
         self.warnings += problems
         if limit and len(entries) > limit:
             self.warnings.append(f"The live preview shows the first {limit} of {len(entries)} "
@@ -1032,8 +1532,11 @@ class Builder:
             entries = entries[:limit]
         pages: list[tuple[str, int, list[str]]] = []   # (orientation, per page, slots)
         for sp in entries:
-            eff = spectra_mod.effective(defaults, sp.item, sp.key)
-            code = self.spectrum_slot(sp, eff)
+            try:
+                eff = spectra_mod.effective(defaults, sp.item, sp.key)
+                code = self.spectrum_slot(sp, eff)
+            except _BAD_VALUE as e:
+                raise self.bad_value(sp.compound, e, " (its spectra)") from e
             if code is None:
                 continue
             orientation, per_page = eff["orientation"], eff["per_page"]
@@ -1124,7 +1627,15 @@ class Builder:
         spectra = self.options.preview_spectra
         if kind == "compound":
             c = p.compound(item_id)
-            return [self.compound(c, show_structure=not c.scheme_id),
+            # Same rule as the full SI (Builder.scheme, SPEC §13n.4 S2): a scheme page's
+            # compound prints its own structure unless a box of the scheme draws it.
+            show = True
+            if c.scheme_id:
+                try:
+                    show = c.id not in scheme_editor.linked_compound_ids(p.scheme(c.scheme_id))
+                except KeyError:   # (its scheme page is gone: an ordinary compound)
+                    show = True
+            return [self.compound(c, show_structure=show),
                     self.spectra_of_preview([c]) if spectra else ""]
         if kind == "scheme":
             k = p.scheme(item_id)
@@ -1223,19 +1734,20 @@ def page_marker(label: str) -> str:
 def build(project: Project, options: CompileOptions, image_info, converter=None,
           name: str = "SI", folder: Path | None = None, root: Path | None = None,
           crop=None) -> BuildResult:
-    """Write build/<name>.typ (+ style.typ, assets/), or into `folder` with Typst root
-    `root` (see Builder). Returns the path, any warnings and whether it is empty.
+    """Write build/<name>.typ (+ style.typ, assets/ for SI.typ or assets-<name>/ for other
+    names), or into `folder` with Typst root `root` (see Builder). Returns the path, any
+    warnings and whether it is empty.
     `crop(path, page) -> (left, top, right, bottom) | None` finds a spectrum page's
     content for auto-crop (supplied by the UI layer, which has Qt; without it spectra are
     not cropped)."""
-    b = Builder(project, options, image_info, folder, root)
+    b = Builder(project, options, image_info, folder, root, name=name)
     b.converter = converter
     b.crops.detect = crop
     b.build.mkdir(parents=True, exist_ok=True)
     if b.assets.exists():
         shutil.rmtree(b.assets, ignore_errors=True)
     b.assets.mkdir(parents=True, exist_ok=True)
-    style = project.settings.get("journal_style", "ACS").lower()
+    style = str(project.settings.get("journal_style") or "ACS").strip().lower() or "acs"
     style_file = STYLES_DIR / f"{style}.typ"
     if not style_file.exists():
         b.warnings.append(f"The {project.settings.get('journal_style')} style is not available "

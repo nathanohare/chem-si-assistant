@@ -15,6 +15,85 @@ from .ui.carry_over import carry_over_from_old_name
 from .ui.feedback_ui import install_error_handler
 from .ui.main_window import MainWindow
 
+# Tests only: a folder for this computer's settings, so a test run never reads or changes
+# the real ones (see use_settings_folder). Normal start-ups don't set it.
+SETTINGS_DIR_ENV = "SI_ASSISTANT_SETTINGS_DIR"
+
+# The program's own per-computer folders ("My dictionary", ...) that use_settings_folder
+# moves into the test folder. Others (e.g. Downloads) stay where they are.
+_MOVED_LOCATIONS = ("AppDataLocation", "AppLocalDataLocation", "AppConfigLocation",
+                    "ConfigLocation", "GenericDataLocation", "GenericConfigLocation",
+                    "CacheLocation", "GenericCacheLocation", "StateLocation",
+                    "GenericStateLocation")
+
+
+def use_settings_folder(folder) -> None:
+    """For tests ($SI_ASSISTANT_SETTINGS_DIR): keep every per-computer setting (user name,
+    recent projects, Interface size, ...) and the program's own files ("My dictionary")
+    in `folder` instead of the real ones (on Windows the registry), also the old name's
+    settings that carry_over_from_old_name reads. Call before anything makes a QSettings.
+
+    The program makes its settings with QSettings(name, name), which Qt always keeps in
+    the registry / plist / .config file (QSettings.setDefaultFormat does not apply to
+    that form), so QSettings and QStandardPaths are swapped, in Qt and in every module
+    of the program already loaded, for versions that use `folder`."""
+    from PySide6 import QtCore
+    from PySide6.QtCore import QSettings, QStandardPaths
+
+    folder = Path(folder)
+    ini = QSettings.Format.IniFormat
+    for scope in (QSettings.Scope.UserScope, QSettings.Scope.SystemScope):
+        QSettings.setPath(ini, scope, str(folder / "settings" / scope.name))
+    QSettings.setDefaultFormat(ini)
+
+    class FolderSettings(QSettings):
+        """QSettings that keeps everything as .ini files in the test folder."""
+
+        def __init__(self, *args, **kwargs):
+            named = len(args) == 1 or (len(args) > 1 and isinstance(args[1], str))
+            if args and isinstance(args[0], str) and named:   # (organisation, program)
+                args = (ini, QSettings.Scope.UserScope, *args)
+            elif args and isinstance(args[0], QSettings.Scope) and len(args) > 1 \
+                    and isinstance(args[1], str):              # (scope, organisation, ...)
+                args = (ini, *args)
+            elif args and args[0] == QSettings.Format.NativeFormat:
+                args = (ini, *args[1:])
+            super().__init__(*args, **kwargs)
+
+    StandardLocation = QStandardPaths.StandardLocation
+    moved = {getattr(StandardLocation, n) for n in _MOVED_LOCATIONS
+             if hasattr(StandardLocation, n)}
+
+    def own_folder(location) -> str:
+        app = QtCore.QCoreApplication
+        return str(folder / "paths" / location.name / app.organizationName()
+                   / app.applicationName())
+
+    class FolderPaths(QStandardPaths):
+        """QStandardPaths whose per-program folders are in the test folder."""
+
+        @staticmethod
+        def writableLocation(location):
+            if location in moved:
+                return own_folder(location)
+            return QStandardPaths.writableLocation(location)
+
+        @staticmethod
+        def standardLocations(location):
+            if location in moved:
+                return [own_folder(location)]
+            return QStandardPaths.standardLocations(location)
+
+    QtCore.QSettings, QtCore.QStandardPaths = FolderSettings, FolderPaths
+    package = __package__ or "si_assistant"
+    for name, module in list(sys.modules.items()):
+        if name != package and not name.startswith(package + "."):
+            continue
+        if getattr(module, "QSettings", None) is QSettings:
+            module.QSettings = FolderSettings
+        if getattr(module, "QStandardPaths", None) is QStandardPaths:
+            module.QStandardPaths = FolderPaths
+
 
 def restore_safely(window, info) -> bool:
     """Go back to where the user was before a restart (Interface size). Whatever the
@@ -29,6 +108,8 @@ def restore_safely(window, info) -> bool:
 
 
 def main() -> int:
+    if os.environ.get(SETTINGS_DIR_ENV):   # tests only: throw-away settings
+        use_settings_folder(os.environ[SETTINGS_DIR_ENV])
     # View ▸ Interface size (SPEC §13l.2): Qt scales the interface only if told before the
     # application object exists (QT_SCALE_FACTOR; one the user set themselves wins).
     restart.apply_saved_size()
@@ -36,6 +117,7 @@ def main() -> int:
     allow_large_images()  # pictures pasted at 1200 dpi can be bigger than Qt's default limit
     app = QApplication(sys.argv)
     restart.forget_scale_variable()   # (read by now; programs started from here don't get it)
+    restart.forget_bundle_library_path()   # (Linux build: opened PDFs/links use the system's)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     app.setWindowIcon(app_icon())  # every window of the program uses this icon

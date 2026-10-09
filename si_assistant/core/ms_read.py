@@ -38,7 +38,7 @@ Progress = Callable[[str], bool] | None   # called with a message; return False 
 
 # Raise this whenever reading changes, so that what an older version read (the cache in
 # manuscript/check.json) is read again.
-READER_VERSION = 2
+READER_VERSION = 4
 
 CAPTION = re.compile(r"^(Scheme|Table|Figure|Fig\.|Chart)\s*(S?\d+)\b", re.I)
 _BOLD_FONT = re.compile(r"(?i)(bold|black|heavy|semibold|demi|-bd\b|,bold)")
@@ -57,6 +57,7 @@ class Source:
     error: str = ""
     figure_text: bool = True        # labels were found in the figures (PDF/Word)
     pages: int = 0
+    transient: bool = False         # could not be opened just now (offline, locked)
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -70,13 +71,22 @@ class Source:
 def read_file(path: Path, progress: Progress = None) -> Source:
     """Read one file of the manuscript folder (by its extension)."""
     ext = path.suffix.lower()
+    if ext in (".pdf", ".docx", ".cdxml"):
+        # The bytes first: a file that can't be opened just now is not a damaged file.
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            return Source(path.name, ext.lstrip("."), transient=True, error=(
+                f"“{path.name}” could not be opened just now ({type(e).__name__}): it may "
+                "be an online-only OneDrive file while you are offline, or open in another "
+                "program. It will be read again at the next check."))
     try:
         if ext == ".pdf":
-            return read_pdf(path, progress)
+            return read_pdf(path, progress, data)
         if ext == ".docx":
-            return read_docx(path, progress)
+            return read_docx(path, progress, data)
         if ext == ".cdxml":
-            return read_cdxml(path)
+            return read_cdxml(path, data)
     except Stopped:
         raise
     except Exception as e:  # noqa: BLE001 — a damaged file must never stop the check
@@ -271,11 +281,11 @@ def _char_width(ch: str) -> float:
     return 0.5
 
 
-def read_pdf(path: Path, progress: Progress = None) -> Source:
+def read_pdf(path: Path, progress: Progress = None, data: bytes | None = None) -> Source:
     import pypdf
     src = Source(path.name, "pdf")
     try:
-        reader = pypdf.PdfReader(str(path))
+        reader = pypdf.PdfReader(io.BytesIO(data) if data is not None else str(path))
         if reader.is_encrypted:
             try:
                 reader.decrypt("")
@@ -406,10 +416,10 @@ def _cell_text(tc) -> str:
     return " ".join(t for t in (_paragraph(p)[0] for p in tc.iter(W + "p")) if t).strip()
 
 
-def read_docx(path: Path, progress: Progress = None) -> Source:
+def read_docx(path: Path, progress: Progress = None, data: bytes | None = None) -> Source:
     src = Source(path.name, "docx")
     try:
-        z = zipfile.ZipFile(str(path))
+        z = zipfile.ZipFile(io.BytesIO(data) if data is not None else str(path))
         doc = ET.fromstring(z.read("word/document.xml"))
     except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError) as e:
         src.error = (f"“{path.name}” could not be opened as a Word document "
@@ -684,10 +694,11 @@ def emf_spans(data: bytes) -> list[P.Span]:
 
 # ---------------------------------------------------------------------- ChemDraw (.cdxml)
 
-def read_cdxml(path: Path) -> Source:
+def read_cdxml(path: Path, data: bytes | None = None) -> Source:
     src = Source(path.name, "cdxml")
     try:
-        data = path.read_bytes()
+        if data is None:
+            data = path.read_bytes()
         root = ET.fromstring(data)
     except (ET.ParseError, OSError) as e:
         src.error = (f"“{path.name}” could not be read as a ChemDraw .cdxml file "

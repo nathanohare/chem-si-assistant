@@ -1,0 +1,29 @@
+{
+  "id": "s-d79a6040",
+  "type": "spectra",
+  "name": "Spectra",
+  "defaults": {
+    "per_page": 1,
+    "orientation": "landscape",
+    "header_line": true,
+    "struct_box": true,
+    "corner": "top-left",
+    "struct_frame": false,
+    "struct_frame_color": "#000000",
+    "struct_frame_width": 0.5,
+    "struct_bg": "#ffffff",
+    "id_size": 0.0,
+    "id_bold": true,
+    "struct_scale": 1.0,
+    "spectrum_frame": false,
+    "spectrum_frame_color": "#000000",
+    "spectrum_frame_width": 0.5,
+    "auto_crop": false,
+    "caption": false,
+    "caption_size": 9.0,
+    "nmr_links": true,
+    "link_style": "plain",
+    "link_back": true,
+    "hrms_reports": false
+  }
+}

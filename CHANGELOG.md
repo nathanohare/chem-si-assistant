@@ -4,7 +4,29 @@ What changed in each version of Chem SI Assistant. The newest version is at the 
 (The release workflow copies a version's section into its GitHub Release notes, which the
 program's update check shows.)
 
-## [Unreleased]
+## [1.0.0] - 2026-10-09
+
+**Example SI**
+- The program now comes with a finished example: six 1-arylethanols made by one general
+  procedure, a follow-up acetylation, two reaction schemes, an optimisation table, HRMS
+  reports, references and the compiled SI. The start page shows it in a highlighted box:
+  **Open the Example Project…** opens a copy you can change freely, and **View Its Finished
+  SI (PDF)** shows the result. Both are also in the Help menu. Its data come from recent
+  papers (cited in it); its spectra are simulated from those data and say so on each page.
+
+**Decisions after the code audit**
+- A structure with a generic atom (R, X, *) can now be used, for example in a general
+  scheme (R = aryl). It has no formula or mass, so it gets a warning and the checks that need
+  a formula skip it.
+- For a salt, the automatic HRMS "M" skips common counter-ions (halides, BF₄⁻, PF₆⁻, OTf⁻,
+  OTs⁻, BArF⁻, Na⁺, K⁺, NBu₄⁺…), so it picks the organic ion; the "M is:" list shows which
+  piece it took and you can still choose another.
+- A charge typed in the M formula ("C10H16N+") is used for the adduct hint and the
+  charge warning.
+- The free **cryptography** package is now included. Many NMR and MS programs save their PDF
+  reports with edit restrictions, and it is what lets the program read them. It is used for
+  nothing else: nothing is encrypted, no keys or passwords are kept, nothing is sent. The
+  README, the licence notices, the About box and the user guide explain this.
 
 **Compound pages**
 - **Duplicate…** (right-click a compound or scheme page in the tree): choose how many
@@ -168,6 +190,180 @@ program's update check shows.)
   ("Manuscript"). The page keeps room for the results table (the files list is as tall as
   its files, up to eight; the page scrolls in a small window).
 - The label and value reading is adapted from Nathan O'Hare's chem-vision (MIT licence).
+
+**Reliability and speed (code audit)**
+
+*Faster with large projects*
+- Pausing while typing re-checks only the compound you are on, not the whole project, and
+  the Warnings panel checks once per autosave instead of twice. Structures, compound IDs
+  and figure/table labels are worked out once per check, so warnings, dashboards and the
+  Manuscript check keep up in big projects.
+- The Data section's dashboard is rebuilt only while it is on show (switching tabs and
+  editing the ID table are much faster), the compact dashboard opens faster, and old
+  structure pictures no longer pile up in memory during a long session.
+- Projects with more than 64 HRMS report files no longer re-read every report at each
+  autosave (this froze the window for seconds). Long CSV peak lists and large mzXML files
+  are quicker to show and use less memory.
+- PDF spectra and reports are read again only when the file changes, and each structure is
+  prepared once per compile, so Compile SI and the table-of-contents and Spectra live
+  previews are noticeably quicker. The Spectra live preview shows only the first two HRMS
+  reports (the HRMS reports page and the SI have them all).
+- Also quicker: the References page with hundreds of references, BibTeX/RIS import, typing
+  above a JPEG/TIFF figure or a table (no more stutter), the Delete question for a large
+  section, duplicating a scheme many times, Save Snapshot, and pasting metafiles (about 3×)
+  or Mnova spectra. The spectra page and figure previews use far less memory, and saving
+  no longer rewrites unchanged files, so OneDrive has less to sync.
+
+*Never lose work*
+- If a page cannot be saved (for example OneDrive or a virus scanner is holding the file),
+  you get a plain "Could not save" message instead of a crash report, your typing stays on
+  screen, and the save is tried again at the next edit or when you leave the page. This
+  covers compound pages, general procedures, texts, front-matter pages, references and
+  spectrum settings.
+- While a page's latest changes are not saved, the program asks before you leave it, undo,
+  redo or close (answer No to stay and copy your text), and commands that change that
+  compound wait with a message. A change that could not be saved (a reference edit, a
+  warning dismissal, a scheme name) is also taken back on screen, so it is never written
+  later without you knowing.
+- Moving, deleting or restoring a compound, scheme page or section, and removing or
+  replacing a file, now happens completely or not at all: if a file is open in another
+  program (e.g. a spectrum PDF in Acrobat), nothing changes and the message says so. A
+  failed copy of an HRMS report or raw-data folder is cleaned up, with a message saying why.
+- A damaged references.json or front.json is kept as a dated "….damaged-….json" copy before
+  a new one is written (and a damaged manuscript dismissed.json as a dated
+  dismissed.damaged-….json, never overwritten).
+  Text and dictionary files saved by older editors (Notepad "ANSI" or "Unicode") are read
+  correctly and saved as UTF-8 next time.
+- Project files edited by hand with odd values (numbers as IDs, null, a list where text
+  belongs…) no longer stop the project, a page, the dashboard or Compile SI. The project
+  opens with a warning, an unusable value is kept in the file as "*name* (could not be
+  read)", and empty values never print as "None" in the SI.
+- A compound folder copied into another section in Explorer no longer edits the original;
+  the copy is skipped with a warning saying which folder to rename or delete.
+- When OneDrive or a virus scanner holds a file, the scheme editor (typing conditions, Save
+  scheme, its buttons) and Compile SI give a plain message instead of the crash dialog, and
+  every kind of page counts typing it could not save: the scheme name, label and
+  conditions, an Attachment section's heading and caption and a spectrum's header and
+  caption now ask before you leave. Each failure is reported once.
+- A change that could not be saved is also taken back on screen: renaming a compound from
+  the tree, a scheme-editor change, renaming or moving a section, and moving a compound or
+  scheme page (which no longer renumbers the compounds when it fails).
+- A structure file that cannot be read just now no longer stops Compile SI or the Preview:
+  that structure, its formula and masses are left out with a plain note. The warning icons
+  in the tree notice a procedure or notes file changed by OneDrive.
+
+*Undo and Trash*
+- Edit ▸ Undo no longer takes away (and later deletes) files you put into a compound's
+  folder by hand; it says which files are in the way and changes nothing. If an undo stops
+  part-way, your newer files are kept in the Trash with a list of where each came from.
+- Undo is fixed after changing the structure of a compound with HRMS reports, after typing
+  an ID in the ID table, and in a text box after a mention's number changed. Adding several
+  manuscript files, or pasting scheme conditions holding several structures, is one Undo
+  step; adding or deleting a scheme compound is named in the Undo menu.
+- Putting a Trash item back is all or nothing, and one damaged entry no longer stops the
+  Trash window. Restoring an HRMS or raw-data folder is instant (moved, not copied), a
+  scheme whose deletion was interrupted can be restored with its compounds, a restored
+  structure keeps its ChemDraw picture, and the Kind column reads "Figure", "Table" or
+  "Structure (from scheme …)". The Empty Trash question says how long Undo can bring the
+  items back (while it is one of the last 50 changes, until the project is closed).
+
+*Compiling*
+- A damaged PNG, JPEG or GIF no longer stops the whole SI: it is left out with a note
+  naming the file (a picture saved under the wrong extension, or a camera JPEG with stray
+  bytes, prints as normal). A file that cannot be read just now (not yet downloaded by
+  OneDrive, or open elsewhere) is reported as such, not as "damaged", and never left out
+  without a word.
+- A password-protected PDF is called that, with how to fix it. Edit-restricted vendor PDFs
+  are read (with the included "cryptography" package, see above).
+- Files named like Windows devices ("AUX.png", "con.pdf", "COM1") are stored as "AUX_.png"
+  etc., and references with "in press", "2010a", full-width digits, odd characters or an
+  unusual web address no longer stop the compile. New warning: a reference whose year or
+  web address the journal style cannot print is listed instead of quietly dropped.
+- The table-of-contents preview leaves out unticked spectra and HRMS reports, so its page
+  numbers match the SI; Windows no longer marks the program "Not responding" during a long
+  compile; a toolbar Preview no longer deletes the drawings build/SI.typ uses.
+- What you see now matches what prints: '[M]+.' prints as [M]⁺•, the scheme editor's yields
+  match the printed ones, and the Preview of a scheme-page compound not drawn in a box
+  shows its structure.
+
+*Text boxes and tables*
+- Cut, Copy and drag-and-drop take exactly the selected text when a paragraph holds an
+  emoji or a math letter such as 𝐽 (7.2 Hz no longer becomes .2 Hz), and the spelling and
+  formatting checks mark and fix the right letters after one.
+- Tables over 200 rows are no longer cut to 200 when reopened. Tables can have up to 5000
+  rows and 200 columns; a paste that is too large says what was left out.
+- Shift+Enter in a caption no longer joins two words; formatting keys no longer change
+  read-only boxes; Mention and Cite no longer insert an unrelated item when nothing
+  matches; an "&" in a section, compound, field or file name (e.g. "Synthesis &
+  Characterization") shows correctly in menus, tabs and buttons.
+
+*Schemes*
+- Renaming a scheme page or its compounds from the tree (F2) sticks; typing on a compound
+  tab is no longer lost when you tick "Compound" straight after; removing a "Compound"
+  product removes its box; ID labels with * _ ^ or } no longer gain backslashes; choosing
+  an unusable picture no longer deletes the box's picture; mentions in a duplicated
+  scheme's conditions point to the copy's own compounds.
+
+*Chemistry checks*
+- A structure with a generic atom (R, X, *) no longer crashes the program or counts R as
+  0 Da: it is drawn, printed and explained ("no formula (generic atom)"), and can be cleared
+  or replaced.
+- The ¹³C signal-count check no longer gives false warnings for meso and cis/trans ring
+  compounds. The ¹H integration check no longer counts D or T, recognises OH/NH drawn as
+  atoms in a MOL file, and reads peaks like (s, 9H, C(CH3)3) correctly.
+- Spectrum files named after IDs such as 13c or 19f are no longer guessed as ¹³C/¹⁹F
+  spectra; "13C{1H}", "13C(1H)" and "31P[1H]" stay ¹³C/³¹P, and HSQC/HMBC files are 2D NMR.
+- Dismissed warnings stay dismissed until their data really changes (not, for example,
+  when you tick "print reports"), including ones dismissed in an earlier version. New
+  warning: text typed in Purification ▸ "Printed as" is not printed when the general
+  procedure places {purification} itself.
+- Elemental analysis has an optional **Formula** box for the formula the values were
+  calculated for (e.g. a solvate); with only Found values, no empty "Calcd for …: ." prints.
+
+*HRMS and spectra*
+- Compounds with several Br, Cl, Sn, Pd or Mo atoms always get the monoisotopic "calcd"
+  m/z (no more ⁸¹Br/¹¹⁸Sn peak with an error of thousands of ppm).
+- Adducts typed with subscripts, superscripts or en dashes ([M+NH₄]⁺, [M+H–H₂O]⁺) are read
+  correctly; an isotope in an adduct ([M+⁷Li]+, [M+¹⁰⁷Ag]+) uses that isotope's mass; an
+  adduct that cannot be read, or has charge 0, gives a warning; a formula written with
+  [2H] matches a structure drawn with D.
+- A Found m/z filled from a report is no longer cleared while a file cannot be opened; long
+  Excel reports say exactly how many lines were left out; a zipped raw-data folder is no
+  longer called an Excel file. A tolerance that is not a sensible number falls back to
+  5 ppm, and Project settings takes 0.01–1000 ppm without rounding.
+- A spectrum that cannot be read for a moment is read again later instead of being called
+  damaged (Auto-crop too). Pasting a spectrum updates the warnings at once and names any
+  files not pasted (e.g. an .mnova file).
+
+*Manuscript check*
+- "–", "n.d.", "trace" and "nr" in a yield, ee, er or dr column are no longer read as
+  values; two warnings about the same footnote letter can both be dismissed; dismissing
+  after the manuscript changed reads it again instead of showing "0 compounds checked".
+- Adding or removing one file reads only new or changed files; a file that cannot be opened
+  for a moment is not remembered as damaged; OneDrive conflict copies of the program's own
+  files are not listed as manuscripts.
+
+*Shared folders and other computers*
+- If the project is taken over or closed on another computer, or its folder is renamed or
+  moved, this window turns read-only and tells you, instead of saving its old copy over
+  the other changes. Unsaved typing stays on screen to copy, and Compile SI and Save
+  Snapshot no longer write into the project.
+- A lock file held for a moment by OneDrive, or a USB/network drive that drops out briefly,
+  no longer makes the project read-only; the "project is in use" time is always in English
+  with AM/PM.
+- A project with files not yet downloaded by OneDrive now opens, with a warning naming
+  them; those pages keep their place and IDs. When OneDrive or Dropbox has kept a second
+  version of a file ("compound-LAPTOP.json"), opening the project names it.
+
+*Mac, Linux and updates*
+- Mac: hints show ⌘V/⌘C, and ⌫ or ⌘⌫ deletes the selected tree item (after asking). macOS
+  and Linux: saved files keep their permissions, so shared group folders keep working.
+- Linux: View ▸ Interface size ▸ Restart works in the AppImage; PDFs, folders and links
+  open with the computer's own libraries; dashboard tooltip pictures work for every user
+  of a shared computer.
+- Updates: a failed download shows "Update not downloaded" with the release link; Cancel at
+  the last moment no longer starts the installer; on Windows, old installers are removed
+  from the temporary folder.
 
 ## [0.1.0] - first release
 

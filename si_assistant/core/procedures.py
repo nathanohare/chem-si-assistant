@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 
+from .fields import part_text
 from .markup import MENTION, Run, parse
 
 PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
@@ -32,6 +33,16 @@ PURIFICATION_START = "The crude product was purified by "   # the automatic sent
 def key(name: str) -> str:
     """Placeholders match whatever their case and spacing: {Starting Material} = {starting material}."""
     return " ".join(name.lower().split())
+
+
+def _text(value) -> str:
+    """A stored value as text: a null or something that is not text at all (a hand-edited
+    compound.json) is empty, never "None"."""
+    return part_text(value).strip()
+
+
+def _dict(value) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
 def placeholders(sentence: str) -> list[str]:
@@ -53,12 +64,14 @@ def auto_values(project, compound, gp: dict) -> dict[str, list[Run]]:
     """What the automatic placeholders become for this compound."""
     out: dict[str, list[Run]] = {"gp": [Run(gp.get("name", "") or "the general procedure")],
                                  "product": [Run("", ref=MENTION + compound.id)]}
-    scale = compound.values.get("scale") or {}
-    if "scale" in compound.field_keys and str(scale.get("value", "")).strip():
-        out["scale"] = [Run(f"{str(scale['value']).strip()} {scale.get('unit', 'mmol')}".strip())]
-    y = compound.values.get("yield") or {}
-    if "yield" in compound.field_keys and str(y.get("percent", "")).strip():
-        out["yield"] = [Run(f"{str(y['percent']).strip()}%")]
+    # (A hand-edited compound.json may hold a null or a value of the wrong form: no value.)
+    scale = _dict(compound.values.get("scale"))
+    if "scale" in compound.field_keys and _text(scale.get("value")):
+        unit = _text(scale.get("unit", "mmol")) or "mmol"
+        out["scale"] = [Run(f"{_text(scale['value'])} {unit}")]
+    y = _dict(compound.values.get("yield"))
+    if "yield" in compound.field_keys and _text(y.get("percent")):
+        out["yield"] = [Run(f"{_text(y['percent'])}%")]
     purification = purification_text(compound)
     if purification:
         out["purification"] = [Run(purification)]
@@ -71,7 +84,7 @@ def _purification_value(compound) -> dict[str, str]:
     if "purification" not in compound.field_keys:
         return {}
     value = compound.values.get("purification")
-    return {k: str(v).strip() for k, v in value.items()} if isinstance(value, dict) else {}
+    return {k: _text(v) for k, v in value.items()} if isinstance(value, dict) else {}
 
 
 def purification_text(compound) -> str:
@@ -82,7 +95,7 @@ def purification_text(compound) -> str:
 
 def purification_text_of(value: dict) -> str:
     """purification_text for the field's value {"method", "phase", "eluent", …}."""
-    v = {k: str(x).strip() for k, x in value.items()}
+    v = {k: _text(x) for k, x in _dict(value).items()}
     if not v.get("method"):
         return ""
     inside = ", ".join(x for x in (v.get("phase", ""), v.get("eluent", "")) if x)
@@ -197,12 +210,12 @@ def scale_conflict(project, compound) -> str:
     gp = project.compound_gp(compound)
     if gp is None or "scale" not in compound.field_keys:
         return ""
-    typed = next((str(v).strip() for n, v in (project.gp_choice(compound).get("values")
-                                              or {}).items() if key(n) == "scale"), "")
+    typed = next((_text(v) for n, v in _dict(project.gp_choice(compound).get("values"))
+                  .items() if key(n) == "scale"), "")
     if not typed or "scale" not in [key(p) for p in placeholders(gp.get("sentence", ""))]:
         return ""
-    field = compound.values.get("scale") or {}
-    value, unit = str(field.get("value", "")).strip(), str(field.get("unit", "mmol") or "mmol")
+    field = _dict(compound.values.get("scale"))
+    value, unit = _text(field.get("value")), _text(field.get("unit")) or "mmol"
     if not value:
         return ""
     plain = " ".join(r.text for r in value_runs(typed)).strip()
@@ -230,7 +243,7 @@ def fill(sentence: str, typed: dict[str, str], auto: dict[str, list[Run]],
     automatic ones, except {scale}: once the compound's Reaction scale field is filled,
     that is printed (SPEC §13n.9; a typed {scale} fills the field, and a warning says if
     the two differ). A placeholder with no value is printed as [name] and reported."""
-    typed = {key(k): v for k, v in typed.items() if str(v).strip()}
+    typed = {key(k): part_text(v) for k, v in typed.items() if _text(v)}
     out: list[Run] = []
     for p in parse(sentence):
         if out and p.runs:

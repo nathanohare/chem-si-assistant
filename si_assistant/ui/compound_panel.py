@@ -10,13 +10,13 @@ from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDialog, QHBoxLayout,
                                QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QScrollArea, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
-from ..core import checks, procedures
+from ..core import chem, checks, procedures
 from ..core import fields as F
 from ..core.project import Compound, Project, ProjectError
 from .dialogs import CustomFieldDialog
 from .field_widgets import AttachmentsEditor, FieldBox, get_part_value, set_part_value
 from .structure_widgets import (HrmsEditor, StructureEditor, drawing_settings, formula_html,
-                                mol_pixmap, paste_key, picture_pixmap)
+                                generic_structure, mol_pixmap, paste_key, picture_pixmap)
 
 AUTOSAVE_DELAY_MS = 800
 FIELD_SPACING = 3   # pixels between the field boxes
@@ -66,6 +66,9 @@ class CompoundPanel(QWidget):
         self.boxes: list[FieldBox] = []
         # Fields edited since the last save: they name the undo step ("Edit 3a ▸ Yield").
         self._changed_keys: set[str] = set()
+        # Edits not written yet: set by every edit, cleared only once the save worked (a
+        # failed autosave is tried again by flush).
+        self._dirty = False
 
         # ---- header
         self.id_label = QLabel()
@@ -94,6 +97,12 @@ class CompoundPanel(QWidget):
         self.warning_label = QLabel()
         self.warning_label.setWordWrap(True)
         self.warning_label.setStyleSheet("color: #d35400;")
+        # A failed autosave stays said here (the status bar message soon goes) until a
+        # save works.
+        self.unsaved_label = QLabel()
+        self.unsaved_label.setWordWrap(True)
+        self.unsaved_label.setStyleSheet("color: #c0392b; font-weight: bold;")
+        self.unsaved_label.hide()
         # "◐ 1 / 8 required": the missing fields in its tooltip; clicking it opens the
         # first missing field (SPEC §13q.6c).
         self.completion_label = QLabel()
@@ -182,6 +191,7 @@ class CompoundPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.addLayout(id_row)
         layout.addWidget(self.warning_label)
+        layout.addWidget(self.unsaved_label)
         layout.addWidget(self.scroll, 1)
 
         self._timer = QTimer(self)
@@ -233,6 +243,9 @@ class CompoundPanel(QWidget):
             box.editor.files_changed.connect(lambda: self.labels_changed.emit(self.compound.id))
             # (e.g. "a ¹H report but no ¹H spectrum" goes once one is added or pasted)
             box.editor.files_changed.connect(self._refresh_header)
+            if box.editor.has_labels():
+                # (the inline files of the page's other file fields are numbered after these)
+                box.editor.files_changed.connect(self._refresh_file_labels)
             box.editor.view_spectra_requested.connect(self._view_spectra)
             if hasattr(box.editor, "pasted"):   # the Spectra field (SPEC §13l.1)
                 box.editor.pasted.connect(self.saved.emit)
@@ -250,7 +263,7 @@ class CompoundPanel(QWidget):
         self.fields_layout.addWidget(box)
 
     def _view_spectra(self) -> None:
-        self.flush()   # (a header or caption typed in the Spectra field)
+        self._save_waiting()   # (a header or caption typed in the Spectra field)
         self.view_spectra.emit(self.compound.id)
 
     def focus_field(self, key: str) -> None:
@@ -312,15 +325,27 @@ class CompoundPanel(QWidget):
         reason = ask_reason(self, warning.message)
         if reason is None:
             return
-        self.flush()
-        with self.project.undo_step("Dismiss a warning", where=[("compound", self.compound.id)]):
-            self.project.dismiss_warning(self.compound, warning, reason)
+        self._save_waiting()
+        try:
+            with self.project.undo_step("Dismiss a warning",
+                                        where=[("compound", self.compound.id)]):
+                self.project.dismiss_warning(self.compound, warning, reason)
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(self, "Could not dismiss the warning",
+                                f"The warning could not be saved as dismissed ({e}). "
+                                "Try again in a moment.")
+            return
         self._refresh_header()
         self.labels_changed.emit(self.compound.id)
         self.saved.emit("Warning dismissed")
 
     def set_all_collapsed(self, collapsed: bool) -> None:
-        self.save_pending()  # summaries should reflect what's on screen
+        # The summaries should reflect what's on screen. (If that can't be saved just now,
+        # the page says so; folding the fields loses nothing, so it still goes on.)
+        try:
+            self._save_pending_or_raise()
+        except (ProjectError, OSError):
+            pass
         for box in self.boxes:
             box.set_collapsed(collapsed)
 
@@ -336,6 +361,10 @@ class CompoundPanel(QWidget):
                                  "Automatic ID from the section's ID table")
         self.name_label.setText(self.compound.name or "<i>unnamed compound</i>")
         mol = self.project.read_structure(self.compound)
+        # A structure with a generic atom (R) is read as none: drawn all the same, with a
+        # note instead of the formula.
+        generic_mol, generic = ((None, []) if mol is not None
+                                 else generic_structure(self.project, self.compound))
         # The structure (or its picture) shows here, drawn for this screen's resolution so
         # it is sharp (SPEC §13n.7b); the Structure field itself is one line once it has one.
         dpr = self.thumb.devicePixelRatioF()
@@ -344,9 +373,10 @@ class CompoundPanel(QWidget):
                   if picture is not None and picture.exists() else None)
         if pixmap is not None and not pixmap.isNull():
             self.thumb.setPixmap(pixmap)
-        elif mol is not None:
-            self.thumb.setPixmap(mol_pixmap(mol, self.THUMB_SIZE,
-                                            drawing_settings(self.project), dpr))
+        elif mol is not None or generic_mol is not None:
+            self.thumb.setPixmap(mol_pixmap(mol if mol is not None else generic_mol,
+                                            self.THUMB_SIZE, drawing_settings(self.project),
+                                            dpr))
         else:
             self.thumb.setPixmap(QPixmap())
             self.thumb.setText("no structure")
@@ -357,8 +387,14 @@ class CompoundPanel(QWidget):
             if has_any else f"Click here, then press {paste_key()} to paste the structure "
                             "(copied in ChemDraw), SMILES or a picture.")
         if mol is not None:
-            info = self.project.structure_info(self.compound)
-            self.formula_label.setText(f"{formula_html(info.formula)} &nbsp; MW {info.mw:.2f}")
+            try:
+                info = chem.mol_info(mol)
+                self.formula_label.setText(
+                    f"{formula_html(info.formula)} &nbsp; MW {info.mw:.2f}")
+            except chem.ChemError:   # e.g. a generic atom (R): no formula
+                self.formula_label.setText("no formula (generic atom)")
+        elif generic:
+            self.formula_label.setText(f"no formula (generic atom {', '.join(generic)})")
         else:
             self.formula_label.setText("")
         table_id = self._table_id()
@@ -369,10 +405,12 @@ class CompoundPanel(QWidget):
         self.warning_label.setText("\n".join(f"⚠ {w}" for w in id_warnings))
         self.warning_label.setVisible(bool(id_warnings))
         by_field: dict[str, list] = {}
+        in_editor: dict[str, list] = {}   # (the Structure box shows these words itself)
         for w in active:
-            by_field.setdefault(w.field, []).append(w)
+            (in_editor if w.key == checks.GENERIC_STRUCTURE_KEY
+             else by_field).setdefault(w.field, []).append(w)
         for box in self.boxes:
-            box.set_warnings(by_field.get(box.defn.key, []))
+            box.set_warnings(by_field.get(box.defn.key, []), in_editor.get(box.defn.key, []))
 
         filled, total, missing = self.project.completion(self.compound)
         if total == 0:
@@ -410,16 +448,43 @@ class CompoundPanel(QWidget):
 
     def _schedule_save(self, *_args) -> None:
         if not self.project.read_only:
+            self._dirty = True
             self._timer.start()
 
-    def save_pending(self) -> None:
+    def save_pending(self) -> bool:
         """Before a separate action on this page (a structure drawn, a file added, a field
         added…): typing not saved yet is saved first, as its own undo step, so undoing the
-        action does not undo the typing too."""
+        action does not undo the typing too.
+
+        False if that typing could not be saved (e.g. a file held by OneDrive): a message
+        says so, the typing stays on screen (tried again later), and the action should not
+        go on, since it may rebuild the page from the saved files and lose the typing."""
+        try:
+            self._save_pending_or_raise()
+        except (ProjectError, OSError) as e:
+            QMessageBox.warning(
+                self, "Not saved yet",
+                f"Your typing on this page could not be saved yet ({e}), so nothing was "
+                "changed. It is kept on screen: try again in a moment.")
+            return False
+        return True
+
+    def _save_pending_or_raise(self) -> None:
+        """save_pending's saving (raises ProjectError/OSError if it fails; the page then
+        says the typing is not saved yet, and it stays waiting)."""
+        if self.project.read_only:
+            return
         self.flush()
-        if not self.project.read_only:
+        try:
             with self.project.autosave():
                 self.store_all()
+        except (ProjectError, OSError) as e:
+            self._dirty = True   # (tried again with the next edit or when the page is left)
+            self.unsaved_label.setText(f"⚠ Not saved yet ({e}). Your typing is kept on "
+                                       "screen; saving is tried again with your next edit "
+                                       "or when you leave this page.")
+            self.unsaved_label.show()
+            raise
 
     def _shown_id(self) -> str:
         return self.project.id_report().display_id(self.compound.id)
@@ -432,12 +497,47 @@ class CompoundPanel(QWidget):
         self.compound.data["id_override"] = self.override_edit.text().strip()
 
     def save(self) -> None:
+        """The autosave. If the files can't be written (e.g. compound.json held by OneDrive
+        or a virus scanner, a full disk), the status bar says so and the edits stay waiting:
+        they are saved with the next edit, or when the page is left (flush)."""
+        try:
+            self._write()
+        except (ProjectError, OSError) as e:
+            # (No quick retry: each attempt on a locked file waits about a second.)
+            self.saved.emit(f"Could not save ({e}). It is tried again with your next edit "
+                            "or when you leave this page.")
+
+    def _write(self) -> None:
+        """Save what is on screen (raises ProjectError/OSError if it can't be written)."""
         self._timer.stop()
         if self.project.read_only:
             return
-        with self.project.autosave():   # (typing: merged into one undo step per field)
-            self.store_all()
-            self.project.save_compound(self.compound)
+        try:
+            with self.project.autosave():   # (typing: merged into one undo step per field)
+                self.store_all()
+                self.project.save_compound(self.compound)
+        except (ProjectError, OSError) as e:
+            self.unsaved_label.setText(f"⚠ Not saved yet ({e}). Your typing is kept on "
+                                       "screen; saving is tried again with your next edit "
+                                       "or when you leave this page.")
+            self.unsaved_label.show()
+            raise
+        self._dirty = False
+        self.unsaved_label.hide()
+        # The saved data is safe from here on: a hint that can't be updated just now (e.g. a
+        # text file held by OneDrive while the figure labels are counted) keeps its old
+        # text, and is not reported as a failed save.
+        try:
+            self._refresh_after_save()
+        except (ProjectError, OSError):
+            pass
+        self._changed_keys.clear()
+        # Name, manual ID or flags may have changed; the tree shows all three.
+        self.labels_changed.emit(self.compound.id)
+        self.saved.emit("Saved")
+
+    def _refresh_after_save(self) -> None:
+        """The header, the collapsed summaries and the automatic hints after a save."""
         self._refresh_header()
         for box in self.boxes:
             if box.collapsed:
@@ -445,10 +545,15 @@ class CompoundPanel(QWidget):
             if isinstance(box.editor, AttachmentsEditor):
                 # (an Additional file set to "Spectra section" gives a spectra page)
                 box.editor.refresh_view_button()
-        self._changed_keys.clear()
-        # Name, manual ID or flags may have changed; the tree shows all three.
-        self.labels_changed.emit(self.compound.id)
-        self.saved.emit("Saved")
+            gp = getattr(box.editor, "gp", None)
+            if gp is not None:
+                gp.refresh_auto()   # (Yield, Reaction scale, Purification or the ID changed)
+            if box.defn.key == "purification":
+                # (a general procedure chosen that places {purification} itself, or taken off)
+                getattr(box.editor, "_show_purification", lambda: None)()
+        if any(isinstance(b.editor, AttachmentsEditor) and b.defn.key in self._changed_keys
+               for b in self.boxes):
+            self._refresh_file_labels()   # (a placement or a typed figure label changed)
 
     def undo_context(self) -> tuple:
         """(merge key, label) of the undo step for this page's saves (SPEC §13k.11):
@@ -464,9 +569,33 @@ class CompoundPanel(QWidget):
                                       if len(keys) == 1 else "")
         return ("compound", cid, keys), label
 
-    def flush(self) -> None:
-        if self._timer.isActive():
+    def _save_waiting(self) -> None:
+        """Save edits still waiting, before an action on this page (a failed save is said in
+        the status bar; the action goes on)."""
+        if self._dirty or self._timer.isActive():
             self.save()
+
+    def has_unsaved(self) -> bool:
+        """Edits whose save is still waiting: not tried yet, or tried and failed (kept to
+        be tried again)."""
+        return self._dirty or self._timer.isActive()
+
+    def flush(self) -> None:
+        """Save edits still waiting (also those whose autosave failed). Raises
+        ProjectError/OSError if that fails, so the main window says so."""
+        if self._dirty or self._timer.isActive():
+            self._write()
+
+    def _refresh_file_labels(self) -> None:
+        """The automatic figure labels shown in the file fields (inline files are numbered
+        across all of them, so a change in one field moves the numbers in the others)."""
+        editors = [b.editor for b in self.boxes if isinstance(b.editor, AttachmentsEditor)
+                   and b.editor.has_labels()]
+        if editors:
+            from ..core.labels import compute
+            labels = compute(self.project)   # (once for the page)
+            for editor in editors:
+                editor.refresh_labels(labels)
 
     def _on_structure_changed(self, added: list) -> None:
         if added:
@@ -479,11 +608,13 @@ class CompoundPanel(QWidget):
             self.saved.emit("Structure saved")
         for box in self.boxes:
             if isinstance(box.editor, HrmsEditor):
-                box.editor.refresh_calculation()
+                box.editor.structure_changed()
             elif isinstance(box.editor, StructureEditor):
                 box.editor.refresh()
             elif hasattr(box.editor, "lookup_btn"):   # the Name field's PubChem button
                 box.editor.refresh_structure()
+            elif box.defn.key == "ea":   # the formula shown in its empty Formula box
+                getattr(box.editor, "_show_ea_formula", lambda: None)()
         self._refresh_header()
         self.labels_changed.emit(self.compound.id)
         self.structure_updated.emit(self.compound.id)
@@ -495,6 +626,7 @@ class CompoundPanel(QWidget):
     def _rebuild_keep_scroll(self) -> None:
         pos = self.scroll.verticalScrollBar().value()
         self._build_fields()
+        self._refresh_header()   # the new boxes need their warnings (as in _add_field)
         QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(pos))
 
     # ------------------------------------------------------------------ adding/removing fields
@@ -513,7 +645,9 @@ class CompoundPanel(QWidget):
             if group:
                 self.add_menu.addSeparator()
         for e in custom:
-            self.add_menu.addAction(e["custom"]["label"], lambda e=e: self._add_field(e))
+            # (A "&" in a typed name would otherwise underline the next letter as a shortcut.)
+            self.add_menu.addAction(str(e["custom"].get("label") or e["key"]).replace("&", "&&"),
+                                    lambda e=e: self._add_field(e))
         if custom:
             self.add_menu.addSeparator()
         self.add_menu.addAction("Custom field…", self._add_custom_field)
@@ -531,7 +665,8 @@ class CompoundPanel(QWidget):
         return defn.label if defn is not None else key
 
     def _add_field(self, entry: dict) -> None:
-        self.save_pending()
+        if not self.save_pending():   # (the page is rebuilt below: typing would be lost)
+            return
         try:
             with self.project.undo_step(f"Add field “{self._field_name(entry)}” to "
                                         f"{self._shown_id()}"):
@@ -543,7 +678,8 @@ class CompoundPanel(QWidget):
         self.focus_field(entry["key"])
 
     def _remove_field(self, key: str) -> None:
-        self.save_pending()
+        if not self.save_pending():   # (the page is rebuilt below: typing would be lost)
+            return
         name = next((b.defn.label for b in self.boxes if b.defn.key == key), key)
         try:
             with self.project.undo_step(f"Remove field “{name}” from {self._shown_id()}"):
