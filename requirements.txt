@@ -1,6 +1,6 @@
 # Runtime (all install from PyPI as ready-made "wheels" on Windows, macOS and Linux with
 # Python 3.12). Upper limits keep the automatic tests and installers on versions known to
-# work: tested with PySide6 6.11, RDKit 2026.03, typst 0.15, pypdf 6, cryptography 50,
+# work: tested with PySide6 6.11 and 6.12, RDKit 2026.03, typst 0.15, pypdf 6, cryptography 50,
 # pyspellchecker 0.9, NumPy 2.5.
 PySide6>=6.6,<7       # Qt user interface — LGPL-3.0
 rdkit>=2024.3         # chemistry: structures, formulas, masses, drawings — BSD-3-Clause

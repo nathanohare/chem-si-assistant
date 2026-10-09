@@ -35,13 +35,14 @@ def test_a_failed_download_is_reported(qapp, tmp_path, monkeypatch, key, name):
         raise updates.DownloadError("The download failed: connection reset")
     monkeypatch.setattr(updates, "download", fail)
     shown = []
-    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.windowTitle()) or 0)
+    # (the message, not the window title: macOS message boxes have none)
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.text()) or 0)
     win = update_ui.QWidget()
     up = update_ui.Updater(win, info_for([Asset(name, "https://example.invalid/x", 100)]), key=key)
     up.start()
     run_until_done(qapp, up)
     assert isinstance(up.result, updates.DownloadError)
-    assert shown == ["Update not downloaded"]
+    assert len(shown) == 1 and "connection reset" in shown[0]
     win.deleteLater()
 
 

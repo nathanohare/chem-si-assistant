@@ -208,9 +208,12 @@ def test_it_compiles_without_warnings_in_every_style(qapp, short_tmp, style):
     assert result.warnings == []
     reader = PdfReader(str(result.pdf))
     assert len(reader.pages) >= 15
-    text = "".join(page.extract_text() or "" for page in reader.pages[:6])
-    assert "1-(4-Bromophenyl)ethyl acetate" in text
-    assert "General Procedure A" in text
+    # (all pages, compared without spaces and line breaks: where the lines break depends on
+    # the fonts this computer has, and with some fonts a hyphen is read as a soft hyphen)
+    text = "".join(page.extract_text() or "" for page in reader.pages)
+    text = "".join(text.replace("\xad", "-").split())
+    assert "1-(4-Bromophenyl)ethylacetate" in text
+    assert "GeneralProcedureA" in text
 
 
 def test_the_tool_rebuilds_the_same_project(qapp, short_tmp):

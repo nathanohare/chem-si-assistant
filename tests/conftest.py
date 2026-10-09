@@ -11,6 +11,17 @@ def qapp():
     from PySide6.QtWidgets import QApplication
     app = QApplication.instance() or QApplication([])
     yield app
+    # Delete the windows tests left open while Qt is still running: with PySide6 6.12 on
+    # Linux, Python freeing them after Qt has shut down crashes the test run on exit
+    # (though every test passed).
+    import gc
+    from PySide6.QtCore import QCoreApplication, QEvent
+    for widget in QApplication.topLevelWidgets():
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    app.processEvents()
+    gc.collect()
 
 
 @pytest.fixture(autouse=True)
