@@ -46,6 +46,23 @@ contacted, and nothing about you or your projects is sent.
 a free GitHub account is needed), or open an
 [issue](https://github.com/nathanohare/chem-si-assistant/issues/new/choose).
 
+## Known limitations
+
+- **Pasting from ChemDraw and Mnova on a Mac has not been tested yet.** The program was
+  developed and tested with ChemDraw and Mnova on Windows. On macOS it may not see
+  ChemDraw's structure data or the sharp (vector) copies ChemDraw and Mnova make, so a
+  pasted structure, picture or spectrum may come in as an ordinary lower-resolution picture
+  instead. Nothing is lost or broken: you can still paste the structure as SMILES or a MOL
+  file, or attach the spectrum as a PDF file. The check to run on a Mac is described in
+  [TODO.md](TODO.md); if you have a Mac with ChemDraw or Mnova, the results are very
+  welcome as an issue.
+- **Intel Macs are not supported**, and the installers are **not signed** (see above).
+- **Three journal styles:** ACS, Wiley and RSC. Other journals' layouts can be approximated
+  with these.
+- **No structure editor of its own:** structures are drawn in ChemDraw (or another
+  editor) and pasted, or typed as SMILES.
+- **English only:** the program, its spelling check and the SI text it writes.
+
 ## Running it from the source code (Windows, current setup)
 
 The program uses its own Anaconda environment called `si-assistant`, kept separate
