@@ -35,6 +35,17 @@ def _clear_clipboard():
 
 
 @pytest.fixture(autouse=True)
+def _example_copy_in_temp(monkeypatch, tmp_path_factory):
+    """The user's copy of the example project lives in this computer's folder for the
+    program's own files: tests keep it in a temporary folder instead."""
+    from si_assistant import resources
+    folder = tmp_path_factory.mktemp("appdata", numbered=True)
+    monkeypatch.setattr(resources, "example_copy_folder",
+                        lambda: folder / resources.EXAMPLE_COPY_DIR)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _expand_fields():
     """Collapsed fields are remembered for the session; start each test fully expanded."""
     from si_assistant.ui import field_widgets

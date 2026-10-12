@@ -263,8 +263,10 @@ def test_pdf_has_one_page(qapp, tmp_path):
         doc.close()
 
 
-def test_cli_reads_json(qapp, tmp_path):
+def test_cli_reads_json(qapp, tmp_path, monkeypatch):
     import json
+    monkeypatch.setattr(nmr, "require_font", lambda: "Arial")   # (the test platform may
+                                                                # have no fonts)
     spec = {"out": "x.pdf", "nucleus": "19F", "mhz": 376,
             "peaks": [{"shift": -115.4, "mult": "tt", "J": [8.6, 5.4]}]}
     (tmp_path / "s.json").write_text(json.dumps({"spectra": [spec]}), encoding="utf-8")
@@ -289,3 +291,16 @@ def test_every_spectrum_says_it_is_simulated(qapp, tmp_path, monkeypatch):
     drawn.clear()
     nmr.render_spec({**spec, "watermark": ""}, tmp_path / "b.pdf")
     assert drawn and nmr.WATERMARK not in drawn
+
+
+def test_without_a_font_the_spectra_are_refused(qapp, monkeypatch):
+    # Without a usable font Qt draws every digit as a solid box (Qt's "offscreen" platform
+    # on Windows): the tool says so instead of making such spectra.
+    from PySide6.QtGui import QFontDatabase
+    monkeypatch.setattr(QFontDatabase, "families", staticmethod(lambda *a: ["Wingdings"]))
+    assert nmr.usable_font() is None
+    with pytest.raises(RuntimeError, match="solid box"):
+        nmr.require_font()
+    monkeypatch.setattr(QFontDatabase, "families",
+                        staticmethod(lambda *a: ["Wingdings", "DejaVu Sans"]))
+    assert nmr.require_font() == "DejaVu Sans"

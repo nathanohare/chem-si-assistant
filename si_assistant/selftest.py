@@ -187,7 +187,7 @@ def _qt() -> str:
 
 
 def _example() -> str:
-    """The example project (Help ▸ Open example project…) came with the program and opens:
+    """The example project (Help ▸ Open example project) came with the program and opens:
     read-only and without taking its lock, so nothing in the program's folder changes."""
     from .core import chem
     from .core.project import Project

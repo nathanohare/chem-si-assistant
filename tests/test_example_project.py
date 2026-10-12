@@ -1,4 +1,4 @@
-"""The example project shipped with the program (Help ▸ Open example project…), made by
+"""The example project shipped with the program (Help ▸ Open example project), made by
 tools/make_example_project.py: it is there, opens, has no warnings, compiles in every
 journal style, can be rebuilt exactly, and the program only ever opens a copy of it."""
 
@@ -221,7 +221,7 @@ def test_the_tool_rebuilds_the_same_project(qapp, short_tmp):
     # with the same contents (internal IDs included), except the spectrum PDFs (they hold
     # the time they were drawn) and what `comparable` leaves out.
     shipped = resources.example_project()
-    rebuilt = M.build(short_tmp, compile_pdf=False, quiet=True)
+    rebuilt = M.build(short_tmp, compile_pdf=False, quiet=True, need_fonts=False)
     old, new = snapshot(shipped), snapshot(rebuilt)
     assert set(old) == set(new), OUT_OF_DATE
     for name in old:
@@ -255,6 +255,31 @@ def test_comparable_ignores_line_endings_versions_and_coordinates(tmp_path):
     assert comparable(a / "s.mol") == comparable(b / "s.mol")
 
 
+def test_the_shipped_spectra_have_real_text():
+    # Each spectrum's numbers and labels are text in a font, not solid boxes (what Qt
+    # draws when it has no font, e.g. a build run on Qt's "offscreen" platform on Windows),
+    # in the spectrum files and in the compiled example SI.
+    spectra = sorted(resources.example_project().rglob("spectra/*.pdf"))
+    assert len(spectra) >= 14
+    for path in spectra:
+        page = PdfReader(str(path)).pages[0]
+        assert page["/Resources"]["/Font"], f"{path.name}: no font, so no real text"
+        text = page.extract_text() or ""
+        assert "Simulated spectrum" in text and "ppm" in text, path.name
+        assert sum(ch.isdigit() for ch in text) > 20, path.name   # the peak labels
+    reader = PdfReader(str(resources.example_pdf()))
+    pages = [page.extract_text() or "" for page in reader.pages]
+    assert sum("Simulated spectrum" in t for t in pages) == len(spectra)
+
+
+def test_without_a_font_the_build_stops_before_changing_anything(qapp, short_tmp, monkeypatch):
+    from PySide6.QtGui import QFontDatabase
+    monkeypatch.setattr(QFontDatabase, "families", staticmethod(lambda *a: []))
+    with pytest.raises(RuntimeError, match="solid box"):
+        M.build(short_tmp, compile_pdf=False, quiet=True)
+    assert list(short_tmp.iterdir()) == []
+
+
 def test_a_failed_build_leaves_the_example_as_it_was(qapp, short_tmp, monkeypatch):
     # The build is made elsewhere and only moved into place once it has no warnings.
     target = short_tmp / M.PROJECT_NAME
@@ -262,7 +287,7 @@ def test_a_failed_build_leaves_the_example_as_it_was(qapp, short_tmp, monkeypatc
     (target / "keep.txt").write_text("the example that was there")
     monkeypatch.setattr(M, "all_warnings", lambda p: ["2a: something is wrong"])
     with pytest.raises(RuntimeError, match="something is wrong"):
-        M.build(short_tmp, compile_pdf=False, quiet=True)
+        M.build(short_tmp, compile_pdf=False, quiet=True, need_fonts=False)
     assert [p.name for p in short_tmp.iterdir()] == [M.PROJECT_NAME]
     assert [p.name for p in target.iterdir()] == ["keep.txt"]
 
@@ -339,47 +364,109 @@ def window(qapp, short_tmp, monkeypatch):
     from si_assistant.ui import main_window as mw
     monkeypatch.setattr(mw, "QSettings", lambda *a: QSettings(str(short_tmp / "prefs.ini"),
                                                               QSettings.Format.IniFormat))
-    chosen = short_tmp / "Documents"
-    chosen.mkdir()
+    # The user's copy of the example (conftest keeps it in a temporary folder); a folder
+    # dialog would be a mistake: it is never asked where.
+    monkeypatch.setattr(resources, "example_copy_folder",
+                        lambda: short_tmp / "appdata" / resources.EXAMPLE_COPY_DIR)
     asked = []
+    monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a: asked.append(a) or ""))
+    questions = []
+    answers = []
 
-    def choose(parent, title, start):
-        asked.append((title, start))
-        return str(chosen)
-    monkeypatch.setattr(mw.QFileDialog, "getExistingDirectory", staticmethod(choose))
+    def question(parent, title, text, *args):
+        questions.append(title)
+        return answers.pop(0)
+    monkeypatch.setattr(mw.QMessageBox, "question", staticmethod(question))
     win = mw.MainWindow()
     win.prefs.user_name = "Tester"
-    yield win, chosen, asked
+    yield win, asked, questions, answers
     win.close_project()
     win.close()
 
 
-def test_help_opens_a_copy_of_the_example(window):
-    win, chosen, asked = window
+def edit_title(win, title: str) -> None:
+    win.project.settings["title"] = title
+    win.project.save_settings()
+
+
+def test_the_example_opens_without_asking_where(window):
+    win, asked, questions, answers = window
     shipped = resources.example_project()
     before = snapshot(shipped)
-    win.act_open_example.trigger()
-    copy = chosen / "Chem SI Assistant example"
+    win.welcome.example_btn.click()
+    copy = resources.example_copy_folder()
     assert win.project is not None and win.project.folder == copy
     assert not win.project.read_only
+    assert not asked and not questions
     assert "copy" in win.statusBar().currentMessage()
-    assert "Chem SI Assistant example" in asked[0][0]
-    assert asked[0][1]          # starts in the Documents folder (or the home folder)
-    # The start page's button does the same; the first copy is never written over.
-    win.close_project()
-    win.welcome.example_btn.click()
-    assert win.project.folder == chosen / "Chem SI Assistant example (2)"
-    win.close_project()
+    assert resources.example_copy_state() == "current"
     # The example shipped with the program was not opened or changed.
+    win.close_project()
     assert snapshot(shipped) == before
-    assert (copy / PROJECT_FILE).is_file()
+
+
+def test_the_users_copy_keeps_their_changes(window):
+    win, asked, questions, answers = window
+    win.act_open_example.trigger()
+    edit_title(win, "My changes")
+    win.close_project()
+    win.act_open_example.trigger()                  # the same copy, not a new one
+    assert win.project.folder == resources.example_copy_folder()
+    assert win.project.settings["title"] == "My changes"
+    win.act_open_example.trigger()                  # already open: left as it is
+    assert "already open" in win.statusBar().currentMessage()
+    assert not asked and not questions
+
+
+def test_start_the_example_over(window):
+    win, asked, questions, answers = window
+    win.act_open_example.trigger()
+    edit_title(win, "My changes")
+    answers.append(mw_button("No"))
+    win.act_example_over.trigger()                  # "No": nothing changes
+    assert win.project.settings["title"] == "My changes"
+    answers.append(mw_button("Yes"))
+    win.act_example_over.trigger()                  # replaced while it was open
+    assert questions == ["Start the example over"] * 2
+    assert win.project.folder == resources.example_copy_folder()
+    assert win.project.settings["title"] != "My changes"
+    leftovers = [p.name for p in resources.example_copy_folder().parent.iterdir()]
+    assert sorted(leftovers) == sorted([resources.EXAMPLE_COPY_DIR, resources.EXAMPLE_STAMP])
+
+
+def test_an_updated_example_is_offered_once(window):
+    win, asked, questions, answers = window
+    win.act_open_example.trigger()
+    edit_title(win, "My changes")
+    win.close_project()
+    stamp = resources.example_copy_folder().parent / resources.EXAMPLE_STAMP
+    stamp.write_text("an older example\n", encoding="utf-8")     # as after an update
+    assert resources.example_copy_state() == "outdated"
+    answers.append(mw_button("No"))                 # keep my copy
+    win.act_open_example.trigger()
+    assert questions == ["Updated example project"]
+    assert win.project.settings["title"] == "My changes"
+    win.close_project()
+    win.act_open_example.trigger()                  # not asked again for this example
+    assert len(questions) == 1 and win.project.settings["title"] == "My changes"
+    win.close_project()
+    stamp.write_text("another older example\n", encoding="utf-8")   # the next update
+    answers.append(mw_button("Yes"))                # take the new example
+    win.act_open_example.trigger()
+    assert len(questions) == 2
+    assert win.project.settings["title"] != "My changes"
+    assert resources.example_copy_state() == "current"
+    win.close_project()
+    win.act_open_example.trigger()                  # not asked again
+    assert len(questions) == 2
 
 
 def test_a_failed_copy_leaves_the_open_project_open(window, monkeypatch, short_tmp):
-    # The copy is made before the open project is closed: if it fails (a read-only
-    # folder…), the project the user had open stays open.
+    # The copy is made before the open project is closed: if it fails (a full disk…),
+    # the project the user had open stays open.
     from si_assistant.ui import main_window as mw
-    win, chosen, asked = window
+    win, asked, questions, answers = window
     mine = Project.create(short_tmp, "Mine")
     mine.close()
     assert win.open_project(mine.folder)
@@ -387,17 +474,41 @@ def test_a_failed_copy_leaves_the_open_project_open(window, monkeypatch, short_t
     monkeypatch.setattr(mw.QMessageBox, "warning", staticmethod(
         lambda parent, title, text: said.append(title)))
 
-    def fail(parent, source=None):
+    def fail(source=None):
         raise PermissionError("no permission to write here")
-    monkeypatch.setattr(resources, "copy_example_project", fail)
+    monkeypatch.setattr(resources, "prepare_example_copy", fail)
     win.open_example_project()
     assert said == ["Could not copy the example project"]
     assert win.project is not None and win.project.folder == mine.folder
 
 
+def test_an_old_copy_that_cannot_be_replaced_is_kept_whole(short_tmp, monkeypatch):
+    monkeypatch.setattr(resources, "example_copy_folder",
+                        lambda: short_tmp / "appdata" / resources.EXAMPLE_COPY_DIR)
+    folder = resources.install_example_copy(resources.prepare_example_copy())
+    (folder / "mine.txt").write_text("my notes", encoding="utf-8")
+    new = resources.prepare_example_copy()
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self == new:
+            raise PermissionError("in use")
+        return real_rename(self, target)
+    monkeypatch.setattr(Path, "rename", rename)
+    with pytest.raises(PermissionError):
+        resources.install_example_copy(new)
+    assert (folder / "mine.txt").read_text(encoding="utf-8") == "my notes"
+    assert (folder / PROJECT_FILE).is_file()
+
+
+def mw_button(name: str):
+    from PySide6.QtWidgets import QMessageBox
+    return getattr(QMessageBox.StandardButton, name)
+
+
 def test_help_opens_the_example_si(window, monkeypatch):
     from si_assistant.ui import main_window as mw
-    win, chosen, asked = window
+    win, asked, questions, answers = window
     opened = []
     monkeypatch.setattr(mw.QDesktopServices, "openUrl",
                         staticmethod(lambda url: opened.append(url) or True))
@@ -407,7 +518,7 @@ def test_help_opens_the_example_si(window, monkeypatch):
 
 def test_help_says_so_when_the_example_is_missing(window, monkeypatch, short_tmp):
     from si_assistant.ui import main_window as mw
-    win, chosen, asked = window
+    win, asked, questions, answers = window
     monkeypatch.setattr(resources, "example_project", lambda: short_tmp / "gone")
     said = []
     monkeypatch.setattr(mw.QMessageBox, "warning", staticmethod(

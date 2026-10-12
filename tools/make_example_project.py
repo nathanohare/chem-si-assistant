@@ -1,4 +1,4 @@
-"""Build the EXAMPLE PROJECT shipped with Chem SI Assistant (Help ▸ Open example project…).
+"""Build the EXAMPLE PROJECT shipped with Chem SI Assistant (Help ▸ Open example project).
 A developer tool: not part of the program.
 
     python tools/make_example_project.py                (writes si_assistant/example/)
@@ -753,14 +753,20 @@ def remove_tree(folder: Path, tries: int = 10) -> None:
 
 
 def build(out_dir: Path = EXAMPLE_DIR, compile_pdf: bool = True,
-          png_dir: Path | None = None, quiet: bool = False) -> Path:
+          png_dir: Path | None = None, quiet: bool = False,
+          need_fonts: bool = True) -> Path:
     """Write out_dir/PROJECT_NAME (replacing it) and, with `compile_pdf`, out_dir/PDF_NAME.
-    Returns the project folder. Raises RuntimeError if a check or the compile warns.
+    Returns the project folder. Raises RuntimeError if a check or the compile warns, or
+    (with `need_fonts`; tests that don't look at the spectra turn it off) if the spectra
+    would be drawn without a font, their text as solid boxes.
 
     Everything is made in a temporary folder first and only moved into out_dir once it
     has no warnings: a build that stops leaves the example that was there as it was."""
     from PySide6.QtGui import QGuiApplication
     app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])  # noqa: F841
+    if need_fonts:
+        import nmr_spectra as nmr
+        nmr.require_font()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / PROJECT_NAME

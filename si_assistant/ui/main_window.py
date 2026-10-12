@@ -68,8 +68,9 @@ BOTTOM_KINDS = (MANUSCRIPT_ITEM, REFERENCES_ITEM)   # fixed items below the sect
 PANEL_TYPES = {"text": TextSectionPanel, "file": FileSectionPanel, "data": DataSectionPanel,
                SPECTRA_SECTION: SpectraSectionPanel}
 DELETE_TIP = "Delete the selected item (it goes to the project Trash)"
-EXAMPLE_TIP = ("Open a copy of a finished example project (real compounds from the literature, "
-               "simulated spectra) to see what the program does. The copy is yours to change.")
+EXAMPLE_TIP = ("Open your copy of a finished example project (real compounds from the "
+               "literature, simulated spectra) to see what the program does. The copy is yours "
+               "to change; Help ▸ Start the example over gives you a fresh one.")
 SIZE_TIP = ("The size of everything in the window (text, buttons, pictures), on top of this "
             "computer's display scaling. Saved on this computer; used when the program starts.")
 
@@ -187,6 +188,14 @@ class Preferences:
 
 # ---------------------------------------------------------------------- welcome page
 
+def _same_folder(a: Path, b: Path) -> bool:
+    """Whether two paths name the same folder (case and spelling of the path aside)."""
+    try:
+        return Path(a).resolve() == Path(b).resolve() or Path(a).samefile(b)
+    except OSError:
+        return False
+
+
 class WelcomePage(QWidget):
     new_requested = Signal()
     open_requested = Signal()
@@ -204,7 +213,7 @@ class WelcomePage(QWidget):
         # A finished example to look around in, shown prominently so a first-time user
         # can see straight away what the program makes (a copy is opened; also in the
         # Help menu).
-        self.example_btn = QPushButton("Open the Example Project…")
+        self.example_btn = QPushButton("Open the Example Project")
         self.example_btn.setToolTip(EXAMPLE_TIP)
         self.example_btn.setDefault(True)
         example_pdf_btn = QPushButton("View Its Finished SI (PDF)")
@@ -715,9 +724,13 @@ class MainWindow(QMainWindow):
         self.act_user_guide = act("User guide", self.show_user_guide, "F1",
                                   tip="How to use the program, step by step")
         help_menu.addAction(self.act_user_guide)
-        self.act_open_example = act("Open example project…", self.open_example_project,
-                                    tip=EXAMPLE_TIP)
+        self.act_open_example = act("Open example project",
+                                    lambda: self.open_example_project(), tip=EXAMPLE_TIP)
         help_menu.addAction(self.act_open_example)
+        self.act_example_over = act(
+            "Start the example over…", self.start_example_over,
+            tip="Replace your copy of the example project with a fresh one")
+        help_menu.addAction(self.act_example_over)
         self.act_open_example_pdf = act(
             "View the example SI (PDF)", self.open_example_pdf,
             tip="Open the Supporting Information compiled from the example project, as a "
@@ -1038,42 +1051,85 @@ class MainWindow(QMainWindow):
             return
         self.open_project(project.folder)
 
-    def open_example_project(self) -> None:
-        """Help ▸ Open example project… (and the start page's button): copy the example
-        project shipped with the program into a new folder where the user chooses (the
-        Documents folder by default; "Chem SI Assistant example", or "… (2)" if that is
-        taken) and open the copy. The shipped example itself is never opened or changed,
-        so this also works when the program's own folder is read-only."""
+    def open_example_project(self, fresh: bool = False) -> None:
+        """Help ▸ Open example project (and the start page's button): open the user's copy
+        of the example project, kept in this computer's folder for the program's own files
+        (resources.example_copy_folder), without asking where. The first time, or with
+        `fresh` (Help ▸ Start the example over), the copy is made from the example shipped
+        with the program; after an update that brings a different example, the user is
+        asked whether to replace their copy. The shipped example itself is never opened or
+        changed, so this also works when the program's own folder is read-only."""
         source = resources.example_project()
         if not (source / PROJECT_FILE).is_file():
             QMessageBox.warning(self, "Example project not found",
                                 "The example project that comes with the program is missing:\n"
                                 f"{source}\n\nInstalling the program again brings it back.")
             return
-        start = QStandardPaths.writableLocation(
-            QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
-        parent = QFileDialog.getExistingDirectory(
-            self, f"Choose where to put your copy of the example project (a folder "
-                  f"“{resources.EXAMPLE_COPY_NAME}” is made there)", start)
-        if not parent:
-            return
-        # The copy first: if it fails, the project that is open now stays open.
+        folder = resources.example_copy_folder()
         try:
-            folder = resources.copy_example_project(Path(parent), source)
+            state = resources.example_copy_state(source)
+        except OSError:
+            state = "outdated"
+        is_open = self.project is not None and _same_folder(self.project.folder, folder)
+        if not fresh and state == "outdated":
+            answer = QMessageBox.question(
+                self, "Updated example project",
+                "This version of Chem SI Assistant comes with an updated example project.\n\n"
+                "Replace your copy of the example with the new one? Any changes you made "
+                "to your copy are lost.\n\n(If you keep your copy, Help ▸ Start the example "
+                "over gives you the new example later.)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            fresh = answer == QMessageBox.StandardButton.Yes
+            if not fresh:
+                try:
+                    resources.mark_example_copy_current(source)   # (not asked again)
+                except OSError:
+                    pass
+        if not fresh and state != "missing":
+            if is_open:
+                self.statusBar().showMessage("The example project is already open.", 10_000)
+            elif self.close_project():
+                self.open_project(folder)
+            return
+        # The new copy first, beside the old one: if it fails, nothing changes.
+        try:
+            new = resources.prepare_example_copy(source)
         except OSError as e:
             QMessageBox.warning(self, "Could not copy the example project",
-                                f"The example project could not be copied into\n{parent}\n\n"
-                                f"{e}\n\nChoose another folder, e.g. your Documents folder.")
+                                f"The example project could not be copied into\n"
+                                f"{folder.parent}\n\n{e}")
             return
         if not self.close_project():
-            self.statusBar().showMessage(
-                f"Your copy of the example project is in {folder}: open it with "
-                "File ▸ Open Project… when you are ready.", 30_000)
+            resources._remove_tree(new)
+            return
+        try:
+            folder = resources.install_example_copy(new, source)
+        except OSError as e:
+            resources._remove_tree(new)
+            QMessageBox.warning(self, "Could not replace the example project",
+                                f"Your copy of the example project could not be replaced:\n"
+                                f"{folder}\n\n{e}\n\nClose any program that has one of its "
+                                "files open, then try again.")
             return
         if self.open_project(folder):
             self.statusBar().showMessage(
-                f"This is your own copy of the example project ({folder}). Change anything "
-                "you like: the example that comes with the program stays as it is.", 30_000)
+                "This is your own copy of the example project: change anything you like. "
+                "Help ▸ Start the example over gives you a fresh copy.", 30_000)
+
+    def start_example_over(self) -> None:
+        """Help ▸ Start the example over: replace the user's copy of the example project by
+        a fresh copy of the one shipped with the program (after asking)."""
+        if resources.example_copy_folder().is_dir():
+            answer = QMessageBox.question(
+                self, "Start the example over",
+                "Replace your copy of the example project with a fresh one? Any changes "
+                "you made to it are lost.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No)
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+        self.open_example_project(fresh=True)
 
     def open_example_pdf(self) -> None:
         """Help ▸ View the example SI (PDF): the SI compiled from the example project,

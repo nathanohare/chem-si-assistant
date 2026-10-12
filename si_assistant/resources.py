@@ -50,12 +50,17 @@ def user_guide() -> Path:
     return top_level(*USER_GUIDE)
 
 
-# The example project shipped with the program (Help ▸ Open example project…): made by
+# The example project shipped with the program (Help ▸ Open example project): made by
 # tools/make_example_project.py. It is never opened or changed itself: the program copies
-# it to a folder the user chooses and opens the copy.
+# it into this computer's folder for the program's own files (user_data_dir) and opens
+# the copy, without asking where (SPEC §13t.1).
 EXAMPLE = ("example", "Example project")
 EXAMPLE_PDF = ("example", "Example SI.pdf")   # the SI compiled from it (Help menu)
 EXAMPLE_COPY_NAME = "Chem SI Assistant example"
+EXAMPLE_COPY_DIR = "Example project"           # the copy, in user_data_dir()
+# Beside the copy: the fingerprint of the shipped example it was copied from, so a newer
+# example (after an update) is noticed.
+EXAMPLE_STAMP = "Example project source.txt"
 # Left behind by a program that had the example open (the build/ folder with the undo
 # history, snapshots, Trash, the lock, half-written files): never shipped, never copied.
 NOT_COPIED = ("build", "trash", "snapshots", "*.lock", ".tmp-*")
@@ -88,12 +93,19 @@ def copy_example_project(parent: Path, source: Path | None = None) -> Path:
     folder may be read-only (Program Files, a macOS app, an AppImage), and its files would
     otherwise be copied read-only too. Raises OSError (e.g. no permission to write in
     `parent`); a half-made copy is removed again."""
+    dest = free_folder(parent)
+    _copy_example_to(dest, source)
+    return dest
+
+
+def _copy_example_to(dest: Path, source: Path | None = None) -> None:
+    """Copy the example project to the new folder `dest`, every file made writable.
+    Raises OSError; a half-made copy is removed again."""
     import shutil
     import stat
     source = example_project() if source is None else Path(source)
     if not source.is_dir():
         raise FileNotFoundError(f"The example project is missing:\n{source}")
-    dest = free_folder(parent)
     try:
         shutil.copytree(source, dest, copy_function=shutil.copyfile,
                         ignore=shutil.ignore_patterns(*NOT_COPIED))
@@ -102,9 +114,95 @@ def copy_example_project(parent: Path, source: Path | None = None) -> Path:
             if not mode & stat.S_IWUSR:
                 path.chmod(stat.S_IMODE(mode) | stat.S_IWUSR)
     except OSError:
-        shutil.rmtree(dest, ignore_errors=True)
+        _remove_tree(dest)
         raise
-    return dest
+
+
+def _remove_tree(folder: Path) -> None:
+    """Delete `folder` and everything in it, read-only files too; quietly does nothing if
+    it is not there. Raises OSError if something can't be deleted (e.g. open elsewhere)."""
+    import shutil
+    import stat
+
+    def make_writable_and_retry(func, path, *_):
+        os.chmod(path, stat.S_IWUSR | stat.S_IRUSR)
+        func(path)
+    if Path(folder).exists():
+        handler = ({"onexc": make_writable_and_retry} if sys.version_info >= (3, 12)
+                   else {"onerror": make_writable_and_retry})
+        shutil.rmtree(folder, **handler)
+
+
+def example_copy_folder() -> Path:
+    """Where the user's copy of the example project is kept (the program's own folder can't
+    be written to everywhere, and an update replaces it)."""
+    return user_data_dir() / EXAMPLE_COPY_DIR
+
+
+def example_fingerprint(source: Path | None = None) -> str:
+    """A fingerprint of the shipped example project (its files' names and contents): it
+    changes when a program update brings a different example."""
+    import hashlib
+    source = example_project() if source is None else Path(source)
+    digest = hashlib.sha256()
+    for path in sorted(p for p in source.rglob("*") if p.is_file()):
+        digest.update(path.relative_to(source).as_posix().encode("utf-8") + b"\0")
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def example_copy_state(source: Path | None = None) -> str:
+    """"missing" (no copy yet), "current" (copied from this program's example) or
+    "outdated" (copied from an older example, or not known from which)."""
+    folder = example_copy_folder()
+    if not folder.is_dir():
+        return "missing"
+    try:
+        stamp = (folder.parent / EXAMPLE_STAMP).read_text(encoding="utf-8").strip()
+    except OSError:
+        return "outdated"
+    return "current" if stamp == example_fingerprint(source) else "outdated"
+
+
+def mark_example_copy_current(source: Path | None = None) -> None:
+    """Remember that the user's copy goes with this program's example (they chose to keep
+    their copy rather than take an updated example: not asked again). Raises OSError."""
+    (example_copy_folder().parent / EXAMPLE_STAMP).write_text(
+        example_fingerprint(source) + "\n", encoding="utf-8")
+
+
+def prepare_example_copy(source: Path | None = None) -> Path:
+    """Step 1 of (re)making the user's copy: a fresh copy of the shipped example in a
+    folder beside it, to be put in place with install_example_copy. Raises OSError."""
+    folder = example_copy_folder()
+    new = folder.with_name(folder.name + " (new copy)")
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    _remove_tree(new)                       # (left over from a copy that was interrupted)
+    _copy_example_to(new, source)
+    return new
+
+
+def install_example_copy(new: Path, source: Path | None = None) -> Path:
+    """Step 2: replace the user's copy (if any) by `new` from prepare_example_copy, and
+    remember which example it came from. Raises OSError (e.g. a file of the old copy is
+    open in another program): the old copy is then left as it was."""
+    folder = example_copy_folder()
+    old = folder.with_name(folder.name + " (old copy)")
+    _remove_tree(old)
+    if folder.exists():
+        folder.rename(old)              # (all or nothing: the old copy stays whole)
+    try:
+        Path(new).rename(folder)
+    except OSError:
+        if old.exists() and not folder.exists():
+            old.rename(folder)
+        raise
+    mark_example_copy_current(source)
+    try:
+        _remove_tree(old)
+    except OSError:
+        pass                            # (removed next time)
+    return folder
 
 
 def user_data_dir(environ=None, platform: str | None = None, home: Path | None = None) -> Path:

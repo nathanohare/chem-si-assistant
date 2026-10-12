@@ -4,6 +4,15 @@ What changed in each version of Chem SI Assistant. The newest version is at the 
 (The release workflow copies a version's section into its GitHub Release notes, which the
 program's update check shows.)
 
+## [1.0.1] - 2026-10-12
+
+**Example SI**
+- The example's spectra showed every number and letter as a solid box; they are fixed.
+- **Open the Example Project** no longer asks where to put the copy: your copy is kept in the
+  program's own folder on this computer and opened straight away. Opening it again shows
+  your changes; **Help ▸ Start the example over** gives you a fresh copy, and when an update
+  brings a new example the program asks whether to replace your copy.
+
 ## [1.0.0] - 2026-10-09
 
 **Example SI**

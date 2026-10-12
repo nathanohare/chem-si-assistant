@@ -135,7 +135,7 @@ def data_files(root: Path = ROOT) -> list[tuple[str, str]]:
     pairs = [(str(pkg / "styles" / "*.typ"), "si_assistant/styles"),
              (str(pkg / "data" / "*.txt"), "si_assistant/data"),
              (str(pkg / "icons" / "*"), "si_assistant/icons"),
-             # The example project (Help ▸ Open example project…): a whole folder, copied
+             # The example project (Help ▸ Open example project): a whole folder, copied
              # as it is (tools/make_example_project.py makes it).
              (str(pkg / "example"), "si_assistant/example"),
              (str(root / "LICENSE"), "."),

@@ -630,6 +630,9 @@ def ppm_text(v: float, decimals: int = 2) -> str:
 PAGES = {"letter": (792.0, 612.0), "a4": (842.0, 595.0)}
 RESOLUTION = 720                       # PDF device units per inch (10 per point)
 FONTS = ["Arial", "Helvetica", "Liberation Sans", "DejaVu Sans"]
+NO_FONT = ("None of the fonts for the spectra's numbers and labels ({}) can be used here, so "
+           "every letter and digit would be drawn as a solid box. (Qt's \"offscreen\" "
+           "platform has no fonts on Windows: run this without QT_QPA_PLATFORM=offscreen.)")
 LABEL_PT = 8.5
 AXIS_PT = 9.5
 INTEGRAL_PT = 8.5
@@ -651,6 +654,23 @@ RESERVE_GAP = 6.0         # labelled peaks (and their leaders) at least this far
 WATERMARK = "Simulated spectrum (not a measurement)"
 WATERMARK_PT = 9.0
 WATERMARK_COLOR = "#8C8C8C"
+
+
+def usable_font() -> str | None:
+    """The first of FONTS that Qt can draw with here, or None. (Without one, Qt draws each
+    letter and digit as a solid box, e.g. on Qt's "offscreen" platform on Windows.)
+    Needs the QGuiApplication."""
+    from PySide6.QtGui import QFontDatabase
+    have = set(QFontDatabase.families())
+    return next((f for f in FONTS if f in have), None)
+
+
+def require_font() -> str:
+    """usable_font(), or RuntimeError saying why the spectra can't be drawn here."""
+    font = usable_font()
+    if font is None:
+        raise RuntimeError(NO_FONT.format(", ".join(FONTS)))
+    return font
 
 
 class _Pdf:
@@ -1001,6 +1021,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     from PySide6.QtGui import QGuiApplication
     app = QGuiApplication.instance() or QGuiApplication(sys.argv[:1])  # noqa: F841
+    require_font()
     data = json.loads(args.json.read_text(encoding="utf-8"))
     specs = data["spectra"] if isinstance(data, dict) and "spectra" in data else (
         data if isinstance(data, list) else [data])

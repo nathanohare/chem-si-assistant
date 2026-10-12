@@ -75,9 +75,13 @@ are not supported yet.
 ![The start page](images/start-page.png)
 
 **New here? Look at the example first.** The start page has a highlighted box for the
-example SI that comes with the program: **Open the Example Project…** asks where to put a
-copy and opens it (change anything you like; the original stays as it was), and **View Its
-Finished SI (PDF)** shows the SI compiled from it. Both are also in the **Help** menu. The
+example SI that comes with the program: **Open the Example Project** opens your own copy of
+it (change anything you like; the original stays as it was), and **View Its Finished SI
+(PDF)** shows the SI compiled from it. Both are also in the **Help** menu. Your copy is kept
+in the program's own folder on this computer (on Windows `%LOCALAPPDATA%\Chem SI
+Assistant\Example project`), so opening it again shows your changes; **Help ▸ Start the
+example over** gives you a fresh copy. When an update brings a new version of the example,
+the program asks whether to replace your copy. The
 example has six compounds made by one general procedure, a follow-up reaction, two schemes,
 an optimisation table, HRMS report files and references. Its data come from published papers
 (cited in it); its spectra are simulated from those data and are marked so on every page.
