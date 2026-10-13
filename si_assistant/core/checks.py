@@ -619,8 +619,8 @@ class ProjectWarning:
     """A warning that is not about one compound: two items with the same label, a
     mention in a section's text whose target was deleted (SPEC §13k.5a), or a figure or
     table in a text whose picture or table file is missing (SPEC §13k.5)."""
-    check: str                  # "label", "mention", "citation", "object", "gp_name"
-                                # or "reference"
+    check: str                  # "label", "mention", "citation", "object", "gp_name",
+                                # "reference" or "xray"
     message: str
     place: tuple[str, str]      # the tree item to open: ("front", "general"), ("section",
                                 # id), ("scheme", id) or ("compound", id)
@@ -655,6 +655,7 @@ def project_warnings(project, labels=None) -> list[ProjectWarning]:
                            "References list; it will be left out of the SI.", target))
     out += missing_objects(project)
     out += duplicate_gp_names(project)
+    out += xray_problems(project)
     # What the journal style cannot print as typed (a year "in press", a web address
     # without https://): the SI is built without it, so say so rather than drop it silently.
     from . import references as refs
@@ -680,6 +681,20 @@ def duplicate_gp_names(project) -> list[ProjectWarning]:
                 "gp_name", f"General procedure “{gp.get('name', '')}” (in “{section.name}”) has "
                            f"the same name as {others}. Rename one of them (Data section ▸ "
                            "General procedures).", ("section", section.id)))
+    return out
+
+
+def xray_problems(project) -> list[ProjectWarning]:
+    """X-ray structure sections that can't be drawn (no CIF chosen yet, a CIF with no
+    atoms…): they are left out of the SI (SPEC §13v)."""
+    from . import xray
+    out: list[ProjectWarning] = []
+    for s in project.xray_sections():
+        error = xray.load(project, s).error
+        if error:
+            out.append(ProjectWarning(
+                "xray", f"X-ray structure “{s.name}”: {error} It is left out of the SI until "
+                        "it can be drawn.", ("section", s.id)))
     return out
 
 

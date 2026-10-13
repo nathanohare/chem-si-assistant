@@ -4,6 +4,21 @@ What changed in each version of Chem SI Assistant. The newest version is at the 
 (The release workflow copies a version's section into its GitHub Release notes, which the
 program's update check shows.)
 
+## [Unreleased]
+
+**X-ray structures**
+- **File ▸ X-ray Structure Viewer…** shows a crystal structure from its CIF file: thermal
+  ellipsoids (ORTEP) or ball-and-stick, the molecule completed by symmetry, turned with the
+  mouse, with a choice of probability, hydrogen atoms, colours and labels (which can be
+  dragged). Its crystal data table is read from the CIF. **Save picture…** (PNG, SVG or
+  PDF) and **Copy picture** (e.g. for PowerPoint).
+- **X-ray structure sections** put a structure in the SI: its drawing as a numbered figure
+  with an automatic caption ("Molecular structure of **1a** (thermal ellipsoids at 50%
+  probability…). CCDC …"), and its crystal data table (optional; rows can be left out,
+  values typed over or filled in, e.g. the CCDC number). Placed among the sections it
+  prints there; dragged onto a compound in the tree, it prints right after that compound.
+  The drawing is turned and styled on the section's page and saved as you go.
+
 ## [1.1.0] - 2026-10-12
 
 **Import an existing SI**

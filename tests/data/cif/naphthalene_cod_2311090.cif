@@ -1,0 +1,223 @@
+#------------------------------------------------------------------------------
+#$Date: 2025-08-19 22:00:13 +0300 (Tue, 19 Aug 2025) $
+#$Revision: 301809 $
+#$URL: file:///home/coder/svn-repositories/_RELOADED_COD/cod-reloaded/cif/2/31/10/2311090.cif $
+#------------------------------------------------------------------------------
+#
+# This file is available in the Crystallography Open Database (COD),
+# http://www.crystallography.net/. The original data for this entry
+# were provided by IUCr Journals, http://journals.iucr.org/.
+#
+# The file may be used within the scientific community so long as
+# proper attribution is given to the journal article from which the
+# data were obtained.
+#
+data_2311090
+loop_
+_publ_author_name
+'Hoser, Anna A.'
+'Madsen, Anders \/O.'
+_publ_section_title
+;
+ Dynamic quantum crystallography: lattice-dynamical models refined against
+ diffraction data. II. Applications to <small>L</small>-alanine,
+ naphthalene and xylitol
+;
+_journal_issue                   2
+_journal_name_full               'Acta Crystallographica Section A'
+_journal_page_first              102
+_journal_page_last               114
+_journal_paper_doi               10.1107/S2053273316018994
+_journal_volume                  73
+_journal_year                    2017
+_chemical_formula_sum            'C10 H8'
+_chemical_formula_weight         128.00
+_space_group_IT_number           14
+_symmetry_space_group_name_Hall  '-P 2ybc'
+_symmetry_space_group_name_H-M   'P 1 21/c 1'
+_atom_sites_solution_hydrogens   geom
+_atom_sites_solution_primary     direct
+_atom_sites_solution_secondary   difmap
+_audit_creation_method           SHELXL-97
+_cell_angle_alpha                90.00
+_cell_angle_beta                 114.40(5)
+_cell_angle_gamma                90.00
+_cell_formula_units_Z            2
+_cell_length_a                   7.808(6)
+_cell_length_b                   5.943(2)
+_cell_length_c                   8.097(5)
+_cell_measurement_temperature    80(2)
+_cell_volume                     342.2(4)
+_computing_structure_refinement  'SHELXL-97 (Sheldrick, 1997)'
+_computing_structure_solution    'SHELXS-97 (Sheldrick, 1990)'
+_diffrn_ambient_temperature      80(2)
+_diffrn_measured_fraction_theta_full 0.575
+_diffrn_measured_fraction_theta_max 0.575
+_diffrn_radiation_monochromator  graphite
+_diffrn_radiation_source         'fine-focus sealed tube'
+_diffrn_radiation_wavelength     0.83970
+_diffrn_reflns_av_R_equivalents  0.0137
+_diffrn_reflns_av_sigmaI/netI    0.0177
+_diffrn_reflns_limit_h_max       8
+_diffrn_reflns_limit_h_min       -10
+_diffrn_reflns_limit_k_max       7
+_diffrn_reflns_limit_k_min       0
+_diffrn_reflns_limit_l_max       9
+_diffrn_reflns_limit_l_min       -6
+_diffrn_reflns_number            634
+_diffrn_reflns_theta_full        35.30
+_diffrn_reflns_theta_max         35.30
+_diffrn_reflns_theta_min         5.43
+_exptl_absorpt_coefficient_mu    0.000
+_exptl_crystal_density_diffrn    1.242
+_exptl_crystal_density_method    'not measured'
+_exptl_crystal_F_000             73
+_refine_diff_density_max         0.516
+_refine_diff_density_min         -0.738
+_refine_diff_density_rms         0.159
+_refine_ls_extinction_coef       0.000(6)
+_refine_ls_extinction_expression Fc^*^=kFc[1+0.001xFc^2^\l^3^/sin(2\q)]^-1/4^
+_refine_ls_extinction_method     SHELXL
+_refine_ls_goodness_of_fit_ref   1.056
+_refine_ls_hydrogen_treatment    mixed
+_refine_ls_matrix_type           full
+_refine_ls_number_parameters     29
+_refine_ls_number_reflns         539
+_refine_ls_number_restraints     0
+_refine_ls_restrained_S_all      1.056
+_refine_ls_R_factor_all          0.0461
+_refine_ls_R_factor_gt           0.0416
+_refine_ls_shift/su_max          0.059
+_refine_ls_shift/su_mean         0.002
+_refine_ls_structure_factor_coef Fsqd
+_refine_ls_weighting_details
+'calc w=1/[\s^2^(Fo^2^)+(0.1000P)^2^+0.0000P] where P=(Fo^2^+2Fc^2^)/3'
+_refine_ls_weighting_scheme      calc
+_refine_ls_wR_factor_gt          0.1155
+_refine_ls_wR_factor_ref         0.1227
+_reflns_number_gt                482
+_reflns_number_total             539
+_reflns_threshold_expression     >2sigma(I)
+_cod_data_source_file            naph_neut_15_631g.cif
+_cod_data_source_block           naph_neut_15_631G
+_cod_depositor_comments
+;
+The following automatic conversions were performed:
+'_atom_site_symetry_multiplicity' tag replaced with
+'_atom_site_symmetry_multiplicity' tag as specified in the
+replacement file
+'/usr/data/users/saulius/crontab/automatic-downloads/rss-feeds/IUCr/lib/lists/replacement-tags.lst'.
+
+Automatic conversion script
+Id: cif_correct_tags 4268 2015-11-12 08:31:59Z antanas 
+
+ Adding full bibliography for 2311087--2311090.cif.
+;
+_cod_database_code               2311090
+loop_
+_symmetry_equiv_pos_as_xyz
+'x, y, z'
+'-x, y+1/2, -z+1/2'
+'-x, -y, -z'
+'x, -y-1/2, z-1/2'
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+_atom_site_U_iso_or_equiv
+_atom_site_adp_type
+_atom_site_occupancy
+_atom_site_symmetry_multiplicity
+_atom_site_calc_flag
+C1 C -0.32945(16) 0.0200(2) -0.24630(17) 0.015 Uani 1 1 d
+C2 C -0.22296(16) 0.16389(19) -0.10979(16) 0.012 Uani 1 1 d
+C3 C -0.03722(15) 0.10565(18) 0.01075(15) 0.010 Uani 1 1 d
+C4 C -0.07588(15) -0.25236(19) -0.15237(15) 0.012 Uani 1 1 d
+C5 C -0.25445(15) -0.1905(2) -0.26804(16) 0.014 Uani 1 1 d
+H1 H -0.4704(4) 0.0667(5) -0.3385(4) 0.033 Uani 1 1 d
+H2 H -0.2791(4) 0.3249(4) -0.0930(4) 0.030 Uani 1 1 d
+H4 H -0.0174(4) -0.4127(4) -0.1670(4) 0.027 Uani 1 1 d
+H5 H -0.3382(4) -0.3039(5) -0.3768(4) 0.031 Uani 1 1 d
+loop_
+_atom_site_aniso_label
+_atom_site_aniso_U_11
+_atom_site_aniso_U_22
+_atom_site_aniso_U_33
+_atom_site_aniso_U_23
+_atom_site_aniso_U_13
+_atom_site_aniso_U_12
+C1 0.01199 0.01736 0.01160 -0.00038 0.00187 0.00023
+C2 0.01250 0.01280 0.01096 0.00021 0.00373 0.00226
+C3 0.01178 0.00974 0.00705 -0.00043 0.00376 0.00055
+C4 0.01531 0.01073 0.00864 -0.00177 0.00495 -0.00080
+C5 0.01474 0.01531 0.00951 -0.00236 0.00312 -0.00281
+H1 0.01946 0.03824 0.03075 -0.00027 -0.00131 0.00440
+H2 0.02952 0.02281 0.03405 -0.00250 0.00999 0.00911
+H4 0.03448 0.01886 0.02771 -0.00533 0.01242 0.00346
+H5 0.03082 0.03086 0.02325 -0.00986 0.00300 -0.00786
+loop_
+_atom_type_symbol
+_atom_type_description
+_atom_type_scat_dispersion_real
+_atom_type_scat_dispersion_imag
+_atom_type_scat_source
+C C 0.0000 0.0000 'International Tables Vol C Tables 4.2.6.8 and 6.1.1.4'
+H H 0.0000 0.0000 'International Tables Vol C Tables 4.2.6.8 and 6.1.1.4'
+loop_
+_geom_angle_atom_site_label_1
+_geom_angle_atom_site_label_2
+_geom_angle_atom_site_label_3
+_geom_angle
+_geom_angle_site_symmetry_1
+_geom_angle_site_symmetry_3
+C2 C1 C5 120.27(12) . .
+C2 C1 H1 120.1(2) . .
+C5 C1 H1 119.6(2) . .
+C1 C2 C3 120.64(11) . .
+C1 C2 H2 120.60(19) . .
+C3 C2 H2 118.75(18) . .
+C2 C3 C4 121.62(11) . 3
+C2 C3 C3 118.98(13) . 3
+C4 C3 C3 119.39(13) 3 3
+C5 C4 C3 120.33(11) . 3
+C5 C4 H4 121.11(18) . .
+C3 C4 H4 118.56(18) 3 .
+C4 C5 C1 120.38(11) . .
+C4 C5 H5 119.3(2) . .
+C1 C5 H5 120.30(19) . .
+loop_
+_geom_bond_atom_site_label_1
+_geom_bond_atom_site_label_2
+_geom_bond_distance
+_geom_bond_site_symmetry_2
+C1 C2 1.3731(19) .
+C1 C5 1.4228(18) .
+C1 H1 1.080(3) .
+C2 C3 1.4165(19) .
+C2 H2 1.084(3) .
+C3 C4 1.4207(17) 3
+C3 C3 1.424(2) 3
+C4 C5 1.3702(19) .
+C4 C3 1.4207(17) 3
+C4 H4 1.084(2) .
+C5 H5 1.087(3) .
+loop_
+_geom_torsion_atom_site_label_1
+_geom_torsion_atom_site_label_2
+_geom_torsion_atom_site_label_3
+_geom_torsion_atom_site_label_4
+_geom_torsion
+_geom_torsion_site_symmetry_1
+_geom_torsion_site_symmetry_4
+C5 C1 C2 C3 0.21(18) . .
+C1 C2 C3 C4 179.67(10) . 3
+C1 C2 C3 C3 -0.5(2) . 3
+C3 C4 C5 C1 -0.77(17) 3 .
+C2 C1 C5 C4 0.44(17) . .
+loop_
+_cod_related_entry_id
+_cod_related_entry_database
+_cod_related_entry_code
+1 PubChem 931

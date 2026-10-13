@@ -1005,6 +1005,10 @@ class Builder:
             self.warnings.append(f"{where}: a table could not be found or is empty "
                                  f"(tables/{table_id}.json); left out.")
             return ""
+        return self.table_figure(table, label, caption, where)
+
+    def table_figure(self, table: Table, label: str, caption: list[Run], where: str) -> str:
+        """A table given as such (e.g. an X-ray structure's crystal data, §13v) as a figure."""
         self.kinds["table"] += 1
         # The style keeps a table whole (moving it to the next page) unless it is taller than
         # a page or the table editor's "may run over a page break" is ticked (`breakable`); then
@@ -1189,6 +1193,48 @@ class Builder:
         for child in scheme.children:
             out.append(self.compound(child, show_structure=child.id not in drawn,
                                      level=level))
+            out += self.anchored_xray(child, level)
+        return "\n\n".join(x for x in out if x)
+
+    def anchored_xray(self, compound: Compound, level: int) -> list[str]:
+        """The X-ray structures shown under a compound, right after it (SPEC §13v.2)."""
+        if not self.project.anchored.get(compound.id):
+            return []
+        return [self.xray_block(x, level, heading=False)
+                for x in self.project.anchored[compound.id]
+                if x.id not in self.options.excluded]
+
+    def xray_block(self, section: Section, level: int, heading: bool = True) -> str:
+        """An X-ray structure (SPEC §13v): its heading (in the tree; under a compound,
+        none), its drawing as a numbered figure with its caption, and its crystal data
+        table (a numbered table) when chosen."""
+        from ..core import xray as xr
+        out = [self.section_heading(level, [Run(section.name)])] if heading else []
+        where = f"X-ray structure “{section.name}”"
+        loaded = xr.load(self.project, section)
+        if loaded.grown is None:
+            self.warnings.append(f"{where}: {loaded.error} Left out.")
+            return "\n\n".join(out)
+        view = xr.view_of(section, loaded.grown)
+        svg = self.assets / f"{section.id}.svg"
+        svg.parent.mkdir(parents=True, exist_ok=True)
+        svg.write_text(xr.svg(loaded.grown, view), encoding="utf-8")
+        img = self.image(svg, (TEXT_WIDTH_IN, 9.0))
+        if img:
+            item = self.labels.at(section.id, 0)
+            caption = [r for p in parse(xr.caption(self.project, section, view, loaded.block))
+                       for r in p.runs]
+            out.append(self.inline_figure(img[0], self.links(caption, where),
+                                          item.label if item is not None else ""))
+        if section.data.get("table", True):
+            data = xr.table_json(section, loaded.block)
+            if data["rows"]:
+                item = self.labels.at(section.id, 1)
+                caption = [r for p in parse(xr.table_caption(self.project, section))
+                           for r in p.runs]
+                out.append(self.table_figure(Table.from_json(data),
+                                             item.label if item is not None else "",
+                                             self.links(caption, where), where))
         return "\n\n".join(x for x in out if x)
 
     def general_procedures(self, section: Section, level: int = 2) -> list[str]:
@@ -1217,9 +1263,12 @@ class Builder:
         out = [self.section_heading(level, [Run(section.name)])]
         out += self.general_procedures(section, level + 1)
         for item in section.items:
-            out.append(self.scheme(item, level + 1) if isinstance(item, SchemePage)
-                       else self.compound(item, level=level + 1))
-        return "\n\n".join(out)
+            if isinstance(item, SchemePage):
+                out.append(self.scheme(item, level + 1))
+            else:
+                out.append(self.compound(item, level=level + 1))
+                out += self.anchored_xray(item, level + 1)
+        return "\n\n".join(x for x in out if x)
 
     def section_block(self, section: Section, level: int, compounds: list[Compound],
                       skip: frozenset[str] = frozenset(), lead: str = "") -> str:
@@ -1246,6 +1295,10 @@ class Builder:
                 own = heading + "\n\n" + body
             elif section.type == "file":
                 heading, own = "", self.file_section(section, level)
+            elif section.type == "xray":   # (under a compound, no heading: its preview)
+                heading = "" if section.anchored_to else \
+                    self.section_heading(level, [Run(section.name)])
+                own = self.xray_block(section, level, heading=bool(heading))
             else:
                 heading = self.section_heading(level, [Run(section.name)])
                 own = self.data_section(section, level)

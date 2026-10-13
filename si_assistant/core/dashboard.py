@@ -443,6 +443,7 @@ CHECK_LABELS = {
     "reference": "References that can't be printed as typed", "label": "Duplicate labels",
     "object": "Missing figure or table files",
     "gp_name": "Duplicate procedure names",
+    "xray": "X-ray structures that can't be drawn",
 }
 FLAGS_LABEL = "Flagged by a person"
 

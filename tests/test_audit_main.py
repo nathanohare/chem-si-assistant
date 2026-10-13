@@ -636,7 +636,7 @@ def test_right_click_menus_are_freed(window, sample, monkeypatch):
     for _ in range(5):
         win._tree_menu(pos)
     assert menus() == before
-    assert len(win.new_sub_menu.actions()) == 3
+    assert len(win.new_sub_menu.actions()) == 4   # custom, attachment, data, X-ray
 
 
 def test_the_user_guide_window_is_shown_again_after_closing(qapp, tmp_path, monkeypatch):

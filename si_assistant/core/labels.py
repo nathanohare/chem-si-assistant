@@ -284,12 +284,29 @@ def compute(project, live: dict[str, str] | None = None) -> Labels:
                     where, str(item.get("caption", "")), ("compound", compound.id))
                 index += 1
 
+    def xray(section, where):
+        """An X-ray structure (SPEC §13v): its drawing is a figure (index 0) and its
+        crystal data table, when printed, a table (index 1) — as compile/document.py
+        prints them."""
+        if not section.data.get("file"):
+            return
+        caption = str(section.data.get("caption") or "") or f"X-ray structure: {section.name}"
+        add("figure", section.id, section.id, 0, section.data.get("label", ""), where,
+            _plain(caption), ("section", section.id), caption)
+        if section.data.get("table", True):
+            add("table", section.id + "#table", section.id, 1,
+                section.data.get("table_label", ""), where,
+                _plain(str(section.data.get("table_caption") or "Crystal data")),
+                ("section", section.id))
+
     general = TextOwner(GENERAL_OWNER, "General Information", project.folder / FRONT_DIR)
     text_owner(general, general.folder / FRONT_TEXT_FILES["general"], ("front", "general"))
     for section in project.sections:
         if section.type == "text":
             text_owner(TextOwner(section.id, section.name, section.folder),
                        section.folder / TEXT_CONTENT_FILE, ("section", section.id))
+        elif section.type == "xray":
+            xray(section, section.name)
         elif section.type == "data":
             if report is None:
                 report = project.id_report()
@@ -305,4 +322,6 @@ def compute(project, live: dict[str, str] | None = None) -> Labels:
                     shown = report.display_id(c.id)
                     inline_files(c, f"{section.name} ▸ {shown}" + (f" ({c.name})" if c.name
                                                                    else ""))
+                    for x in getattr(project, "anchored", {}).get(c.id, []):
+                        xray(x, f"{section.name} ▸ {shown} ▸ {x.name}")
     return Labels(items)

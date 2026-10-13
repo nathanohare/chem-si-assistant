@@ -25,8 +25,8 @@ from ..core import spectra as spectra_mod
 from ..core.fileio import path_length_warning
 from ..core.lock import computer_name
 from ..core.project import (FORMAT_VERSION, PROJECT_FILE, SECTION_TYPE_LABELS,
-                            SPECTRA_NOT_DELETED, SPECTRA_SECTION, BoxCopyFailed, Project,
-                            ProjectError, SchemePage)
+                            SPECTRA_NOT_DELETED, SPECTRA_SECTION, XRAY_SECTION, BoxCopyFailed,
+                            Project, ProjectError, SchemePage)
 from ..core.undo import UndoContext
 from . import (feedback_ui, help_ui, restart, rich_text, text_checks, undo_keys, update_ui,
                wheel_guard)
@@ -44,6 +44,7 @@ from .project_dashboard import ProjectDashboard
 from . import hrms_reports_ui as hrms_ui
 from .spectra_page import SpectraPagePanel
 from .spectra_panel import SpectraSectionPanel
+from .xray_panel import XraySectionPanel
 
 LOCK_CHECK_INTERVAL_MS = 20_000
 MAX_RECENT = 10
@@ -54,7 +55,9 @@ KIND_ROLE = Qt.ItemDataRole.UserRole + 1   # "project" (the dashboard, id "proje
                                            # "spectra_page" (a compound's spectra; its id)
                                            # or "references" (the reference list) or
                                            # "manuscript" (the Manuscript check)
-TYPE_ROLE = Qt.ItemDataRole.UserRole + 2   # section type: "text", "file", "data", "spectra"
+TYPE_ROLE = Qt.ItemDataRole.UserRole + 2   # section type: "text", "file", "data", "spectra",
+#                                            "xray" (an X-ray structure: in the tree, or under
+#                                            a compound, SPEC §13v.2)
 PROJECT_ITEM = "project"                   # the project item's kind and id (SPEC §13k.3)
 REFERENCES_ITEM = "references"             # its kind and id (SPEC §13n.10): always last
 MANUSCRIPT_ITEM = "manuscript"             # the Manuscript check (SPEC §13o): just above it
@@ -66,7 +69,7 @@ FIXED_KINDS = (PROJECT_ITEM, "front_root", "front", MANUSCRIPT_ITEM,   # never m
                REFERENCES_ITEM)                                     # renamed or deleted
 BOTTOM_KINDS = (MANUSCRIPT_ITEM, REFERENCES_ITEM)   # fixed items below the sections
 PANEL_TYPES = {"text": TextSectionPanel, "file": FileSectionPanel, "data": DataSectionPanel,
-               SPECTRA_SECTION: SpectraSectionPanel}
+               SPECTRA_SECTION: SpectraSectionPanel, XRAY_SECTION: XraySectionPanel}
 DELETE_TIP = "Delete the selected item (it goes to the project Trash)"
 EXAMPLE_TIP = ("Open your copy of a finished example project (real compounds from the "
                "literature, simulated spectra) to see what the program does. The copy is yours "
@@ -96,6 +99,26 @@ def spectrum_icon() -> QIcon:
     p.drawLine(QPointF(2, 27), QPointF(30, 27))
     for x, h in ((6, 8), (10, 18), (13, 11), (18, 22), (22, 9), (26, 14)):
         p.drawLine(QPointF(x, 27), QPointF(x, 27 - h))
+    p.end()
+    return QIcon(pixmap)
+
+
+def xray_icon() -> QIcon:
+    """An X-ray structure's icon in the tree: three thermal ellipsoids, bonded."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QBrush, QColor, QPainter, QPen, QPixmap
+    pixmap = QPixmap(32, 32)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    atoms = ((8, 22, 6, 4.5, "#8c8c8c"), (17, 10, 5, 6, "#e60d0d"), (25, 22, 6.5, 4.5, "#3050f8"))
+    p.setPen(QPen(QColor("#303030"), 2.2))
+    p.drawLine(QPointF(8, 22), QPointF(17, 10))
+    p.drawLine(QPointF(17, 10), QPointF(25, 22))
+    p.setPen(QPen(QColor("#202020"), 1.2))
+    for x, y, rx, ry, colour in atoms:
+        p.setBrush(QBrush(QColor(colour)))
+        p.drawEllipse(QPointF(x, y), rx, ry)
     p.end()
     return QIcon(pixmap)
 
@@ -326,12 +349,15 @@ class SectionTree(QTreeWidget):
     can be dropped into them (a section dropped on the first two goes first, after the
     front matter; one dropped on References goes last, just before it); scheme
     pages move within or between Data sections; compounds move within or between Data
-    sections and scheme pages. The tree only reports where something was dropped; the
-    main window updates the project and rebuilds the tree.
+    sections and scheme pages. An X-ray structure section dropped on a compound goes under
+    it (printed right after it, SPEC §13v.2); dragged back into the tree it is an ordinary
+    section again. The tree only reports where something was dropped; the main window
+    updates the project and rebuilds the tree.
     """
 
     section_dropped = Signal(str, str, int)        # section id, parent id or "", slot
     item_dropped = Signal(str, str, str, str, int)  # kind, id, section id, scheme id or "", slot
+    anchor_dropped = Signal(str, str, int)         # X-ray section id, compound id, slot
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -364,9 +390,35 @@ class SectionTree(QTreeWidget):
             first += 1
         return self.indexOfTopLevelItem(item) - first
 
-    def _section_drop(self, dragged, target, where):
-        """("section", parent id or "", slot) for a dragged section, or None."""
+    @staticmethod
+    def is_anchored(item: QTreeWidgetItem | None) -> bool:
+        """An X-ray structure shown under a compound."""
+        return item is not None and item.data(0, KIND_ROLE) == "section" and \
+            item.parent() is not None and item.parent().data(0, KIND_ROLE) == "compound"
+
+    def _anchor_drop(self, target, where):
+        """("anchor", compound id, slot) for an X-ray structure dropped on a compound (or
+        among the structures under one), or None."""
         DIP = QAbstractItemView.DropIndicatorPosition
+        if target.data(0, KIND_ROLE) == "compound":
+            first = where == DIP.BelowItem and target.isExpanded() and target.childCount()
+            return ("anchor", target.data(0, ID_ROLE), 0 if first else target.childCount())
+        if self.is_anchored(target):
+            compound = target.parent()
+            i = compound.indexOfChild(target)
+            return ("anchor", compound.data(0, ID_ROLE), i if where == DIP.AboveItem else i + 1)
+        return None
+
+    def _section_drop(self, dragged, target, where):
+        """("section", parent id or "", slot) for a dragged section, ("anchor", compound
+        id, slot) for an X-ray structure put under a compound, or None."""
+        DIP = QAbstractItemView.DropIndicatorPosition
+        if target is not None and dragged.data(0, TYPE_ROLE) == XRAY_SECTION:
+            spot = self._anchor_drop(target, where)
+            if spot is not None:
+                return spot
+        if self.is_anchored(target):   # (another section: after the compound's section)
+            target, where = target.parent(), DIP.BelowItem
         if target is None or target.data(0, KIND_ROLE) in BOTTOM_KINDS:
             spot = ("section", "", self.top_section_count())   # last, before the fixed
             #                                                    items at the bottom
@@ -454,6 +506,8 @@ class SectionTree(QTreeWidget):
             return
         if target[0] == "section":
             self.section_dropped.emit(dragged.data(0, ID_ROLE), target[1], target[2])
+        elif target[0] == "anchor":
+            self.anchor_dropped.emit(dragged.data(0, ID_ROLE), target[1], target[2])
         else:
             kind, sid, kid, slot = target
             self.item_dropped.emit(kind, dragged.data(0, ID_ROLE), sid, kid, slot)
@@ -499,6 +553,7 @@ class MainWindow(QMainWindow):
         self.tree.currentItemChanged.connect(self._on_tree_selection)
         self.tree.section_dropped.connect(self._on_section_dropped)
         self.tree.item_dropped.connect(self._on_item_dropped)
+        self.tree.anchor_dropped.connect(self._on_anchor_dropped)
         self.tree.itemCollapsed.connect(lambda i: self._collapsed.add(i.data(0, ID_ROLE)))
         self.tree.itemExpanded.connect(lambda i: self._collapsed.discard(i.data(0, ID_ROLE)))
         self.tree.customContextMenuRequested.connect(self._tree_menu)
@@ -585,6 +640,9 @@ class MainWindow(QMainWindow):
         self.act_import_si = act("&Import SI…", self.import_si,
                                  tip="Read an SI you already have (Word or PDF) into a new "
                                      "project or the open one; you check everything first")
+        self.act_xray = act("&X-ray Structure Viewer…", self.xray_viewer,
+                            tip="See a crystal structure (CIF file) as ORTEP ellipsoids or "
+                                "ball-and-stick, turn it, and save or copy the picture")
         self.act_snapshot = act("Save &Snapshot…", self.save_snapshot,
                                 tip="Save a zipped copy of the whole project, e.g. 'submitted version'")
         self.act_trash = act("&Trash…", self.show_trash, icon=SP.SP_TrashIcon)
@@ -597,7 +655,10 @@ class MainWindow(QMainWindow):
             for (t, label), tip in zip(SECTION_TYPE_LABELS.items(), (
                 "A section of your own: text, pictures and sub-sections",
                 "A section showing a PDF or picture made elsewhere (e.g. an X-ray report)",
-                "A section of compound pages with their own ID numbering"))}
+                "A section of compound pages with their own ID numbering",
+                "A crystal structure from its CIF file: an ORTEP or ball-and-stick drawing "
+                "and its crystal data table. With a compound selected, it goes under that "
+                "compound (printed right after it)."), strict=True)}
         # Sub-sections go inside the selected custom section (SPEC §13k.5).
         self.act_new_sub = {
             t: act(f"{label.capitalize() if t == 'text' else label} sub-section",
@@ -656,6 +717,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(self.act_close_project)
         file_menu.addSeparator()
         file_menu.addAction(self.act_import_si)
+        file_menu.addAction(self.act_xray)
         file_menu.addSeparator()
         file_menu.addActions([self.act_snapshot, self.act_trash, self.act_show_folder,
                               self.act_references, self.act_settings])
@@ -1064,6 +1126,17 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Could not create project", str(e))
             return
         self.open_project(project.folder)
+
+    def xray_viewer(self) -> None:
+        """File ▸ X-ray Structure Viewer… (SPEC §13v): a window of its own, not modal, so
+        it can stay open beside the project."""
+        from .xray_viewer import XrayViewer
+        viewer = getattr(self, "_xray_viewer", None)
+        if viewer is None:
+            viewer = self._xray_viewer = XrayViewer(self)
+        viewer.show()
+        viewer.raise_()
+        viewer.activateWindow()
 
     def import_si(self) -> None:
         """File ▸ Import SI… (SPEC §13u): read a Word or PDF SI, show the review window, then
@@ -1738,6 +1811,17 @@ class MainWindow(QMainWindow):
             page.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_FileIcon))
         fm.setExpanded(front.FRONT_ROOT not in self._collapsed)
 
+        def add_compound(parent, cid):
+            # Its X-ray structures under it (SPEC §13v.2): printed right after it.
+            item = make(parent, "compound", cid)
+            for x in self.project.anchored.get(cid, []):
+                sub = make(item, "section", x.id, x.name)
+                sub.setData(0, TYPE_ROLE, x.type)
+                sub.setToolTip(0, f"{x.name}\nX-ray structure, printed right after this "
+                                  "compound. Drag it into the tree to print it elsewhere.")
+                sub.setIcon(0, xray_icon())
+            item.setExpanded(cid not in self._collapsed)
+
         def add_section(parent, s, depth):
             sec = make(parent, "section", s.id, s.name)
             sec.setData(0, TYPE_ROLE, s.type)
@@ -1745,8 +1829,11 @@ class MainWindow(QMainWindow):
             sec.setToolTip(0, f"{s.name}\n{s.type_label} section"
                            + (f", level {depth}" if depth > 1 else "")
                            + ("\nEvery compound's spectra are printed here; it can be moved "
-                              "but not deleted." if s.type == SPECTRA_SECTION else ""))
-            sec.setIcon(0, spectrum_icon() if s.type == SPECTRA_SECTION
+                              "but not deleted." if s.type == SPECTRA_SECTION else "")
+                           + ("\nDrag it onto its compound to print it right after that "
+                              "compound." if s.type == XRAY_SECTION else ""))
+            sec.setIcon(0, spectrum_icon() if s.type == SPECTRA_SECTION else xray_icon()
+                        if s.type == XRAY_SECTION
                         else style.standardIcon(icons.get(s.type, icons["text"])))
             for child in s.children:
                 add_section(sec, child, depth + 1)
@@ -1764,10 +1851,10 @@ class MainWindow(QMainWindow):
                     k.setIcon(0, scheme_icon)
                     k.setToolTip(0, "Scheme page")
                     for c in item.children:
-                        make(k, "compound", c.id)
+                        add_compound(k, c.id)
                     k.setExpanded(item.id not in self._collapsed)
                 else:
-                    make(sec, "compound", item.id)
+                    add_compound(sec, item.id)
             sec.setExpanded(s.id not in self._collapsed)
 
         for s in self.project.top_sections:
@@ -2028,6 +2115,8 @@ class MainWindow(QMainWindow):
         if self.project is None:
             return None
         kind, item_id = self._current()
+        if kind == "section" and self.project.section(item_id).anchored_to:
+            kind, item_id = "compound", self.project.section(item_id).anchored_to
         if kind == "compound":
             sid, kid, i = self.project.position(self.project.compound(item_id))
             return sid, kid, i + 1
@@ -2170,7 +2259,7 @@ class MainWindow(QMainWindow):
         if not self._flush_or_stay():
             return
         section = self.project.section(section_id)
-        if (section.parent_id or "") == parent_id:
+        if not section.anchored_to and (section.parent_id or "") == parent_id:
             old = self.project.siblings(section).index(section)
             slot = slot - 1 if slot > old else slot
         if parent_id:
@@ -2178,6 +2267,28 @@ class MainWindow(QMainWindow):
         with self._step(f"Move section “{section.name}”", [("section", section_id)]):
             self._save(lambda: self.project.move_section(section_id, slot, parent_id or None))
         # Rebuild after the drop has fully finished.
+        QTimer.singleShot(0, lambda: self.project and self._populate_tree(("section", section_id)))
+
+    def _on_anchor_dropped(self, section_id: str, compound_id: str, slot: int) -> None:
+        """An X-ray structure dropped on a compound (or among the structures under one):
+        it goes under that compound, at `slot` (counted before it was taken out)."""
+        if self.project is None or self.project.read_only:
+            return
+        if not self._flush_or_stay():
+            return
+        section = self.project.section(section_id)
+        if section.anchored_to == compound_id:
+            old = self.project.siblings(section).index(section)
+            slot = slot - 1 if slot > old else slot
+        self._anchor(section_id, compound_id, slot)
+
+    def _anchor(self, section_id: str, compound_id: str, slot: int | None = None) -> None:
+        """Put an X-ray structure under a compound (SPEC §13v.2), then show it there."""
+        section = self.project.section(section_id)
+        shown = self.project.id_report().display_id(compound_id)
+        self._collapsed.discard(compound_id)   # show where it went
+        with self._step(f"Put “{section.name}” under {shown}", [("section", section_id)]):
+            self._save(lambda: self.project.anchor_section(section_id, compound_id, slot))
         QTimer.singleShot(0, lambda: self.project and self._populate_tree(("section", section_id)))
 
     def _on_item_dropped(self, kind: str, item_id: str, section_id: str, scheme_id: str,
@@ -2248,13 +2359,22 @@ class MainWindow(QMainWindow):
                 return
             container = self.project.section(parent_id).children if parent_id \
                 else self.project.top_sections
+            index = len(container)
+            if parent_id is None and section.anchored_to:
+                # (from under a compound: right after the top-level section it is in)
+                top = self.project.section(self.project.compound(section.anchored_to).section_id)
+                while top.parent_id:
+                    top = self.project.parent(top)
+                index = container.index(top) + 1
             if parent_id:
                 self._collapsed.discard(parent_id)
             with self._step(f"Move section “{section.name}”", [("section", section_id)]):
-                self._save(lambda: self.project.move_section(section_id, len(container),
-                                                             parent_id))
+                self._save(lambda: self.project.move_section(section_id, index, parent_id))
             QTimer.singleShot(0, lambda: self.project and
                               self._populate_tree(("section", section_id)))
+
+        if section.type == XRAY_SECTION:
+            self._add_anchor_menu(menu, section)
 
         targets = [s for s in self.project.sections
                    if s.type == "text" and s.id != section.parent_id
@@ -2264,8 +2384,30 @@ class MainWindow(QMainWindow):
             for s in targets:
                 indent = "    " * (self.project.depth(s) - 1)
                 into.addAction(indent + menu_text(s.name), lambda s=s: go(s.id))
-        if section.parent_id:
+        if section.parent_id or section.anchored_to:
             menu.addAction("Move out to the top level", lambda: go(None))
+
+    def _add_anchor_menu(self, menu: QMenu, section) -> None:
+        """"Put under compound ▸" for an X-ray structure (the same as dropping it on the
+        compound): the compounds by Data section."""
+        report = self.project.id_report()
+        groups = [(s, [c for c in s.compounds if c.id != section.anchored_to])
+                  for s in self.project.data_sections()]
+        groups = [(s, cs) for s, cs in groups if cs]
+        if not groups:
+            return
+        under = menu.addMenu("Put under compound")
+        under.setToolTipsVisible(True)
+
+        def put(cid: str) -> None:
+            if self._flush_or_stay():
+                self._anchor(section.id, cid)
+
+        for s, compounds in groups:
+            sub = under.addMenu(menu_text(s.name)) if len(groups) > 1 else under
+            for c in compounds:
+                sub.addAction(menu_text(f"{report.display_id(c.id)}   {c.name or '(unnamed)'}"),
+                              lambda cid=c.id: put(cid))
 
     def _add_move_menu(self, menu: QMenu, kind: str, item_id: str) -> None:
         def rebuild():
@@ -2387,6 +2529,11 @@ class MainWindow(QMainWindow):
                 panel.open_compound.connect(self.open_compound_at)
                 panel.new_compound_requested.connect(self.new_compound)
                 panel.pages_requested.connect(self.pages_for_ids)
+            elif isinstance(panel, XraySectionPanel):
+                # (under another compound: the tree is rebuilt, the page stays)
+                panel.moved.connect(lambda sid=item_id: self._populate_tree(
+                    ("section", sid), rebuild_panel=False))
+                panel.labels_changed.connect(self._refresh_labels)
         panel.saved.connect(lambda msg: self.statusBar().showMessage(msg, 2500))
         panel.saved.connect(lambda _msg: self.preview_pane.schedule())
         self._set_panel(panel)
@@ -2760,9 +2907,14 @@ class MainWindow(QMainWindow):
         label = SECTION_TYPE_LABELS[type_]
         label = label.lower() if type_ == "text" else label
         defaults = {"text": "Supplementary Notes", "file": "Optimization Table",
-                    "data": "Products"}
+                    "data": "Products", XRAY_SECTION: "X-ray Crystal Structure"}
         parent_id, index = None, None
         kind, item_id = self._current()
+        if kind == "section" and self.project.section(item_id).anchored_to:
+            kind, item_id = "compound", self.project.section(item_id).anchored_to
+        # A new X-ray structure with a compound selected goes under it (SPEC §13v.2).
+        under = item_id if type_ == XRAY_SECTION and kind == "compound" and not inside \
+            else None
         if inside:
             parent_id = self._sub_section_parent()
             if parent_id is None:
@@ -2786,7 +2938,12 @@ class MainWindow(QMainWindow):
             elif kind in FIXED_KINDS:
                 index = 0   # just after the front matter
         title = f"New {label} {'sub-section' if inside else 'section'}"
-        name, ok = QInputDialog.getText(self, title, "Section name:", text=defaults[type_])
+        default = defaults[type_]
+        if under:   # (shown under its compound, printed without a heading)
+            default = "X-ray Structure"
+        name, ok = QInputDialog.getText(self, title, "Section name:" if under is None else
+                                        "Section name (it goes under the selected compound, "
+                                        "printed right after it):", text=default)
         if not ok or not name.strip():
             return
         if not self._flush_or_stay():
@@ -2794,12 +2951,16 @@ class MainWindow(QMainWindow):
         try:
             with self._step(f"New section “{name.strip()}”") as step:
                 section = self.project.add_section(type_, name.strip(), index, parent_id)
+                if under:
+                    self.project.anchor_section(section.id, under)
                 self._place(step, "section", section.id)
-        except (ProjectError, OSError) as e:
+        except (ProjectError, OSError, KeyError) as e:
             QMessageBox.warning(self, "Could not create section", str(e))
             return
         if parent_id:
             self._collapsed.discard(parent_id)
+        if under:
+            self._collapsed.discard(under)
         self._populate_tree(("section", section.id))
 
     def use_as_general_information(self) -> None:
@@ -3124,6 +3285,8 @@ class MainWindow(QMainWindow):
                 select = ("section", siblings[min(index, len(siblings) - 1)].id)
             elif parent is not None:
                 select = ("section", parent.id)
+            elif section.anchored_to:   # (the last X-ray structure under a compound)
+                select = ("compound", section.anchored_to)
             else:
                 select = ("front_root", front.FRONT_ROOT)
         elif kind == "scheme":
@@ -3171,8 +3334,10 @@ class MainWindow(QMainWindow):
                 section = self.project.section(item_id)
                 siblings = self.project.siblings(section)
                 target = siblings.index(section) + step
+                anchored = section.anchored_to   # (among the X-ray structures under it)
                 if 0 <= target < len(siblings):
-                    self._save(lambda: self.project.move_section(item_id, target))
+                    self._save(lambda: self.project.anchor_section(item_id, anchored, target)
+                               if anchored else self.project.move_section(item_id, target))
             elif kind == "scheme":
                 scheme = self.project.scheme(item_id)
                 items = self.project.section(scheme.section_id).items

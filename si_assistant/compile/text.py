@@ -63,7 +63,14 @@ def run_to_typst(run: Run) -> str:
         # Mentions are resolved to text before this (resolve_links); citations become
         # Typst citations, numbered and formatted by the journal's citation style.
         return "".join(f"#cite(label({typst_string(c)}))" for c in run.citations)
-    out = "#" + typst_string(run.text)
+    if "̅" in run.text:
+        # A character with a combining overline ("1̄" of a space group, P1̄): Typst's own
+        # overline (fonts place the combining one poorly)
+        out = "".join(f"#overline[#{typst_string(piece[0])}]" if piece.endswith("̅")
+                      and len(piece) == 2 else "#" + typst_string(piece.replace("̅", ""))
+                      for piece in re.split(r"(.̅)", run.text) if piece)
+    else:
+        out = "#" + typst_string(run.text)
     if run.valign == SUPER:
         out = f"#super[{out}]"
     elif run.valign == SUB:

@@ -12,6 +12,7 @@ with its headings listed on the left.
 
 - [Installing the program](#installing-the-program)
 - [Your first project](#your-first-project)
+- [Importing an existing SI](#importing-an-existing-si)
 - [The main window](#the-main-window)
 - [Sections and front matter](#sections-and-front-matter)
 - [Compounds and their fields](#compounds-and-their-fields)
@@ -19,6 +20,7 @@ with its headings listed on the left.
 - [Schemes](#schemes)
 - [General procedures](#general-procedures)
 - [Spectra](#spectra)
+- [X-ray structures](#x-ray-structures)
 - [References and citations](#references-and-citations)
 - [Error checks and warnings](#error-checks-and-warnings)
 - [Checking the manuscript against the SI](#checking-the-manuscript-against-the-si)
@@ -255,13 +257,14 @@ The program offers to restart and reopens the same page.
 
 ### Kinds of section
 
-**New section** (toolbar, or the Edit menu) offers three kinds:
+**New section** (toolbar, or the Edit menu) offers four kinds:
 
 | Kind | For |
 |---|---|
 | **Custom section** | Your own text, figures and tables, for example "Optimization of the reaction conditions" or "Mechanistic studies". It can have sub-sections, up to three levels (1, 1.1, 1.1.1). |
 | **Data section** | Compound pages and scheme pages, with their own compound numbering, general procedures and default fields. |
 | **Attachment section** | One PDF or picture made elsewhere, for example an X-ray report. Use **Choose file…**, drop a file onto it, or paste. You can give it a heading and a caption. |
+| **X-ray structure section** | A crystal structure drawn from its CIF file, with its crystal data table. It can sit among the sections or under its compound (see [X-ray structures](#x-ray-structures)). |
 
 The **Spectra** section is made by the program. It prints every compound's spectra (see
 [Spectra](#spectra)). You can move it, but not delete it. To leave the spectra out of a
@@ -724,6 +727,77 @@ Spectra section, after all the spectra, compound by compound in tree order:
 Once a compound has report files, an **HRMS reports** item appears under the Spectra section
 in the tree: it lists what will print (the live preview shows it). In the Compile SI window,
 "HRMS reports" can be unticked like any section.
+
+## X-ray structures
+
+A crystal structure is drawn from its CIF file (the one deposited with the CCDC; ask your
+crystallographer for it). There are two ways to use it:
+
+- an **X-ray structure section**, which puts the drawing and its crystal data table in the
+  SI (see [In the SI](#in-the-si) below);
+- **File ▸ X-ray Structure Viewer…**, a window of its own beside your project, to look at
+  any CIF and save or copy the picture (e.g. for slides). Nothing is stored in the project.
+
+Both draw the structure the same way:
+
+- **The molecule** is completed by symmetry (a molecule on an inversion centre is shown
+  whole) and drawn with its thermal ellipsoids (ORTEP, at 50% probability) or as
+  **ball-and-stick**. A file with several structures asks which one.
+- **Turn it** by dragging; Shift+drag (or the right mouse button) turns it in the plane of
+  the page. **Best** looks at the molecule spread out; **Along a / b / c** looks down a
+  cell axis. The mouse wheel magnifies the view on the screen.
+- **Appearance**: the ellipsoids' probability (30, 50, 70 or 90%), hydrogen atoms shown or
+  not, colour or black and white, the principal ellipses, atom labels and their size.
+  Drag a label to move it; **Put the labels back** returns them beside their atoms.
+  **Drawing size** sets how big the structure is drawn against its labels and lines (100%
+  is about 12 cm wide).
+- With several molecules (e.g. solvent) or a disorder, **Shown** lists them: untick what
+  should not be drawn.
+- **Crystal data** (tab): the crystal data and structure refinement table, read from the
+  CIF.
+- **Save picture…** saves the drawing as a PNG (600 dpi), an SVG or a PDF (both sharp at
+  any size); **Copy picture** copies it to paste into PowerPoint, Word or other programs.
+
+### In the SI
+
+1. Choose **New section ▸ New X-ray structure section**. With a compound selected in the
+   tree, the new structure goes **under that compound**; otherwise it goes after the
+   selected section.
+2. On its page, click **Choose CIF…** (or drop the .cif file on the page). A copy is kept in
+   the project folder.
+3. Choose the **Compound** it is of: its ID goes into the captions and follows any
+   renumbering.
+4. Turn and style the drawing as above. Your changes are saved as you make them, and Ctrl+Z
+   undoes them.
+
+**Where it prints** depends on where it sits in the tree:
+
+- **Among the sections**, for example after the Spectra section: it prints there, with its
+  name as a heading, then the figure and the table.
+- **Under a compound**: drag the section onto the compound in the tree (or right-click it ▸
+  **Put under compound**). It prints right after that compound's entry, in the middle of
+  the data section, without a heading. To print it elsewhere again, drag it back among the
+  sections (or right-click ▸ **Move out to the top level**).
+
+**Captions.** The figure caption is written for you from the drawing, for example
+"Molecular structure of **1a** (thermal ellipsoids at 50% probability; hydrogen atoms
+omitted for clarity). CCDC 2345678." It changes when you change the drawing. To write your
+own, untick **Automatic caption**: you start from the automatic text. The table's caption
+works the same way.
+
+**The crystal data table** (the **Crystal data table** tab):
+
+- Untick **Print the crystal data table** to print only the figure.
+- Untick a row to leave it out.
+- Double-click a value to type over it. A value you typed is shown in bold. Use the same
+  way to fill in a value the CIF doesn't have, such as the **CCDC deposition number** you
+  received after making the CIF: it then also goes into the figure caption. **Put back the
+  CIF's value** undoes your typing for the selected rows.
+
+The figure and the table are numbered with the others (Figure S…, Table S…) and can be
+mentioned in any text. An X-ray structure section without a CIF (or with a CIF that has no
+atoms) is left out of the SI, and the Warnings panel says so. In the Compile SI window, each
+structure has its own tick box.
 
 ## References and citations
 

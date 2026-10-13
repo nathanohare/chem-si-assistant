@@ -43,6 +43,7 @@ class ExportTree(QTreeWidget):
         # Older projects left the spectra out with the key "spectra": it unticks the
         # Spectra section (and is replaced by the section's own ID when saved).
         spectra_out = front.SPECTRA_KEY in excluded
+        report = project.id_report()
 
         def add_sections(parent, sections):
             for s in sections:
@@ -53,6 +54,10 @@ class ExportTree(QTreeWidget):
                     text, out = f"{s.name}   ({s.type_label} section)", excluded
                 item = self._add(parent, s.id, text, out)
                 add_sections(item, s.children)
+                for c in s.compounds:   # X-ray structures under compounds (SPEC §13v.2)
+                    for x in project.anchored.get(c.id, []):
+                        self._add(item, x.id, f"{x.name}   (X-ray structure, after "
+                                              f"{report.display_id(c.id)})", excluded)
                 if s.type == SPECTRA_SECTION and any(
                         ms_reports.prints_reports(project, c) for c in project.all_compounds()):
                     # SPEC §13n.3: its sub-section of HRMS report files (when any print).

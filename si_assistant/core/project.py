@@ -93,10 +93,13 @@ VECTOR_EXTENSIONS = (".emf", ".pdf")
 # (whatever the extension), so two pictures are never taken for a picture and its original.
 PICTURE_EXTENSIONS = tuple(dict.fromkeys(FIGURE_EXTENSIONS + VECTOR_EXTENSIONS))
 
-SECTION_TYPES = ("text", "file", "data")   # the kinds of section the user can add
+XRAY_SECTION = "xray"            # an X-ray structure (SPEC §13v)
+SECTION_TYPES = ("text", "file", "data", XRAY_SECTION)   # the kinds the user can add
 # "text" sections are shown as "custom sections" (SPEC §13k.5) and "file" sections as
 # "Attachment sections" (§13l.8); the stored types are unchanged.
-SECTION_TYPE_LABELS = {"text": "Custom", "file": "Attachment", "data": "Data"}
+SECTION_TYPE_LABELS = {"text": "Custom", "file": "Attachment", "data": "Data",
+                       XRAY_SECTION: "X-ray structure"}
+XRAY_EXTENSIONS = (".cif",)
 # The Spectra section (SPEC §13k.12): one per project, added by the program; it can be
 # moved but not deleted.
 SPECTRA_SECTION = "spectra"
@@ -218,6 +221,15 @@ class Section:
     # one sits in (None at the top level).
     children: list["Section"] = field(default_factory=list)
     parent_id: str | None = None
+
+    @property
+    def anchored_to(self) -> str:
+        """An X-ray structure shown under a compound (SPEC §13v.2): that compound's id
+        (it then sits there, not in the section tree); "" otherwise."""
+        if self.type != XRAY_SECTION or not self.data.get("anchored"):
+            return ""
+        cid = self.data.get("compound")
+        return cid if isinstance(cid, str) else ""
 
     @property
     def compounds(self) -> list["Compound"]:
@@ -366,6 +378,8 @@ class Project:
         self.lock: lockmod.LockInfo | None = None
         self.settings: dict[str, Any] = {}
         self.top_sections: list[Section] = []   # the section tree's top level
+        # X-ray structures shown under a compound (not in the tree): {compound id: [them]}
+        self.anchored: dict[str, list[Section]] = {}
         self.references: list[dict[str, Any]] = []
         self.load_warnings: list[str] = []
         # The load warnings about a file that could not be read at all (the others only
@@ -496,6 +510,20 @@ class Project:
                     continue
                 found[sid] = self._make_section(sub, data)
         self._set_aside_copies(list(found.values()))
+        # X-ray structures under a compound sit there, not in the tree; one whose compound
+        # is gone goes at the end of the tree (nothing is lost).
+        compounds = {c.id for s in found.values() if s.type == "data" for c in s.compounds}
+        self.anchored = {}
+        for section in sorted(found.values(), key=lambda s: (s.data.get("anchor_order", 0)
+                                                               if isinstance(s.data.get("anchor_order"),
+                                                                             int) else 0, s.name)):
+            cid = section.anchored_to
+            if not cid:
+                continue
+            if cid in compounds:
+                self.anchored.setdefault(cid, []).append(found.pop(section.id))
+            else:
+                section.data["anchored"] = False
         top = self._place_tree(tree, found, 1, None)
         # Folders not in the saved tree (e.g. added by a sync) go at the end.
         for section in found.values():
@@ -933,7 +961,19 @@ class Project:
         for s in self.sections:
             if s.id == section_id:
                 return s
+        for group in self.anchored.values():
+            for s in group:
+                if s.id == section_id:
+                    return s
         raise KeyError(section_id)
+
+    def anchored_sections(self) -> list[Section]:
+        """The X-ray structures shown under compounds, in the compounds' order."""
+        return [s for c in self.all_compounds() for s in self.anchored.get(c.id, [])]
+
+    def xray_sections(self) -> list[Section]:
+        """Every X-ray structure: in the tree, and under compounds."""
+        return [s for s in self.sections if s.type == XRAY_SECTION] + self.anchored_sections()
 
     def subtree(self, section: Section) -> list[Section]:
         """The section and all its sub-sections, in document order."""
@@ -951,7 +991,11 @@ class Project:
             return None
 
     def siblings(self, section: Section) -> list[Section]:
-        """The list the section sits in (its parent's sub-sections, or the top level)."""
+        """The list the section sits in (its parent's sub-sections, the top level, or —
+        an X-ray structure under a compound — that compound's)."""
+        cid = section.anchored_to
+        if cid and section in self.anchored.get(cid, []):
+            return self.anchored[cid]
         parent = self.parent(section)
         return parent.children if parent is not None else self.top_sections
 
@@ -1025,6 +1069,13 @@ class Project:
         elif type_ == "data":
             data.update({"id_table": [], "default_fields": copy.deepcopy(F.DEFAULT_SECTION_FIELDS),
                          "compound_order": []})
+        elif type_ == XRAY_SECTION:
+            # (SPEC §13v: the CIF in "file"; how it is drawn in "view"; the compound it
+            # shows; "caption": "" = automatic; the crystal data table printed or not, with
+            # values typed over and rows left out)
+            data.update({"file": None, "block": "", "view": {}, "compound": "",
+                         "anchored": False, "caption": "", "table": True,
+                         "table_caption": "", "table_values": {}, "table_hidden": []})
         section = Section(sid, type_, name, folder, data, parent_id=parent_id or None)
         self.save_section(section)
         if type_ == "text":
@@ -1075,11 +1126,13 @@ class Project:
     def move_section(self, section_id: str, new_index: int, parent_id=_SAME_PARENT) -> None:
         """Move a section (with its sub-sections) to `new_index` among its siblings, or
         into another custom section (`parent_id`; None = the top level). Only project.json
-        changes: section folders never move."""
+        changes: section folders never move. An X-ray structure under a compound moved
+        into the tree is no longer under it."""
         self._check_writable()
         section = self.section(section_id)
+        anchored = section.anchored_to
         if parent_id is self._SAME_PARENT:
-            parent_id = section.parent_id
+            parent_id = None if anchored else section.parent_id
         parent_id = parent_id or None
         self.check_section_place(parent_id, section)
         lifted = self._lifted.pop(section_id, None)   # (put where the user wants it, it
@@ -1090,16 +1143,82 @@ class Project:
         container = self.section(parent_id).children if parent_id else self.top_sections
         container.insert(max(0, min(new_index, len(container))), section)
         section.parent_id = parent_id
+        self._prune_anchored()
         try:
+            if anchored:
+                section.data["anchored"] = False
+                self.save_section(section)
             self.save_settings()
         except BaseException:
             # (not saved: the section goes back where it was in memory, as on disk)
             container.remove(section)
             old_container.insert(old_index, section)
             section.parent_id = old_parent
+            if anchored:
+                section.data["anchored"] = True
+                try:
+                    self.save_section(section)
+                except OSError:
+                    pass
             if lifted is not None:
                 self._lifted[section_id] = lifted
             raise
+
+    def anchor_section(self, section_id: str, compound_id: str, index: int | None = None) -> None:
+        """Show an X-ray structure under a compound (SPEC §13v.2): it then prints right
+        after that compound, and its caption names it. Taken out of the section tree (or
+        from under another compound)."""
+        self._check_writable()
+        section = self.section(section_id)
+        if section.type != XRAY_SECTION:
+            raise ProjectError("Only an X-ray structure can be put under a compound.")
+        self.compound(compound_id)                           # (KeyError if it is gone)
+        old_container = self.siblings(section)
+        old_index = old_container.index(section)
+        before = (dict(section.data), section.parent_id)
+        old_container.remove(section)
+        group = self.anchored.setdefault(compound_id, [])
+        group.insert(len(group) if index is None else max(0, min(index, len(group))), section)
+        section.parent_id = None
+        section.data.update({"anchored": True, "compound": compound_id})
+        self._prune_anchored()
+        try:
+            for k, s in enumerate(group):
+                s.data["anchor_order"] = k
+                self.save_section(s)
+            self.save_settings()
+        except BaseException:
+            group.remove(section)
+            if not group:
+                self.anchored.pop(compound_id, None)
+            old_container.insert(old_index, section)
+            section.data.clear()
+            section.data.update(before[0])
+            section.parent_id = before[1]
+            raise
+
+    def _prune_anchored(self) -> None:
+        for cid in [c for c, group in self.anchored.items() if not group]:
+            del self.anchored[cid]
+
+    def _free_anchored(self, compound_ids, after: Section | None) -> None:
+        """X-ray structures under compounds that are going away: put in the tree (after
+        `after`'s top-level section, else at the end), not under a compound any more."""
+        freed = [s for cid in compound_ids for s in self.anchored.pop(cid, [])]
+        if not freed:
+            return
+        top = after
+        while top is not None and top.parent_id:
+            top = self.parent(top)
+        index = self.top_sections.index(top) + 1 if top in self.top_sections else \
+            len(self.top_sections)
+        for s in freed:
+            s.data["anchored"] = False
+            s.parent_id = None
+            self.top_sections.insert(index, s)
+            index += 1
+            self.save_section(s)
+        self.save_settings()
 
     # ------------------------------------------------------------------ the Spectra section
 
@@ -1238,7 +1357,10 @@ class Project:
         the old one goes to the Trash, so a copy that fails leaves the section as it was."""
         self._check_writable()
         source = Path(source)
-        if source.suffix.lower() not in FILE_SECTION_EXTENSIONS:
+        if section.type == XRAY_SECTION:          # (an X-ray structure: its CIF, §13v)
+            if source.suffix.lower() not in XRAY_EXTENSIONS:
+                raise ProjectError(f"{source.name} is not a CIF file (.cif).")
+        elif source.suffix.lower() not in FILE_SECTION_EXTENSIONS:
             raise ProjectError(
                 f"{source.name} is not a supported file type.\n"
                 f"Please use a PDF or an image ({', '.join(FILE_SECTION_EXTENSIONS)}).")
@@ -1327,15 +1449,26 @@ class Project:
         index = container.index(section)
         tree, unread = self._tree_with_unread(section)
         below = [s.folder for s in self.subtree(section)[1:]] + unread
+        anchored = section.anchored_to
         entry = self._move_to_trash(section.folder, kind="section", name=section.name,
                                     extra={"section_id": section.id, "type": section.type,
                                            "original_index": index,
                                            "parent_id": section.parent_id or "",
                                            "tree": tree,
-                                           "subsections": len(below)},
+                                           "subsections": len(below),
+                                           **({"anchored_to": anchored} if anchored else {})},
                                     companions=tuple(below))
         container.remove(section)
+        if anchored and not container:
+            self.anchored.pop(anchored, None)
         self.save_settings()
+        # X-ray structures under the compounds of a Data section sent to the Trash stay
+        # in the project, in the tree (SPEC §13v.2)
+        gone = [c.id for s in self.subtree(section) if s.type == "data" for c in s.compounds]
+        try:
+            self._free_anchored(gone, None)
+        except OSError:
+            pass   # (they come back into the tree at the next opening)
         return entry
 
     def _tree_with_unread(self, section: Section) -> tuple[dict[str, Any], list[Path]]:
@@ -1540,6 +1673,21 @@ class Project:
             if self._skipped.get(section.id) == section.folder:   # (unread at load)
                 del self._skipped[section.id]
         root_id = entry.info.get("section_id") or next(iter(found), "")
+        # An X-ray structure that was under a compound goes back under it, if it is there
+        root = found.get(root_id)
+        cid = root.anchored_to if root is not None else ""
+        if cid:
+            try:
+                self.compound(cid)
+            except KeyError:
+                root.data["anchored"] = False
+                self.save_section(root)
+            else:
+                group = self.anchored.setdefault(cid, [])
+                group.insert(max(0, min(saved_index if saved_index is not None else len(group),
+                                        len(group))), found.pop(root_id))
+                self.save_settings()
+                return f"Restored X-ray structure “{root.name}” under its compound."
         tree = entry.info.get("tree") or {"id": root_id}
         parent_id = entry.info.get("parent_id") or None
         note = ""
@@ -1800,6 +1948,11 @@ class Project:
             else:
                 if leaving is not None:
                     leaving.done()
+        # its X-ray structures stay in the project, in the tree after its section (§13v.2)
+        try:
+            self._free_anchored([compound.id], section)
+        except OSError:
+            pass   # (they come back into the tree at the next opening)
         if copy_failed is not None:
             raise BoxCopyFailed(entry, compound.name or "unnamed compound", copy_failed)
         return entry
