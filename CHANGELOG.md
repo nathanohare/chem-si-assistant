@@ -4,7 +4,7 @@ What changed in each version of Chem SI Assistant. The newest version is at the 
 (The release workflow copies a version's section into its GitHub Release notes, which the
 program's update check shows.)
 
-## [Unreleased]
+## [1.2.0] - 2026-10-12
 
 **X-ray structures**
 - **File ▸ X-ray Structure Viewer…** shows a crystal structure from its CIF file: thermal
