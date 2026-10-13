@@ -160,7 +160,11 @@ CORE_FIELDS: tuple[FieldDef, ...] = (
              (_num("value", placeholder="0.20"), Part("unit", kind="choice", choices=AMOUNT_UNITS))),
     FieldDef("yield", "Yield", "parts",
              (_num("percent", placeholder="92", suffix="%"), _num("mass", placeholder="28.4"),
-              Part("mass_unit", kind="choice", choices=MASS_UNITS))),
+              Part("mass_unit", kind="choice", choices=MASS_UNITS),
+              # SPEC §13u.13: printed after the yield, inside the parentheses:
+              # "(43.7 mg, 57% over two steps)". Optional.
+              Part("note", "Note", placeholder="optional, e.g. over two steps")),
+             filled_parts=("percent", "mass", "mass_unit")),
     FieldDef("physical_state", "Physical state", "parts",
              (Part("text", kind="combo", choices=PHYSICAL_STATES, learn=True),)),
     FieldDef("nmr", "NMR peak reports", "nmr"),

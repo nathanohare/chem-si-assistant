@@ -4,6 +4,40 @@ What changed in each version of Chem SI Assistant. The newest version is at the 
 (The release workflow copies a version's section into its GitHub Release notes, which the
 program's update check shows.)
 
+## [1.1.0] - 2026-10-12
+
+**Import an existing SI**
+- **File ▸ Import SI…** (and **Import an Existing SI…** on the start page) reads an SI in
+  Word or PDF and makes compound pages from it: the compounds (name, ID, procedure,
+  physical state, yield, Rf, mp, IR, [α]D, ee, d.r., NMR reports, HRMS, elemental analysis,
+  CCDC, literature sentence) and the general procedures, with the compounds linked to them.
+- A review window shows everything before anything is made: change any value, untick
+  what you don't want. Text that is not recognised goes to the compound's Notes.
+- Print the compounds from their fields (the program's format) or exactly as imported.
+- Into a new project or the open one; compounds already there only get their empty fields
+  filled. One undo step.
+- Structures: from Word, the ChemDraw drawings in the document are read (their real
+  structures, by the ID written under each, checked against the compound's HRMS formula);
+  from a PDF, each structure's drawing is cut out as a sharp picture.
+- Spectra: from Word, the MestReNova spectra in the document, each matched to the compound
+  whose NMR report its peaks fit (or by the header or drawing next to it); from a PDF, the
+  spectrum pages, cut into one picture per spectrum. The review window shows each with
+  how it was matched; its compound and type can be changed there.
+- The rest of the SI: its sections in order (with their headings, figures and tables;
+  General Information to the front matter; one Data section for each part with
+  compounds), the cover page (title, authors, affiliations) and the reference list, with
+  the citations in the text linked to it. Figures and tables are cut out of a PDF as
+  sharp pictures. Any heading's level can be changed in the review window, and the
+  references can be filled in from Crossref by their DOIs (on click).
+
+**Compound page**
+- The Yield field has an optional Note, printed after the yield: "(43.7 mg, 57% over two
+  steps)".
+
+**Pasted spectra**
+- More spectra pasted from Mnova are kept as sharp vector drawings: the check that compares
+  the drawing with Windows' own no longer fails on the colour of Mnova's thin lines.
+
 ## [1.0.1] - 2026-10-12
 
 **Example SI**

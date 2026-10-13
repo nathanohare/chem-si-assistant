@@ -2336,6 +2336,13 @@ class Project:
         self._add_field_entry(compound, entry)
         self.save_compound(compound)
 
+    def add_fields(self, compound: Compound, entries: list[dict[str, Any]]) -> None:
+        """Add several fields (those it has already are left) and save once."""
+        self._check_writable()
+        for entry in entries:
+            self._add_field_entry(compound, entry)
+        self.save_compound(compound)
+
     def remove_field(self, compound: Compound, key: str) -> None:
         self._check_writable()
         defn = F.field_def({"key": key}) or None

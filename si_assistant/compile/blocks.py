@@ -327,9 +327,12 @@ def state_and_yield(compound) -> list[Run]:
     state = F.part_text(_value(compound, "physical_state").get("text")).strip() \
         if "physical_state" in compound.field_keys else ""
     y = _value(compound, "yield") if "yield" in compound.field_keys else {}
-    mass, unit, pct = (F.part_text(y.get(k)).strip() for k in ("mass", "mass_unit", "percent"))
+    mass, unit, pct, note = (F.part_text(y.get(k)).strip()
+                             for k in ("mass", "mass_unit", "percent", "note"))
     amounts = ", ".join(x for x in (f"{mass} {unit}".strip() if mass else "",
                                     f"{pct}%" if pct else "") if x)
+    if note:     # "(43.7 mg, 57% over two steps)" (SPEC §13u.13)
+        amounts = f"{amounts} {note}" if pct else ", ".join(x for x in (amounts, note) if x)
     if state:
         text = state[0].upper() + state[1:] + (f" ({amounts})" if amounts else "")
     elif amounts:

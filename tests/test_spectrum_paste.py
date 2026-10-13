@@ -192,6 +192,43 @@ def test_damaged_metafiles_never_crash(qapp):
     assert result is None or result.kind in ("vector", "picture")
 
 
+def lines_image(grey: int, shift: int = 0) -> QImage:
+    """A white picture with five lines 3 pixels wide in grey level `grey` (0 = black)."""
+    from PySide6.QtGui import QColor, QPainter
+    image = QImage(200, 140, QImage.Format.Format_RGB32)
+    image.fill(QColor("white"))
+    painter = QPainter(image)
+    for k in range(5):
+        painter.fillRect(20, 20 + 20 * k + shift, 160, 3, QColor(grey, grey, grey))
+    painter.end()
+    return image
+
+
+def test_mnova_colours_are_checked_against_gdiplus(qapp, monkeypatch):
+    """Mnova's metafiles also hold EMF+ records, which Word and Mnova draw (GDI+). Plain
+    GDI draws their thin pens lighter (one output pixel wide under a scaled transform:
+    grey once averaged), so when only the colours differ from GDI's drawing they are
+    compared with GDI+'s. (Windows' drawings are made up here: any system.)"""
+    import struct
+    from si_assistant.ui import spectrum_paste as sp
+    drawn = {"gdi": lines_image(127), "gdi+": lines_image(0)}
+    monkeypatch.setattr(sp.ci, "render_emf_bytes", lambda data, dpi: drawn["gdi"])
+    monkeypatch.setattr(sp.ci, "render_emf_plus_bytes", lambda data, dpi: drawn["gdi+"])
+    monkeypatch.setattr(sp, "render_svg_bytes", lambda data, w, h: lines_image(0))
+    dual = T.emf(T.rec(70, struct.pack("<I", 16) + b"EMF+" + bytes(12)),
+                 T.polyline16([(10, 60), (190, 60)]))
+    plain = label_emf()
+    assert sp.has_emf_plus(dual) and not sp.has_emf_plus(plain)
+    assert not sp.has_emf_plus(b"") and not sp.has_emf_plus(dual[:90])
+    assert sp.self_check(dual, "<svg/>").passed
+    assert not sp.self_check(plain, "<svg/>").passed          # (GDI alone: too light)
+    drawn["gdi+"] = lines_image(127)          # GDI+ draws it lighter too: the SVG is wrong
+    assert not sp.self_check(dual, "<svg/>").passed
+    drawn["gdi"], drawn["gdi+"] = lines_image(127, shift=8), lines_image(0)
+    check = sp.self_check(dual, "<svg/>")     # the shapes differ: GDI+ can't save it
+    assert not check.passed and "coverage" in check.reason
+
+
 def test_without_windows_a_complete_conversion_can_be_kept_unchecked(qapp):
     from si_assistant.ui import spectrum_paste as sp
     result = sp.convert_emf(label_emf(), check=False)

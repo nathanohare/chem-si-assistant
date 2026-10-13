@@ -199,6 +199,7 @@ def _same_folder(a: Path, b: Path) -> bool:
 class WelcomePage(QWidget):
     new_requested = Signal()
     open_requested = Signal()
+    import_requested = Signal()   # File ▸ Import SI… (SPEC §13u)
     example_requested = Signal()   # open a copy of the example project
     example_pdf_requested = Signal()   # view the example's compiled SI (PDF)
     recent_chosen = Signal(str)
@@ -210,6 +211,11 @@ class WelcomePage(QWidget):
         title = QLabel(f"<h1>{APP_NAME}</h1><p>Build the Supporting Information for your paper.</p>")
         new_btn = QPushButton("New Project…")
         open_btn = QPushButton("Open Project…")
+        import_btn = QPushButton("Import an Existing SI…")
+        import_btn.setToolTip("Make a project from an SI you already have (Word or PDF): "
+                              "its compounds and general procedures are read, and you check "
+                              "them before anything is made")
+        import_btn.clicked.connect(self.import_requested)
         # A finished example to look around in, shown prominently so a first-time user
         # can see straight away what the program makes (a copy is opened; also in the
         # Help menu).
@@ -222,7 +228,8 @@ class WelcomePage(QWidget):
         # The most recent project, one click away (SPEC §13l.3); hidden when there is none
         # or its folder is gone.
         self.last_btn = QPushButton()
-        for b in (new_btn, open_btn, self.example_btn, example_pdf_btn, self.last_btn):
+        for b in (new_btn, open_btn, import_btn, self.example_btn, example_pdf_btn,
+                  self.last_btn):
             b.setMinimumHeight(36)
         new_btn.clicked.connect(self.new_requested)
         open_btn.clicked.connect(self.open_requested)
@@ -237,6 +244,7 @@ class WelcomePage(QWidget):
         buttons = QHBoxLayout()
         buttons.addWidget(new_btn)
         buttons.addWidget(open_btn)
+        buttons.addWidget(import_btn)
         buttons.addWidget(self.last_btn)
         buttons.addStretch()
 
@@ -480,6 +488,7 @@ class MainWindow(QMainWindow):
         self.welcome = WelcomePage(self.prefs)
         self.welcome.new_requested.connect(self.new_project)
         self.welcome.open_requested.connect(self.choose_and_open_project)
+        self.welcome.import_requested.connect(self.import_si)
         self.welcome.example_requested.connect(self.open_example_project)
         self.welcome.example_pdf_requested.connect(self.open_example_pdf)
         self.welcome.recent_chosen.connect(lambda p: self.open_project(Path(p)))
@@ -573,6 +582,9 @@ class MainWindow(QMainWindow):
         self.act_open_project = act("&Open Project…", self.choose_and_open_project,
                                     QKeySequence.StandardKey.Open)
         self.act_close_project = act("&Close Project", self.close_project)
+        self.act_import_si = act("&Import SI…", self.import_si,
+                                 tip="Read an SI you already have (Word or PDF) into a new "
+                                     "project or the open one; you check everything first")
         self.act_snapshot = act("Save &Snapshot…", self.save_snapshot,
                                 tip="Save a zipped copy of the whole project, e.g. 'submitted version'")
         self.act_trash = act("&Trash…", self.show_trash, icon=SP.SP_TrashIcon)
@@ -642,6 +654,8 @@ class MainWindow(QMainWindow):
         self.recent_menu = file_menu.addMenu("Open &Recent")
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
         file_menu.addAction(self.act_close_project)
+        file_menu.addSeparator()
+        file_menu.addAction(self.act_import_si)
         file_menu.addSeparator()
         file_menu.addActions([self.act_snapshot, self.act_trash, self.act_show_folder,
                               self.act_references, self.act_settings])
@@ -1050,6 +1064,84 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Could not create project", str(e))
             return
         self.open_project(project.folder)
+
+    def import_si(self) -> None:
+        """File ▸ Import SI… (SPEC §13u): read a Word or PDF SI, show the review window, then
+        write what was kept into a new project or the open one (one undo step)."""
+        from ..core import si_import_apply
+        from . import si_import_ui
+        start = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.DocumentsLocation) or str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import an SI", start, "SI files (*.docx *.pdf);;Word documents (*.docx);;"
+                                         "PDF files (*.pdf)")
+        if not path:
+            return
+        source = Path(path)
+        read = si_import_ui.read_with_progress(self, source)
+        if read is None:
+            return
+        if read.error:
+            QMessageBox.warning(self, "Could not read the SI", read.error)
+            return
+        plan = si_import_ui.analyse(read)
+        usable = self.project is not None and not self.project.read_only
+        dialog = si_import_ui.ImportDialog(plan, read, self.project if usable else None, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        mode, section_name = dialog.mode(), dialog.new_section_name()
+        if dialog.into_open_project() and usable:
+            if not self._flush_or_stay():
+                return
+            self._set_panel(None)
+            progress = si_import_ui.ImportProgress(self)
+            try:
+                with self._step(f"Import SI from {source.name}"):
+                    result = si_import_apply.apply_plan(
+                        self.project, plan, source.name, dialog.section_id(), section_name,
+                        mode, picture_for=si_import_ui.chemdraw_picture,
+                        spectrum_for=si_import_ui.mnova_spectrum, progress=progress,
+                        figure_for=si_import_ui.chemdraw_picture)
+            except (ProjectError, OSError) as e:
+                QMessageBox.warning(self, "Could not import the SI", str(e))
+                self._populate_tree()
+                return
+            finally:
+                progress.close()
+            self._collapsed.discard(result.section_id)
+            first = (("compound", result.created[0]) if result.created
+                     else ("section", result.section_id))
+            self._populate_tree(first)
+        else:
+            name, ok = QInputDialog.getText(
+                self, "Import SI into a new project",
+                "Project name. It becomes the folder name (the cover page gets the SI's own "
+                "title, when one was found on its cover):", text=source.stem)
+            if not ok or not name.strip():
+                return
+            parent = QFileDialog.getExistingDirectory(
+                self, f"Choose where to create the “{name.strip()}” folder")
+            if not parent or not self.close_project():
+                return
+            progress = si_import_ui.ImportProgress(self)
+            try:
+                project = Project.create(Path(parent), name)
+                try:
+                    result = si_import_apply.apply_plan(
+                        project, plan, source.name, None, section_name, mode,
+                        picture_for=si_import_ui.chemdraw_picture,
+                        spectrum_for=si_import_ui.mnova_spectrum, progress=progress,
+                        figure_for=si_import_ui.chemdraw_picture)
+                finally:
+                    project.close()
+            except (ProjectError, OSError) as e:
+                QMessageBox.warning(self, "Could not import the SI", str(e))
+                return
+            finally:
+                progress.close()
+            if not self.open_project(project.folder):
+                return
+        QMessageBox.information(self, "SI imported", si_import_ui.summary(result, plan))
 
     def open_example_project(self, fresh: bool = False) -> None:
         """Help ▸ Open example project (and the start page's button): open the user's copy

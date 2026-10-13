@@ -272,6 +272,7 @@ class Span:
     size: float
     bold: bool = False
     script: bool = False     # a superscript/subscript (smaller or raised)
+    italic: bool = False     # (from the font's name; used by the SI import, SPEC §13u)
 
     @property
     def bbox(self) -> list[float]:

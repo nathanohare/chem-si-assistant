@@ -109,6 +109,93 @@ Then work through these steps:
 projects (double-click one to open it). If you tick **Open the last project when the
 program starts**, the program skips the start page next time.
 
+## Importing an existing SI
+
+Already have an SI, or part of one, in Word or as a PDF? **File ▸ Import SI…** (or
+**Import an Existing SI…** on the start page) reads it and makes compound pages from it.
+The file itself is only read, never changed.
+
+**What is read** (in this version):
+- **Compounds**: a heading with the name and the ID in parentheses, such as
+  "1-Phenylethan-1-ol (2a).", on its own line or at the start of the text; or just the ID in
+  bold ("**2a.** To a solution of …"). The text after it is sorted into the fields: the
+  experimental procedure, the physical state with mass and yield, R<sub>f</sub>, mp, IR,
+  [α]<sub>D</sub>, ee/er with the HPLC details, d.r., every NMR report (with a label such as
+  "major rotamer"), HRMS (ionisation, adduct and the found m/z; the calculated m/z is worked
+  out by the program again), elemental analysis, the CCDC number and "Spectral data matched
+  those reported in the literature".
+- **General procedures**: "General Procedure A: …" and its text. Compounds that cite it are
+  linked to it. Their shared sentence ("Prepared according to {GP} from {starting
+  material} ({starting material ID}, {mass} mg, {scale}).") becomes the procedure's compound
+  sentence, with each compound's own values filled in.
+- **Structures** from Word: the ChemDraw drawings pasted into the document are read (their
+  real structure, not just the picture). A structure goes to the compound whose ID is
+  written under it in the drawing ("3a"), or, if a compound's own text has a drawing of
+  just one structure, to that compound. Its formula is checked against the compound's
+  HRMS: if they don't fit, you are warned (and if exactly one structure in the whole SI
+  fits, that one is taken instead, with a note). A salt keeps its counter-ion.
+- **Structures** from a PDF: a PDF holds only the drawing, so the drawing is cut out as a
+  sharp picture (between the compound's heading and its text, or above its label in a
+  scheme). It has no formula: the HRMS uses the formula printed in the SI. To get the
+  formula and masses, paste the structure from ChemDraw later.
+- **Spectra** from Word: the MestReNova spectra pasted into the document. Each goes to the
+  compound whose NMR report its printed peak labels fit; otherwise to the compound named
+  in the header next to it (structure, ID and "¹H NMR (…)"), or whose ID or structure is
+  drawn beside it. Its type (¹H, ¹³C, ¹⁹F…) comes from its title or its ppm axis. It is
+  stored like a spectrum pasted from Mnova: a sharp vector drawing where possible, with
+  Mnova's copy kept beside it.
+- **Spectra** from a PDF: each spectrum page is cut at its headers ("2a — ¹H NMR (500 MHz,
+  CDCl₃)"), one picture per spectrum, and goes to the compound the header names. The cut
+  usually shows the structure already, so its **Structure + ID** box is unticked.
+- **The rest of the SI**: each section of it becomes one of the program's sections, in the
+  same order, with its headings, figures and tables. The general information ("General
+  Information", "Materials and Methods"…) goes to the front matter's General Information
+  page. A section with compounds becomes a Data section (or a section holding its text,
+  with its compounds in a Data section inside it). Figures and tables keep their captions
+  and labels ("Figure S2", "Table S1"); from a PDF they are cut out of the page as sharp
+  pictures. The table of contents and a section of NMR spectra are not imported (the
+  program makes its own), unless you tick them.
+- **The cover page**: the title, authors (with their affiliations and who is
+  corresponding) and affiliations go to the project's cover page, where it has none yet.
+- **The reference list**: each reference is read (authors, title, journal, year, volume,
+  pages, DOI), and the numbered citations in the text ("…reported.²", "[2]") are linked
+  to them, so they are numbered and formatted in the journal's style. References the
+  project already has (same DOI) are not added twice.
+- From a PDF, page numbers and running heads are left out.
+
+**Check it first.** A window shows everything that was found: the general procedures and
+the compounds on the left, and for the one you select, every value in a box you can
+change, next to the text as printed, the structure that was found (untick **Import
+this structure** to leave it out), and its spectra (each with its type and compound,
+which you can change, and how it was matched; read "check it" notes carefully: there a
+header and the peaks disagree). Spectra that could not be matched are listed under
+**⚠ Spectra not matched**: choose a compound for those you want. Under **Sections** you
+see the sections that will be made (rename or untick them) and every heading found: if
+one was read at the wrong level (a sub-heading taken for a section, or a line that is no
+heading at all), change it there and the sections are worked out again. Each section's
+page shows its text and its figures and tables. **Cover page** and **References** show
+what was read there; every value can be changed, and **Look up the DOIs on Crossref**
+fills in the references that have a DOI (only when you click it). Untick anything you
+don't want. A compound marked ⚠ has a warning, or text that was not recognised; that
+text is never lost: it goes into the compound's private **Notes**. Importing many spectra
+takes a little while (a progress bar shows how far it is).
+
+**How the compounds are printed:**
+- **From the fields** (recommended): the program writes the text in its own format, like
+  any other compound, so its checks and the journal style apply. If a procedure already
+  states the yield or the physical state ("… to give 2a as a colorless oil (57 mg, 94%)"),
+  you are warned, because it would be printed twice: cut it from the procedure, or choose
+  the other option.
+- **Exactly as imported**: each compound's text is printed as it was (its "SI text"
+  field); the fields are still filled, for the checks and the dashboard.
+
+**Where it goes:** a new project, or the open project (new sections, as in the SI, or all
+the compounds into a Data section you already have). In a section you already have, a
+compound whose ID is already there only gets its *empty* fields filled; nothing you
+typed is overwritten, and the summary says which fields were kept. Text for General
+Information is added after what the page already has. The whole import is one step of
+**Edit ▸ Undo**.
+
 ## The main window
 
 ![A compound page, with the project tree on the left and the live preview on the right](images/compound-page.png)
@@ -257,7 +344,9 @@ Right-click a compound or a scheme page in the tree and choose **Duplicate…**:
 ### Fields
 
 The compound page lists its fields:
-- Structure, Name, Experimental procedure, Reaction scale, Yield, Physical state;
+- Structure, Name, Experimental procedure, Reaction scale, Yield, Physical state (the
+  Yield field's optional **Note**, such as "over two steps" or "from 2a", is printed after
+  the yield: "(43.7 mg, 57% over two steps)");
 - NMR peak reports, HRMS, Spectra, Additional files;
 - **Notes**, which are private and never printed.
 

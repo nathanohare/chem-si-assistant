@@ -23,8 +23,9 @@ spectrum type chooser, and the paste command shared with the compound's spectra 
 from __future__ import annotations
 
 import html
+import struct
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -79,9 +80,11 @@ class Comparison:
     colour: float                     # share of the inside of shapes whose colour differs
     ink: tuple[int, int]              # ink pixels of each
 
+    def shapes_agree(self) -> bool:
+        return min(self.coverage) >= CHECK_COVERAGE and min(self.worst_tile) >= TILE_COVERAGE
+
     def passed(self) -> bool:
-        return (min(self.coverage) >= CHECK_COVERAGE and min(self.worst_tile) >= TILE_COVERAGE
-                and self.colour <= CHECK_COLOUR)
+        return self.shapes_agree() and self.colour <= CHECK_COLOUR
 
 
 @dataclass
@@ -197,6 +200,16 @@ class QtTextHelper:
 
 
 # ---------------------------------------------------------------------- the self-check
+
+def has_emf_plus(emf: bytes) -> bool:
+    """Whether the metafile also holds EMF+ records: its first record after the header is
+    a comment holding the EMF+ header (where the EMF+ format requires it)."""
+    if len(emf) < 8:
+        return False
+    at = struct.unpack_from("<I", emf, 4)[0]
+    return len(emf) >= at + 16 and struct.unpack_from("<I", emf, at)[0] == 70 \
+        and emf[at + 12:at + 16] == b"EMF+"
+
 
 def ink(image: QImage) -> tuple[np.ndarray, np.ndarray]:
     """(ink mask, RGB pixels) of a picture: ink = darkest channel below INK_LEVEL."""
@@ -317,9 +330,19 @@ def self_check(emf: bytes, svg: str, dpi: float = CHECK_DPI) -> CheckResult:
     if candidate.isNull():
         return CheckResult(False, reason="the SVG could not be drawn", size=size)
     result = compare(reference, candidate)
-    seconds = time.perf_counter() - start
     if not result.ink[0]:
-        return CheckResult(False, result, "the picture is empty", seconds, size)
+        return CheckResult(False, result, "the picture is empty",
+                           time.perf_counter() - start, size)
+    if not result.passed() and result.shapes_agree() and has_emf_plus(emf):
+        # A metafile that also holds EMF+ records (Mnova's) is shown by Word and Mnova
+        # with GDI+, which draws those. Plain GDI can draw it lighter: a pen thinner than
+        # a pixel under a scaled transform is drawn one output pixel wide, grey once
+        # averaged. The shapes were compared with GDI's drawing; the colours are compared
+        # with GDI+'s instead.
+        plus = ci.render_emf_plus_bytes(emf, dpi)
+        if plus is not None and not plus.isNull() and (plus.width(), plus.height()) == size:
+            result = replace(result, colour=compare(plus, candidate).colour)
+    seconds = time.perf_counter() - start
     passed = result.passed()
     reason = "" if passed else (
         "the drawings differ (coverage {:.3f} / {:.3f}, worst tile {:.3f} / {:.3f}, "

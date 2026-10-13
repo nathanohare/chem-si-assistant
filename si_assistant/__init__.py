@@ -5,4 +5,4 @@ name. Settings saved under the old name are carried over: see ui/carry_over.py.)
 """
 
 APP_NAME = "Chem SI Assistant"
-__version__ = "1.0.1"
+__version__ = "1.1.0"

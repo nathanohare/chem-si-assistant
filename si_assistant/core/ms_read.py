@@ -42,6 +42,7 @@ READER_VERSION = 4
 
 CAPTION = re.compile(r"^(Scheme|Table|Figure|Fig\.|Chart)\s*(S?\d+)\b", re.I)
 _BOLD_FONT = re.compile(r"(?i)(bold|black|heavy|semibold|demi|-bd\b|,bold)")
+_ITALIC_FONT = re.compile(r"(?i)(italic|oblique|-it\b|,italic|-bdit\b|-boldit)")
 
 
 @dataclass
@@ -201,8 +202,7 @@ def _pdf_spans(page) -> tuple[list[list[P.Span]], str, int]:
             key = id(font_dict)
             if key not in widths:
                 try:
-                    from pypdf._font import Font   # (pypdf ≥ 6; estimated otherwise)
-                    widths[key] = Font.from_font_resource(font_dict)
+                    widths[key] = _pypdf_font().from_font_resource(font_dict)
                 except Exception:  # noqa: BLE001
                     widths[key] = None
             font = widths[key]
@@ -245,6 +245,7 @@ def _pdf_spans(page) -> tuple[list[list[P.Span]], str, int]:
             py = -(x * c + y * d) / n2
         base = getattr(font_dict, "get", lambda *_: None)("/BaseFont") if font_dict else None
         bold = bool(base and _BOLD_FONT.search(str(base)))
+        italic = bool(base and _ITALIC_FONT.search(str(base)))
         for i, part in enumerate(str(text).split("\n")):
             if not part.strip():
                 continue
@@ -253,11 +254,15 @@ def _pdf_spans(page) -> tuple[list[list[P.Span]], str, int]:
             lead = len(part) - len(part.lstrip())
             x0 = px + (0.25 * eff * lead if lead else 0.0)
             frames.setdefault(turn, []).append(
-                P.Span(part, x0, py - 0.75 * eff, x0 + w, py + 0.2 * eff, eff, bold=bold))
+                P.Span(part, x0, py - 0.75 * eff, x0 + w, py + 0.2 * eff, eff, bold=bold,
+                       italic=italic))
 
     plain = page.extract_text(visitor_text=visit) or ""
     out = [frames[0]] + [frames[k] for k in sorted(frames) if k and frames[k]]
     return out, plain.replace("�C", "°C"), slanted[0]
+
+
+pdf_spans = _pdf_spans   # (also used by the SI import, core/si_import_read.py)
 
 
 def _line_y(lines: list[dict], rec: dict) -> float:
@@ -268,6 +273,17 @@ def _line_y(lines: list[dict], rec: dict) -> float:
     hits = [L for L in lines if label in P.find_ids(P.split_footnotes(L["text"])[0])]
     best = [L for L in hits if any(m in L["text"] for m in marks)] or hits
     return best[0]["bbox"][3] if best else 0.0
+
+
+def _pypdf_font():
+    """pypdf's Font (its fonts' character widths): in pypdf.generic._font from 6.20, in
+    pypdf._font before. Not a public part of pypdf, so either may be missing: the widths
+    are then estimated (_char_width)."""
+    try:
+        from pypdf.generic._font import Font
+    except ImportError:
+        from pypdf._font import Font
+    return Font
 
 
 def _char_width(ch: str) -> float:
