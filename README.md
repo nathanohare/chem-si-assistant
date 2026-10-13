@@ -27,11 +27,9 @@ is built with. You can still run the program from the source code (below).
 
 **First start — the installers are not signed yet**, so the system warns once:
 - **Windows** ("Windows protected your PC", SmartScreen): click **More info**, then **Run
-  anyway**.
-
-NOTE: On Windows 11, parts of the program may be flagged because they are currently unsigned. To fix this, go to **Windows Security** > **App and browser control** > **Smart App Control Settings**
- and turn this to **Off**.
- 
+  anyway**. On Windows 11, Smart App Control may also block parts of the program because
+  they are not signed yet. To allow them, go to **Windows Security ▸ App & browser
+  control ▸ Smart App Control settings** and turn it **Off**.
 - **macOS** ("cannot be opened because Apple cannot check it for malicious software"):
   right-click (or Control-click) the app in Applications and choose **Open**, then
   **Open** again. On newer macOS versions, if there is no Open button: **System Settings ▸
