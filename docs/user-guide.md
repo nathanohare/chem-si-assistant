@@ -46,6 +46,13 @@ you the first time you open them. This is expected; the steps below get past it.
 3. Follow the installer. It installs for you only, so no administrator password is needed.
    It adds a Start-menu entry, and a desktop shortcut if you tick that box.
 
+**Windows 11: Smart App Control.** On computers where Smart App Control is on, it may block
+parts of the program because they are not signed yet: the program then doesn't start, or
+stops with a message such as *"An Application Control policy has blocked this file"*. To
+allow it, go to **Windows Security ▸ App & browser control ▸ Smart App Control settings**
+and turn it **Off**. (On some Windows 11 versions it can't be turned back on afterwards
+without resetting Windows, so read Microsoft's note in that settings page first.)
+
 To remove the program, use **Settings ▸ Apps** (or *Add or remove programs*). Your projects
 are not affected, because they live in their own folders.
 
