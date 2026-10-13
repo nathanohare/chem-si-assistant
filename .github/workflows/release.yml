@@ -53,8 +53,8 @@ jobs:
       prerelease: ${{ steps.v.outputs.prerelease }}
       publish: ${{ steps.v.outputs.publish }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Tag, version and release notes
@@ -80,7 +80,7 @@ jobs:
             echo "prerelease=$prerelease"; echo "publish=$publish"
           } >> "$GITHUB_OUTPUT"
           echo "Version $version, tag $tag, pre-release $prerelease, publish $publish"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-notes
           path: release-notes.md
@@ -103,9 +103,9 @@ jobs:
     env:
       VERSION: ${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
@@ -237,7 +237,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN=1 SI_ASSISTANT_SMOKE_TEST=1 timeout 180 \
             xvfb-run -a "out/${{ steps.app.outputs.asset }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.key }}
           path: out/${{ steps.app.outputs.asset }}
@@ -246,7 +246,7 @@ jobs:
 
       - name: Self-test report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: self-test-${{ matrix.key }}
           path: ${{ runner.temp }}/self-test.json
@@ -261,7 +261,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
       - name: Create the release and attach the installers
