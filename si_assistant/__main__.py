@@ -9,7 +9,7 @@ from PySide6.QtWidgets import QApplication
 
 from . import APP_NAME, resources, selftest
 from .compile.qt_images import allow_large_images
-from .ui import restart
+from .ui import restart, theme
 from .ui.app_icon import app_icon, use_own_taskbar_icon
 from .ui.carry_over import carry_over_from_old_name
 from .ui.feedback_ui import install_error_handler
@@ -121,6 +121,7 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     app.setWindowIcon(app_icon())  # every window of the program uses this icon
+    theme.apply(app)   # the look shared with Chem Illustrator (light or dark, SPEC §13w)
     # The installed program's self-test (selftest.py): checks and quits, no window.
     report, self_test_project, argv = selftest.split_args(sys.argv[1:])
     if report is not None:

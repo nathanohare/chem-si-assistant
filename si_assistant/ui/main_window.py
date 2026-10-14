@@ -7,7 +7,6 @@ import getpass
 import json
 import os
 import sys
-from functools import lru_cache
 from pathlib import Path
 
 from PySide6.QtCore import (QEvent, QItemSelectionModel, QSettings, QStandardPaths, Qt,
@@ -28,8 +27,8 @@ from ..core.project import (FORMAT_VERSION, PROJECT_FILE, SECTION_TYPE_LABELS,
                             SPECTRA_NOT_DELETED, SPECTRA_SECTION, XRAY_SECTION, BoxCopyFailed,
                             Project, ProjectError, SchemePage)
 from ..core.undo import UndoContext
-from . import (feedback_ui, help_ui, restart, rich_text, text_checks, undo_keys, update_ui,
-               wheel_guard)
+from . import (feedback_ui, help_ui, restart, rich_text, text_checks, theme, undo_keys,
+               update_ui, wheel_guard)
 from ..compile.document import CompileOptions
 from .compile_ui import CompileDialog, PreviewWindow, open_file, run_compile, show_warnings
 from .compound_panel import CompoundPanel, make_read_only
@@ -85,22 +84,9 @@ def menu_text(text: str) -> str:
     return text.replace("&", "&&")
 
 
-@lru_cache(maxsize=1)
 def spectrum_icon() -> QIcon:
-    """The Spectra section's icon in the tree: a few peaks on a baseline (made when first
-    needed, once the application exists)."""
-    from PySide6.QtCore import QPointF
-    from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
-    pixmap = QPixmap(32, 32)
-    pixmap.fill(Qt.GlobalColor.transparent)
-    p = QPainter(pixmap)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setPen(QPen(QColor("#1f4e9a"), 2.4))
-    p.drawLine(QPointF(2, 27), QPointF(30, 27))
-    for x, h in ((6, 8), (10, 18), (13, 11), (18, 22), (22, 9), (26, 14)):
-        p.drawLine(QPointF(x, 27), QPointF(x, 27 - h))
-    p.end()
-    return QIcon(pixmap)
+    """The Spectra section's icon in the tree: peaks on a baseline, in the accent colour."""
+    return theme.icon("spectrum", theme.colour("accent"))
 
 
 def xray_icon() -> QIcon:
@@ -618,8 +604,6 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ actions/menus
 
     def _build_actions(self) -> None:
-        style = self.style()
-
         def act(text, slot, shortcut=None, tip=None, icon=None):
             a = QAction(text, self)
             a.triggered.connect(slot)
@@ -629,10 +613,11 @@ class MainWindow(QMainWindow):
                 a.setToolTip(tip)
                 a.setStatusTip(tip)
             if icon is not None:
-                a.setIcon(style.standardIcon(icon))
+                self._icons.append((a, icon))
+                a.setIcon(theme.icon(icon))
             return a
 
-        SP = QStyle.StandardPixmap
+        self._icons = []   # (action or button, icon name): redrawn when the theme changes
         self.act_new_project = act("&New Project…", self.new_project, QKeySequence.StandardKey.New)
         self.act_open_project = act("&Open Project…", self.choose_and_open_project,
                                     QKeySequence.StandardKey.Open)
@@ -645,7 +630,7 @@ class MainWindow(QMainWindow):
                                 "ball-and-stick, turn it, and save or copy the picture")
         self.act_snapshot = act("Save &Snapshot…", self.save_snapshot,
                                 tip="Save a zipped copy of the whole project, e.g. 'submitted version'")
-        self.act_trash = act("&Trash…", self.show_trash, icon=SP.SP_TrashIcon)
+        self.act_trash = act("&Trash…", self.show_trash, icon="trash")
         self.act_show_folder = act("Show Project &Folder", self.show_folder)
         self.act_quit = act("&Quit", self.close, QKeySequence.StandardKey.Quit)
 
@@ -666,11 +651,11 @@ class MainWindow(QMainWindow):
             for t, label in SECTION_TYPE_LABELS.items()}
         self.act_new_compound = act("New &Compound", self.new_compound, "Ctrl+Shift+N",
                                     tip="Add a compound to the selected Data section",
-                                    icon=SP.SP_FileDialogNewFolder)
+                                    icon="new_compound")
         self.act_new_scheme = act("New Scheme &Page", self.new_scheme,
                                   tip="Add a reaction scheme page (a scheme with its compounds as "
                                       "sub-pages) to the selected Data section",
-                                  icon=SP.SP_FileDialogContentsView)
+                                  icon="new_scheme")
         self.act_rename = act("&Rename…", self.rename_item, "F2")
         self.act_delete = act("&Delete…", self.delete_item, QKeySequence.StandardKey.Delete)
         if sys.platform == "darwin":
@@ -687,27 +672,28 @@ class MainWindow(QMainWindow):
             a.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             self.tree.addAction(a)
         self.act_settings = act("Project &Settings…", self.show_settings, "Ctrl+,",
-                                icon=SP.SP_FileDialogDetailedView)
+                                icon="settings")
 
         self.act_compile = act("Compile SI", self.compile_si, "Ctrl+Shift+B",
-                               tip="Make the SI PDF (build/SI.pdf) from the whole project")
+                               tip="Make the SI PDF (build/SI.pdf) from the whole project",
+                               icon="compile")
         self.act_preview = act("Preview", self.preview_current, "Ctrl+Shift+P",
                                tip="See the selected compound, scheme page or section as it will "
-                                   "appear in the SI")
+                                   "appear in the SI", icon="preview")
         self.act_live = act("Live preview", lambda on: self._preview_collapsed(not on, True),
                             "Ctrl+Shift+L", tip="Show or hide the live preview of the page you "
-                                                "are editing, on the right")
+                                                "are editing, on the right", icon="live")
         self.act_live.setCheckable(True)
         self.act_live.setChecked(self.prefs.live_preview)
         self.act_warnings = act("Warnings", lambda on: self.warnings_dock.setVisible(on),
                                 "Ctrl+Shift+W", tip="Show every warning and flag in the project",
-                                icon=SP.SP_MessageBoxWarning)
+                                icon="warning")
         self.act_warnings.setCheckable(True)
         # (The References page at the bottom of the tree, SPEC §13n.10; no toolbar button.)
         self.act_references = act("References", self.show_references, "Ctrl+Shift+R",
                                   tip="The project's reference list (the References item at "
                                       "the bottom of the tree): add by DOI, by hand or from "
-                                      "BibTeX/RIS", icon=SP.SP_FileDialogInfoView)
+                                      "BibTeX/RIS", icon="references")
         self._preview: PreviewWindow | None = None
 
         file_menu = self.menuBar().addMenu("&File")
@@ -827,7 +813,8 @@ class MainWindow(QMainWindow):
         toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         new_btn = QToolButton()
         new_btn.setText("New section")
-        new_btn.setIcon(style.standardIcon(SP.SP_FileDialogNewFolder))
+        new_btn.setIcon(theme.icon("new_section"))
+        self._icons.append((new_btn, "new_section"))
         new_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         new_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         new_menu = QMenu(new_btn)
@@ -1452,6 +1439,17 @@ class MainWindow(QMainWindow):
         self._update_ui_state()
         return True
 
+    def changeEvent(self, event) -> None:  # noqa: N802
+        """The computer switched between light and dark (theme.apply set the new colours):
+        the line icons are drawn again in the new text colour."""
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.ApplicationPaletteChange and hasattr(self, "_icons"):
+            for widget, name in self._icons:
+                widget.setIcon(theme.icon(name))
+            if self.project is not None and not self._updating_tree:
+                kind, item_id = self._current()
+                self._populate_tree((kind, item_id), rebuild_panel=False)
+
     def closeEvent(self, event) -> None:  # noqa: N802
         if not self.close_project():
             event.ignore()   # (kept open: the page's changes could not be saved)
@@ -1767,11 +1765,8 @@ class MainWindow(QMainWindow):
         With rebuild_panel=False the page on the right is left as it is."""
         self._updating_tree = True
         self.tree.clear()
-        style = self.style()
-        icons = {"text": QStyle.StandardPixmap.SP_FileIcon,
-                 "file": QStyle.StandardPixmap.SP_FileLinkIcon,
-                 "data": QStyle.StandardPixmap.SP_DirIcon}
-        scheme_icon = style.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView)
+        icons = {t: theme.icon(t) for t in ("text", "file", "data")}
+        scheme_icon = theme.icon("scheme")
         writable = not self.project.read_only
         flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if writable:
@@ -1797,18 +1792,18 @@ class MainWindow(QMainWindow):
         fixed = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         top = make(None, PROJECT_ITEM, PROJECT_ITEM,
                    str(self.project.settings.get("title") or self.project.folder.name), fixed)
-        top.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_DirHomeIcon))
+        top.setIcon(0, theme.icon("project"))
         top.setToolTip(0, "The whole project: progress, missing data, warnings and every "
                           "compound at a glance")
         font = top.font(0)
         font.setBold(True)
         top.setFont(0, font)
         fm = make(None, "front_root", front.FRONT_ROOT, "Front matter", fixed)
-        fm.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_FileDialogListView))
+        fm.setIcon(0, theme.icon("front"))
         fm.setToolTip(0, "Cover page, table of contents and General Information (always first)")
         for key, name in front.FRONT_PAGES.items():
             page = make(fm, "front", key, name, fixed)
-            page.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_FileIcon))
+            page.setIcon(0, theme.icon("page"))
         fm.setExpanded(front.FRONT_ROOT not in self._collapsed)
 
         def add_compound(parent, cid):
@@ -1834,7 +1829,7 @@ class MainWindow(QMainWindow):
                               "compound." if s.type == XRAY_SECTION else ""))
             sec.setIcon(0, spectrum_icon() if s.type == SPECTRA_SECTION else xray_icon()
                         if s.type == XRAY_SECTION
-                        else style.standardIcon(icons.get(s.type, icons["text"])))
+                        else icons.get(s.type, icons["text"]))
             for child in s.children:
                 add_section(sec, child, depth + 1)
             if s.type == SPECTRA_SECTION:
@@ -1862,12 +1857,12 @@ class MainWindow(QMainWindow):
         # The Manuscript check (SPEC §13o) and the reference list (SPEC §13n.10): always
         # last, fixed like the front matter.
         ms_item = make(None, MANUSCRIPT_ITEM, MANUSCRIPT_ITEM, "Manuscript check", fixed)
-        ms_item.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_FileDialogContentsView))
+        ms_item.setIcon(0, theme.icon("manuscript"))
         ms_item.setToolTip(0, "Compare the manuscript (PDF or Word, and its ChemDraw files) "
                               "with the SI: IDs, structures, yields, ee/er, dr, names and "
                               "footnoted conditions. Never printed.")
         refs_item = make(None, REFERENCES_ITEM, REFERENCES_ITEM, "References", fixed)
-        refs_item.setIcon(0, style.standardIcon(QStyle.StandardPixmap.SP_FileDialogInfoView))
+        refs_item.setIcon(0, theme.icon("references"))
         refs_item.setToolTip(0, "The project's reference list: add by DOI, by hand or from "
                                 "BibTeX/RIS. Only cited references are printed, at the end "
                                 "of the SI.")
@@ -2004,7 +1999,7 @@ class MainWindow(QMainWindow):
             self._warn_cache = {}
         self._warn_guard = guard
         computed = {}   # compound id: checks.all_warnings (for the Warnings panel too)
-        warn_icon = self.style().standardIcon(QStyle.StandardPixmap.SP_MessageBoxWarning)
+        warn_icon = theme.icon("warning", theme.colour("warn"))
         from ..core import checks  # warnings shown in the tree are the active (undismissed) ones
         for item in self._all_items():
             kind, item_id = item.data(0, KIND_ROLE), item.data(0, ID_ROLE)
@@ -2099,7 +2094,7 @@ class MainWindow(QMainWindow):
             self.tree.setCurrentItem(parent)
 
     def _hrms_tree_item(self, item: QTreeWidgetItem) -> None:
-        item.setIcon(0, self.style().standardIcon(QStyle.StandardPixmap.SP_FileIcon))
+        item.setIcon(0, theme.icon("page"))
         item.setToolTip(0, "The compounds' HRMS report files, printed at the end of the "
                            "Spectra section when “Print HRMS reports” is on (shows what will "
                            "print)")

@@ -1214,6 +1214,14 @@ Nathan's request (from his labmates): "a basic X-ray structure viewer and a way 
    - *The page* (`ui/xray_panel.py`): CIF file (Choose CIF… / Replace…, or drop a .cif on the page; a file with several structures: choose one), compound (with where it prints), then the viewer (`XrayEditor`, shared with the viewer window) with the figure caption under the drawing and a "Crystal data table" tab (print or not, its caption, the rows). Changes to the drawing and typing are saved a moment after they stop (merged into one undo step, as typing elsewhere); every other change is an undo step of its own. A new structure (or another data block) starts from the best view; a new CIF also clears values typed into the table.
    - *Compiling and checks:* in the tree it prints like any section (heading, figure, table); under a compound, after it; each has its own tick in the Compile window (under its Data section when under a compound). A structure that can't be drawn (no CIF yet, no atoms) is left out with a warning, and is listed in the Warnings panel ("X-ray structures that can't be drawn").
 
+## 13w. The look, matched to Chem Illustrator (Nathan, 2026-10-14)
+
+Nathan asked for the program to look like his other program, Chem Illustrator (nathanohare/Chem-Illustrator), whose interface he finds sharp. As built (`ui/theme.py`):
+- Its colours, copied from its style sheet (src/app.css): a light grey-blue window (#eef0f3) with white panels and thin borders (#d6dae1), dark text (#1d2330), grey secondary text (#677084), one blue accent (#2f6fdf) with a pale blue (#e3ecfc) for hover and selection; and its dark set (#1b1e24 window, #252a32 panels, #7aa7ff accent). Light or dark as the computer is set, changing with it.
+- The same everywhere: Qt's Fusion style on Windows, macOS and Linux, with a style sheet for the shapes — buttons and fields rounded (6 px / 5 px), a blue border on hover and focus; menus rounded with pale-blue items; tabs as Chem Illustrator's (rounded tops, the open one white); thin scroll bars; tick boxes blue when ticked; section boxes as white cards with grey titles.
+- Its icons' style: 24 × 24 line drawings in the text colour (1.6 wide, round ends) for the toolbar and the tree, drawn again when the computer switches between light and dark.
+- Its font, IBM Plex Sans, when the computer has it; otherwise the computer's own interface font (as Chem Illustrator does). Sizes are unchanged (View ▸ Interface size still applies).
+
 ## 14. Glossary
 
 - **SI** — Supporting/Supplemental Information.
