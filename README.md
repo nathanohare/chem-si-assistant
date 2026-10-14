@@ -17,7 +17,7 @@ needs installing (Python, Qt, RDKit and Typst are included).
 
 | System | File | How to install |
 |---|---|---|
-| **Windows** 10 or 11 (64-bit) | `Chem-SI-Assistant-<version>-Windows-Setup.exe` | Run it. It installs for you only (no administrator rights needed), adds a Start-menu entry and an uninstaller. |
+| **Windows** 10 or 11 (64-bit) | `Chem-SI-Assistant-<version>-Windows.zip` | Right-click it ▸ **Extract All…**, then run the `…-Windows-Setup.exe` inside (the zip avoids the browser's download warnings; the same `.exe` is also on the Releases page on its own). It installs for you only (no administrator rights needed), adds a Start-menu entry and an uninstaller. |
 | **macOS** 11 or later, Apple-silicon Macs (M1 and newer) | `Chem-SI-Assistant-<version>-macOS.dmg` | Open it and drag **Chem SI Assistant** into **Applications**. |
 | **Linux** (64-bit Intel/AMD; Ubuntu 22.04 or similar and newer) | `Chem-SI-Assistant-<version>-x86_64.AppImage` | Make it executable (`chmod +x Chem-SI-Assistant-*.AppImage`, or Properties ▸ Allow executing), then double-click it. |
 

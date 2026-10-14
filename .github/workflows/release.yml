@@ -11,6 +11,8 @@
 #                AppImage runs on older systems too): PyInstaller, then a start-up test
 #                and a self-test (compiling a made-up sample project) of the built
 #                program, then the installer:
+#                  Chem-SI-Assistant-<version>-Windows.zip        (the same installer,
+#                    zipped: for downloading with a browser)
 #                  Chem-SI-Assistant-<version>-Windows-Setup.exe  (Inno Setup; also
 #                    installed and started once silently, then uninstalled)
 #                  Chem-SI-Assistant-<version>-macOS.dmg          (hdiutil)
@@ -203,6 +205,15 @@ jobs:
           $u = Start-Process "$dir\unins000.exe" -Wait -PassThru -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
           if ($u.ExitCode -ne 0) { throw "the uninstaller failed ($($u.ExitCode))" }
 
+      # The installer zipped too, for downloading with a web browser (browsers warn about
+      # an unsigned .exe, much less about a .zip). The update check takes the .exe.
+      - name: Zip the installer (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python packaging/build_app.py zip --installer "out\${{ steps.app.outputs.asset }}" --out out
+          if ($LASTEXITCODE -ne 0) { throw "zipping the installer failed" }
+
       # ------------------------------------------------------------------ macOS disk image
       - name: Make the disk image (macOS)
         if: runner.os == 'macOS'
@@ -240,7 +251,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: installer-${{ matrix.key }}
-          path: out/${{ steps.app.outputs.asset }}
+          path: out/    # (the installer; on Windows also its .zip)
           if-no-files-found: error
           compression-level: 0
 

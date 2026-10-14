@@ -9,6 +9,7 @@ Used by the release workflow (.github/workflows/release.yml) and by hand:
     python packaging/build_app.py self-test --exe <built program> --report r.json [--project P]
     python packaging/build_app.py notes --version 0.1.0 --out notes.md
     python packaging/build_app.py asset-name --platform windows
+    python packaging/build_app.py zip --installer <Setup.exe> --out <folder>
     python packaging/build_app.py appdir --app <built folder> --out <AppDir>
 
 `build` runs PyInstaller with packaging/chem_si_assistant.spec: one folder holding the
@@ -89,6 +90,22 @@ def asset_name(key: str, version: str) -> str:
     finally:
         sys.path.pop(0)
     return ASSET_PATTERNS[key].replace("*", version)
+
+
+def windows_zip_name(version: str) -> str:
+    """The zipped copy of the Windows installer on the Release, for downloading with a web
+    browser (browsers warn about an unsigned .exe, much less about a .zip). The program's
+    own update check keeps downloading the .exe itself."""
+    return f"Chem-SI-Assistant-{version}-Windows.zip"
+
+
+def zip_installer(installer: Path, out_dir: Path, version: str) -> Path:
+    """The Windows installer in a .zip of its own (windows_zip_name)."""
+    import zipfile
+    out = Path(out_dir) / windows_zip_name(version)
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.write(installer, Path(installer).name)
+    return out
 
 
 def app_name(platform: str = sys.platform) -> str:
@@ -445,6 +462,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("asset-name", help="an installer's file name on the Release")
     p.add_argument("--platform", required=True, choices=["windows", "macos", "linux"])
     p.add_argument("--version", default=None)
+    p = sub.add_parser("zip", help="the Windows installer in a .zip, for the Release")
+    p.add_argument("--installer", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--version", default=None)
     p = sub.add_parser("icons", help="make the .icns and the Linux PNG")
     p.add_argument("--out", required=True)
     p = sub.add_parser("build", help="run PyInstaller")
@@ -482,6 +503,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "asset-name":
         print(asset_name(args.platform, args.version or read_version()))
+        return 0
+    if args.command == "zip":
+        print(zip_installer(Path(args.installer), Path(args.out),
+                            args.version or read_version()))
         return 0
     if args.command == "icons":
         for kind, path in make_icons(Path(args.out)).items():

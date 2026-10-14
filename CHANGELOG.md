@@ -4,6 +4,15 @@ What changed in each version of Chem SI Assistant. The newest version is at the 
 (The release workflow copies a version's section into its GitHub Release notes, which the
 program's update check shows.)
 
+## [Unreleased]
+
+- **A new look**, matched to Chem Illustrator: a light grey-blue window with white panels,
+  one blue accent, rounded buttons and fields, thin line icons in the toolbar and the
+  tree; light or dark as your computer is set.
+- **Windows download:** the installer is also on the Releases page as a `.zip`, which
+  browsers download without the warnings they give for an unsigned installer. Unzip it
+  and run the installer inside.
+
 ## [1.2.0] - 2026-10-12
 
 **X-ray structures**

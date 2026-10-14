@@ -42,10 +42,15 @@ you the first time you open them. This is expected; the steps below get past it.
 
 ### Windows
 
-1. Download `Chem-SI-Assistant-<version>-Windows-Setup.exe` and double-click it.
-2. If a blue box says **"Windows protected your PC"** (SmartScreen), click **More info**,
+1. Download `Chem-SI-Assistant-<version>-Windows.zip`. (The zip holds the installer;
+   browsers download it without the warnings they give for an unsigned installer.
+   `Chem-SI-Assistant-<version>-Windows-Setup.exe`, next to it, is the same installer
+   unzipped, if you prefer it.)
+2. Right-click the zip ▸ **Extract All…**, then double-click
+   `Chem-SI-Assistant-<version>-Windows-Setup.exe` in the extracted folder.
+3. If a blue box says **"Windows protected your PC"** (SmartScreen), click **More info**,
    then **Run anyway**.
-3. Follow the installer. It installs for you only, so no administrator password is needed.
+4. Follow the installer. It installs for you only, so no administrator password is needed.
    It adds a Start-menu entry, and a desktop shortcut if you tick that box.
 
 **Windows 11: Smart App Control.** On computers where Smart App Control is on, it may block

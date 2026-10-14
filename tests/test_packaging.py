@@ -56,6 +56,21 @@ def test_asset_names_are_what_the_update_check_looks_for():
     assert B.asset_name("linux", "0.1.0") == "Chem-SI-Assistant-0.1.0-x86_64.AppImage"
 
 
+def test_the_windows_installer_is_also_zipped_for_browsers(tmp_path):
+    import zipfile
+    setup = tmp_path / B.asset_name("windows", "1.2.3")
+    setup.write_bytes(b"MZ installer bytes")
+    out = B.zip_installer(setup, tmp_path, "1.2.3")
+    assert out.name == "Chem-SI-Assistant-1.2.3-Windows.zip"
+    with zipfile.ZipFile(out) as z:
+        assert z.namelist() == [setup.name] and z.read(setup.name) == b"MZ installer bytes"
+    # the program's update check still downloads the .exe, never the .zip
+    assets = [updates.Asset(out.name, "https://x/zip", 1), updates.Asset(setup.name, "https://x/exe", 1)]
+    assert updates.pick_asset(assets, "windows").name == setup.name
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    assert "build_app.py zip" in workflow and "path: out/" in workflow
+
+
 def test_the_release_workflow_and_installer_use_the_same_names():
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     assert 'tags: ["v*.*.*"]' in workflow and "workflow_dispatch" in workflow
