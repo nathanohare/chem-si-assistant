@@ -36,7 +36,7 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QSizePolicy, QStackedWidget,
                                QStyleOptionToolButton, QToolButton, QVBoxLayout, QWidget)
 
 from ..compile.document import CompileOptions, build
-from ..compile.qt_images import content_box, convert_to_png, image_info
+from ..compile.qt_images import content_box, convert_to_png, image_info, ink_map
 from ..compile.run import CompileError, keep_pages_until, run_typst
 from ..core.project import BUILD_DIR, Project
 
@@ -362,7 +362,7 @@ class LivePreviewPane(QWidget):
             # its pictures (every build empties its folder's assets-live/).
             source = folder / TOC_FOLDER if tuple(target) == TOC_TARGET else folder
             result = build(project, options, image_info, convert_to_png, name=LIVE_NAME,
-                           folder=source, root=root, crop=content_box)
+                           folder=source, root=root, crop=content_box, ink=ink_map)
         except PreviewUnavailable as e:
             self._show_message(str(e))
             return

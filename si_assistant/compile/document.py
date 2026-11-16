@@ -529,7 +529,7 @@ class Builder:
         # Worked out once in this build (a Builder makes one build, so nothing goes stale):
         # a compound's structure code, drawn for its block and again on each spectrum, and
         # pictures converted to PNG.
-        self._structure_codes: dict[tuple, str | None] = {}
+        self._structure_codes: dict[tuple, tuple[str, float, float] | None] = {}
         self._generic_noted: set[str] = set()   # (compounds whose generic atom is noted)
         # (structure.mol unreadable: the note said for each compound, and whether it says
         # the drawing was left out too)
@@ -543,6 +543,10 @@ class Builder:
         # Auto-crop (SPEC §13k.12.8): where each spectrum page's content is, measured by
         # the UI layer (it needs Qt) and remembered in build/crop_cache.json.
         self.crops = spectra_mod.CropCache(project)
+        # Auto placement of the structure on a spectrum (issue #1): where each spectrum
+        # page has ink, measured by the UI layer (Qt) and kept in build/ink_cache.json.
+        self.inks = spectra_mod.InkCache(project)
+        self.auto_unplaced: list[str] = []   # spectra with no blank space for the box
         self.spectra_compounds: list[Compound] = []   # compounds the Spectra section prints
         self.ref_ids = {r["id"] for r in project.references}
         self.cited = False   # any citation printed → add the References section
@@ -749,6 +753,12 @@ class Builder:
         natural size (a pasted vector picture: at the project's bond length) but no bigger
         than `max_in`, then times `scale`. Worked out once per size in a build (it is shown
         with the compound and again on each of its spectra)."""
+        found = self.structure_image_sized(compound, max_in, scale)
+        return found[0] if found else None
+
+    def structure_image_sized(self, compound: Compound, max_in, scale: float = 1.0
+                              ) -> tuple[str, float, float] | None:
+        """structure_image with its printed size: (code, width_in, height_in) or None."""
         key = (compound.id, tuple(max_in), float(scale))
         if key not in self._structure_codes:
             self._structure_codes[key] = self._structure_image(compound, max_in, scale)
@@ -802,7 +812,8 @@ class Builder:
                 "calculated m/z).")
         return atoms
 
-    def _structure_image(self, compound: Compound, max_in, scale: float) -> str | None:
+    def _structure_image(self, compound: Compound, max_in, scale: float
+                         ) -> tuple[str, float, float] | None:
         self._note_generic(compound)   # (also when its pasted picture is printed)
         picture = self.project.structure_image_path(compound)
         if picture is not None and picture.exists():
@@ -811,13 +822,13 @@ class Builder:
         if self.options.structures == "pictures" and picture is not None and picture.exists():
             img = self.image(picture, max_in, **sized)
             if img:
-                return img[0]
+                return img
         if not self.structure_readable(compound):
             # (said in the notes; its picture, if it has one, is printed instead)
             if picture is not None and picture.exists():
                 img = self.image(picture, max_in, **sized)
                 if img:
-                    return img[0]
+                    return img
             self._note_unreadable(compound, drawing_left_out=True)
             return None
         try:
@@ -829,7 +840,7 @@ class Builder:
             if picture is not None and picture.exists():  # a picture but no structure
                 img = self.image(picture, max_in, **sized)
                 if img:
-                    return img[0]
+                    return img
             if not self.project.generic_structure_atoms(compound):
                 return None
             # A generic atom (R, X, e.g. a general structure): drawn as it is, as on the
@@ -846,7 +857,7 @@ class Builder:
         svg.write_text(text, encoding="utf-8")
         self.svg_sizes[svg] = size
         img = self.image(svg, max_in, scale=scale)
-        return img[0] if img else None
+        return img or None
 
     # ------------------------------------------------------------------ pieces
 
@@ -1563,7 +1574,8 @@ class Builder:
         if crop:
             args.append("crop: (" + ", ".join(f"{v:.4f}" for v in crop) + ")")
         if eff["struct_box"]:   # (it can be left off a spectrum: "Structure + ID")
-            args += self.structure_box_args(compound, sp.item, eff)
+            args += self.structure_box_args(compound, sp.item,
+                                            self.placed(sp, eff, aspect, crop))
         if eff["spectrum_frame"]:
             args.append(f"frame: {eff['spectrum_frame_width']:g}pt + "
                         f"rgb({typst_string(eff['spectrum_frame_color'])})")
@@ -1574,6 +1586,43 @@ class Builder:
         if nucleus and self.place_label(self.spectrum_label(compound, nucleus)):
             code = f"[#metadata(none) <{self.spectrum_label(compound, nucleus)}>#{code}]"
         return code
+
+    def placed(self, sp: spectra_mod.Spectrum, eff: dict, aspect: float | None,
+               crop) -> dict:
+        """`eff` with the structure + ID box's place worked out: "auto" becomes a position
+        on blank paper (and perhaps a smaller structure), or "above" if there is none. A
+        box dragged by hand stays where it was put."""
+        if eff["struct_place"] != "auto" or ("x" in eff and "y" in eff):
+            return eff
+        style = str(self.project.settings.get("journal_style") or "ACS")
+        slot = spectra_mod.slot_size_in(style, eff["per_page"], eff["orientation"])
+        shown = spectra_mod.shown_size_in(slot, aspect, crop, header=eff["header_line"])
+        # (the table of contents preview only counts pages: no new measuring for it)
+        counting = self.options.only is not None and self.options.only[0] == "front"
+        ink = self.inks.ink(sp.path, sp.page, measure=not counting)
+        spot = None
+        if ink is not None:
+            id_text = self.report.display_id(sp.compound.id)
+            id_pt = eff["id_size"] or spectra_mod.STYLE_TEXT_PT.get(style, 11.0)
+            caption = (spectra_mod.caption_text(sp.compound, sp.item)
+                       if eff["caption"] else "")
+
+            def box_at(scale: float) -> tuple[float, float]:
+                found = self.structure_image_sized(sp.compound, spectra_mod.STRUCTURE_BOX_IN,
+                                                   scale=scale)
+                return spectra_mod.box_size_in(found[1:] if found else None, id_text, id_pt,
+                                               caption, eff["caption_size"])
+
+            spot = spectra_mod.auto_place(spectra_mod.crop_ink(ink, crop), shown, box_at,
+                                          eff["struct_scale"], eff["corner"],
+                                          eff["auto_shrink"], eff["auto_min_scale"])
+        if spot is None:
+            if not counting:
+                self.auto_unplaced.append(
+                    f"{self.report.display_id(sp.compound.id)} ({sp.item.get('file', '')}"
+                    f"{f', page {sp.page}' if sp.page else ''})")
+            return {**eff, "struct_place": "above"}
+        return {**eff, "x": spot[0], "y": spot[1], "struct_scale": spot[2]}
 
     def structure_box_args(self, compound: Compound, item: dict, eff: dict) -> list[str]:
         """The si-spectrum arguments for the structure + ID box on a spectrum."""
@@ -1588,8 +1637,10 @@ class Builder:
             caption = f"[{runs_to_typst(runs)}]"
         args = [f"structure: {structure}", f"id: [{display_id}]", f"caption: {caption}",
                 f"corner: {CORNERS[eff['corner']]}"]
-        if "x" in eff and "y" in eff:   # dragged to a place of its own
+        if "x" in eff and "y" in eff:   # dragged to a place of its own (or placed: auto)
             args.append(f"pos: ({eff['x']:.4f}, {eff['y']:.4f})")
+        elif eff["struct_place"] in spectra_mod.OUTSIDE_PLACES:
+            args.append(f"spot: {typst_string(eff['struct_place'])}")
         if eff["struct_frame"]:
             args.append(f"box-stroke: {eff['struct_frame_width']:g}pt + "
                         f"rgb({typst_string(eff['struct_frame_color'])})")
@@ -1826,16 +1877,18 @@ def page_marker(label: str) -> str:
 
 def build(project: Project, options: CompileOptions, image_info, converter=None,
           name: str = "SI", folder: Path | None = None, root: Path | None = None,
-          crop=None) -> BuildResult:
+          crop=None, ink=None) -> BuildResult:
     """Write build/<name>.typ (+ style.typ, assets/ for SI.typ or assets-<name>/ for other
     names), or into `folder` with Typst root `root` (see Builder). Returns the path, any
     warnings and whether it is empty.
     `crop(path, page) -> (left, top, right, bottom) | None` finds a spectrum page's
     content for auto-crop (supplied by the UI layer, which has Qt; without it spectra are
-    not cropped)."""
+    not cropped). `ink(path, page)` -> its ink map (core/spectra.ink_map_of), for the
+    structure's auto placement (without it, "auto" puts the structure above the spectrum)."""
     b = Builder(project, options, image_info, folder, root, name=name)
     b.converter = converter
     b.crops.detect = crop
+    b.inks.detect = ink
     b.build.mkdir(parents=True, exist_ok=True)
     if b.assets.exists():
         shutil.rmtree(b.assets, ignore_errors=True)
@@ -1850,6 +1903,14 @@ def build(project: Project, options: CompileOptions, image_info, converter=None,
     with leave_alone(project.dictionary_words()):   # words to print as written (§13k.1ai)
         source = b.document()
     b.crops.save()
+    b.inks.save()
+    if b.auto_unplaced:
+        shown = ", ".join(b.auto_unplaced[:8]) + (", …" if len(b.auto_unplaced) > 8 else "")
+        b.warnings.append(
+            f"Structure position “auto”: no blank space was big enough for the structure and "
+            f"ID on {len(b.auto_unplaced)} spectrum page(s), so they were put above the "
+            f"spectrum instead: {shown}. Tick “Shrink to fit”, choose a smaller structure "
+            "size, or place them by hand on the compound's spectra page.")
     typ = b.build / f"{name}.typ"
     typ.write_text(source, encoding="utf-8")
     return BuildResult(typ, b.warnings, b.empty, b.last_page_label)
