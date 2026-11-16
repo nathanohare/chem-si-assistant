@@ -935,7 +935,13 @@ def html_with_tables(edit, doc) -> list[Paragraph] | None:
 
 
 def table_block_from_mime(source) -> list | None:
-    """A table copied from Word or Excel (HTML table, or tab-separated text), or None."""
+    """A table copied from the table editor (with its formatting), Word or Excel (HTML
+    table, or tab-separated text), or None."""
+    from .table_editor import CELLS_MIME, block_from_cells_json
+    if source.hasFormat(CELLS_MIME):
+        block = block_from_cells_json(source.data(CELLS_MIME))
+        if block:
+            return block
     if source.hasHtml() and "<table" in source.html().lower():
         from .table_editor import block_from_html
         block = block_from_html(source.html())

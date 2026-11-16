@@ -12,11 +12,12 @@ was changed: Escape pressed twice must not throw a table away).
 from __future__ import annotations
 
 import html
+import json
 
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QMimeData, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import (QAction, QColor, QGuiApplication, QImage, QKeySequence, QTextCursor,
                            QTextDocument)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
@@ -129,6 +130,54 @@ class CellDelegate(QStyledItemDelegate):
 
 # ---------------------------------------------------------------------- pasting from Word/Excel
 
+# Cells copied in the table editor, with their stored text (formatting, links) and merges.
+CELLS_MIME = "application/x-si-assistant-cells"
+
+
+def cells_json(block: list[list[Cell | None]], n_rows: int, n_cols: int) -> bytes:
+    """A block of cells (None = covered by a merged cell) for the clipboard. Merges are cut
+    to the block; pictures are left out (they belong to the table's own folder)."""
+    rows = []
+    for r, row in enumerate(block):
+        out = []
+        for c, cell in enumerate(row):
+            if cell is None:
+                out.append(None)
+                continue
+            copy = Cell(cell.text, min(cell.colspan, n_cols - c), min(cell.rowspan, n_rows - r),
+                        cell.align)
+            out.append(copy.to_json())
+        rows.append(out)
+    return json.dumps(rows).encode("utf-8")
+
+
+def block_from_cells_json(data: bytes) -> list[list[Cell | None]] | None:
+    """The cells put on the clipboard by cells_json, or None if they can't be read."""
+    try:
+        rows = json.loads(bytes(data).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(rows, list) or not rows or not all(isinstance(r, list) for r in rows):
+        return None
+    block = [[None if x is None else Cell.from_json(x) for x in row] for row in rows]
+    return block if any(c is not None for row in block for c in row) else None
+
+
+def block_html(block: list[list[Cell | None]]) -> str:
+    """A block of cells as an HTML table (for Word, Excel), keeping sub/superscripts."""
+    rows = []
+    for row in block:
+        tds = []
+        for cell in row:
+            if cell is None:
+                continue
+            span = ((f" colspan='{cell.colspan}'" if cell.colspan > 1 else "")
+                    + (f" rowspan='{cell.rowspan}'" if cell.rowspan > 1 else ""))
+            tds.append(f"<td{span}>{markup_html(cell.text)}</td>")
+        rows.append("<tr>" + "".join(tds) + "</tr>")
+    return "<table>" + "".join(rows) + "</table>"
+
+
 def block_from_html(source: str) -> list[list[Cell | None]] | None:
     """The first table in some HTML (as Word and Excel put on the clipboard) as a block of
     cells, keeping bold/italic/super/subscript and merged cells. None if there is none."""
@@ -192,6 +241,7 @@ class TableEditorDialog(QDialog):
         if not self._table.n_cols:
             self._table.insert_column(0)
         self._loading = False
+        self._editing: tuple[int, int] | None = None   # the cell in the box under the grid
 
         intro = QLabel("Click a cell and type (its text is edited in the box under the grid, "
                        "with bold, italic, sub/superscript and @ mentions). Select several "
@@ -244,7 +294,7 @@ class TableEditorDialog(QDialog):
             act = QAction(text, self)
             act.setToolTip(tip)
             act.setData(tip)   # (the tip back, when _update_actions changes it)
-            act.triggered.connect(slot)
+            act.triggered.connect(self._finishing_word(slot))
             if key in ALIGN_NAMES:   # (shows the selected cell's alignment)
                 act.setCheckable(True)
             self.toolbar.addAction(act)
@@ -349,6 +399,9 @@ class TableEditorDialog(QDialog):
     def _fill_grid(self, select: tuple[int, int] | None = None) -> None:
         t = self._table
         t.normalize()
+        # (Rows or columns may have moved: the cell being typed in is chosen again below.)
+        self._editing = None
+        self.cell_edit.edit.forget_word()
         self._loading = True
         self.grid.clearSpans()
         self.grid.setRowCount(t.n_rows)
@@ -389,6 +442,14 @@ class TableEditorDialog(QDialog):
             self._current_changed(*t.anchor(r, c), -1, -1)
         self._update_actions()
 
+    def _finishing_word(self, slot):
+        """`slot`, after ending the word just typed in the cell (as a space would), so a
+        formula typed last is subscripted before rows or columns move."""
+        def run(*_args):
+            self.cell_edit.edit.finish_word()
+            slot()
+        return run
+
     def _current(self) -> tuple[int, int]:
         r, c = self.grid.currentRow(), self.grid.currentColumn()
         if r < 0 or c < 0:
@@ -406,7 +467,10 @@ class TableEditorDialog(QDialog):
     def _current_changed(self, row: int, col: int, _pr: int, _pc: int) -> None:
         if self._loading or row < 0 or col < 0:
             return
+        # A formula typed last in the cell being left is subscripted (into that cell).
+        self.cell_edit.edit.finish_word()
         r, c = self._table.anchor(row, col)
+        self._editing = (r, c)
         cell = self._table.rows[r][c]
         self.cell_label.setText(f"<b>Cell {_column_name(c)}{r + 1}</b>"
                                 + (" (header row)" if r < self._table.header_rows else ""))
@@ -427,7 +491,9 @@ class TableEditorDialog(QDialog):
     def _cell_text_changed(self) -> None:
         if self._loading:
             return
-        r, c = self._current()
+        r, c = self._editing or self._current()
+        if r >= self._table.n_rows or c >= self._table.n_cols:
+            return
         cell = self._table.rows[r][c]
         if cell is None:
             return
@@ -624,16 +690,25 @@ class TableEditorDialog(QDialog):
             return False
 
     def _copy_cells(self) -> None:
+        """Copy the selected cells with their formatting (subscripts, bold, links…): pasted
+        back into a table they keep it; Word and Excel get an HTML table, other programs
+        tab-separated text."""
         r0, c0, r1, c1 = self._selected_rect()
-        lines = []
+        lines, block = [], []
         for r in range(r0, r1 + 1):
-            cells = []
+            cells, row = [], []
             for c in range(c0, c1 + 1):
                 cell = self._table.rows[r][c]
                 cells.append(" ".join(p.plain_text for p in markup.parse(cell.text))
                              if cell is not None else "")
+                row.append(cell)
             lines.append("\t".join(cells))
-        QGuiApplication.clipboard().setText("\n".join(lines))
+            block.append(row)
+        data = QMimeData()
+        data.setText("\n".join(lines))
+        data.setHtml(block_html(block))
+        data.setData(CELLS_MIME, cells_json(block, r1 - r0 + 1, c1 - c0 + 1))
+        QGuiApplication.clipboard().setMimeData(data)
 
     def _clear_cells(self) -> None:
         r0, c0, r1, c1 = self._selected_rect()
@@ -689,9 +764,11 @@ class TableEditorDialog(QDialog):
         elif obj is self.cell_edit.edit:
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
                     mods & Qt.KeyboardModifier.ShiftModifier):
+                self.cell_edit.edit.finish_word()
                 self._move(1, 0)   # Enter: the cell below (Shift+Enter: a new line)
                 return True
             if key == Qt.Key.Key_Tab:
+                self.cell_edit.edit.finish_word()
                 self._move(0, 1)
                 return True
             if key == Qt.Key.Key_Escape:
@@ -710,6 +787,10 @@ class TableEditorDialog(QDialog):
         if self._state() != self._start:
             return True
         return self._new and not self._table.is_empty()
+
+    def accept(self) -> None:
+        self.cell_edit.edit.finish_word()   # ("K2CO3" typed last, then OK)
+        super().accept()
 
     def reject(self) -> None:
         if self.has_changes() and QMessageBox.question(

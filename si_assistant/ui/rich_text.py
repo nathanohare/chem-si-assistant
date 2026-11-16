@@ -730,6 +730,10 @@ class RichTextEdit(QTextEdit):
         self.document().documentLayout().registerHandler(LINK_OBJECT, self._chip)
         self.currentCharFormatChanged.connect(self._leave_link_format)
         self._fixing_format = False
+        # The Chemical formula toggle subscripts a formula when a key ends the word after
+        # it. True while the last key typed was part of a word (no space or punctuation
+        # after it yet): leaving the box then ends the word (finish_word).
+        self._word_open = False
         self.document().blockCountChanged.connect(self._blocks_changed)
         # Red (spelling) and blue (chemistry formatting) underlines, SPEC §13k.1. They only
         # change how the text looks, never the stored markup.
@@ -756,6 +760,7 @@ class RichTextEdit(QTextEdit):
     def set_markup(self, text: str) -> None:
         doc = self.document()
         doc.setUndoRedoEnabled(False)
+        self._word_open = False
         self.chip_labels = {}   # (the chips made now have the current labels)
         self.checks.setDocument(None)   # underline once at the end, not after every run
         doc.clear()
@@ -911,6 +916,37 @@ class RichTextEdit(QTextEdit):
             self._normalise_alignment()   # (Enter under a caption: a line of plain text)
         if word_end is not None:
             text_checks.subscript_formula(self.document(), word_end)
+        text = event.text()
+        self._word_open = (len(text) == 1 and text.isprintable()
+                           and text not in text_checks.WORD_ENDS and not self.isReadOnly()
+                           and not event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+    def finish_word(self) -> bool:
+        """End the word just typed as a space would (the Chemical formula toggle, SPEC
+        §13k.1b): when the box is left with Enter or Tab in a table, a click elsewhere or
+        OK, "K2CO3" typed last is subscripted too. True if anything changed."""
+        if not self._word_open:
+            return False
+        self._word_open = False
+        cursor = self.textCursor()
+        if (self.isReadOnly() or cursor.hasSelection() or not text_checks.checks().formula_on):
+            return False
+        return text_checks.subscript_formula(self.document(), cursor.position())
+
+    def forget_word(self) -> None:
+        """The text was changed around the word (e.g. its table cell moved): leave it."""
+        self._word_open = False
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self._word_open = False   # (the cursor moves away from the word)
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        # Not for a menu or another window coming up (the user comes back to the word).
+        if event.reason() in (Qt.FocusReason.MouseFocusReason, Qt.FocusReason.TabFocusReason,
+                              Qt.FocusReason.BacktabFocusReason):
+            self.finish_word()
+        super().focusOutEvent(event)
 
     def _formula_word_end(self, event) -> int | None:
         """The Chemical formula toggle (SPEC §13k.1b): when this key ends a word (space,
