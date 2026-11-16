@@ -451,6 +451,11 @@ polymer or another structure that has no single formula, you can also paste its 
 
 ### Names: paste from ChemDraw, or look them up in PubChem
 
+When the SI is compiled, the name's conventional italics are added for you: *N*-, *N*,*N*-,
+*O*-, *S*-, *tert*-, *sec*-, *cis*/*trans*, (*E*)/(*Z*), (*R*)/(*S*) and *o*-/*m*-/*p*-. To
+choose the italics yourself, put them between asterisks in the name (for example
+`1-Benzyl-*cis*-2-methyl…`); a name with asterisks is printed exactly as typed.
+
 Type or paste the name into the **Name** field (in ChemDraw: Structure ▸ Convert Structure
 to Name, then copy). For a compound that is already published, **Look up name (PubChem)**
 next to the box fills in its IUPAC name from PubChem:

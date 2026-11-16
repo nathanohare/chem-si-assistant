@@ -6,6 +6,9 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Italic prefixes in compound names.** The compiled SI prints the conventional italics in
+  compound names: *N*-, *N*,*N*-, *O*-, *S*-, *tert*-, *sec*-, *cis*/*trans*, (*E*)/(*Z*),
+  (*R*)/(*S*) and *o*-/*m*-/*p*-. Typing *…* in a name chooses the italics by hand instead.
 - **Pictures in table cells.** A table cell can now hold a structure or picture, printed
   above its text: a list of ligands drawn with their names, or a reaction scheme in a
   merged cell across the top of an optimisation table (the scheme and the data then print
