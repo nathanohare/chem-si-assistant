@@ -22,6 +22,20 @@ program's update check shows.)
   use these print exactly as before.
 - **Show formatting marks.** A **¶** button in every text box (and View ▸ Show
   formatting marks) shows paragraph marks, line breaks, spaces and tabs. Off by default.
+- **Structure on spectra: above, beside or in blank space** (issue #1). Spectra section ▸
+  Position: the structure and ID can now go **above** or **beside** each spectrum (the
+  spectrum is made a little smaller, so nothing is covered), or **in blank space (auto)**:
+  placed over the spectrum only where the paper is white, nearest the chosen corner, and
+  optionally made smaller to fit, down to a size you choose. Each spectrum can be set
+  differently on its compound's spectra page, which shows where the box will print.
+- **Two spectra per page** for new projects (issue #1). Existing projects keep their setting.
+- **Formulas in table cells** (issue #2): with H₂ on, "K2CO3" typed alone in a cell is now
+  subscripted when you press Enter or Tab or click another cell (before, only a space or
+  punctuation after it did). Copying table cells keeps their sub- and superscripts, bold
+  and italics.
+- **Figures without a number or caption** (issue #3): right-click a figure in a custom
+  section ▸ **Print without number and caption** prints just the picture; the other figures
+  are numbered as if it were not there.
 - **Heading numbers.** Project settings ▸ Output ▸ **Heading numbers**: as the journal
   style does, an **outline** (sections 1, 2, 3; the next level A, B, C; then a, b, c),
   1, 1.1, 1.1.1, or none, in any style. The outline and 1.1.1 also number the headings

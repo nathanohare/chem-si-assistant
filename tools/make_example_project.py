@@ -636,7 +636,7 @@ def build_project(parent: Path, work: Path):
     # spectrum already gives the nucleus, frequency and solvent.
     p.ensure_spectra_section()
     p.set_spectra_defaults({**p.spectra_defaults(), "orientation": "landscape",
-                            "caption": False, "nmr_links": True, "link_back": True})
+                            "per_page": 1, "caption": False, "nmr_links": True, "link_back": True})
 
     made[ACETATE['id']] = acetate
     dismiss_expected(p, made)
