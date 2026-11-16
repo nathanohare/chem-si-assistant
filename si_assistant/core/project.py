@@ -2351,6 +2351,15 @@ class Project:
                         e["file"] = new.relative_to(o.folder).as_posix()
                         self._set_figure_entry(o, f, e)
                     yield path, self.figure_source(owner, figure_id), figure_moved
+        for owner in self.text_owners():   # pictures in table cells (core/tables.py)
+            for table_id in self.table_ids(owner):
+                table = self.read_table(owner, table_id)
+                for image in dict.fromkeys(table.pictures() if table is not None else []):
+                    path = self.table_picture_path(owner, image)
+                    if path is not None and path.exists():
+                        def cell_moved(new, o=owner, t=table_id, old=image):
+                            self._table_picture_moved(o, t, old, new)
+                        yield path, picture_source_path(path), cell_moved
         for section in self.sections:   # pictures pasted into Attachment sections
             source = self.section_file_source(section) if section.type == "file" else None
             if source is not None:     # (attached picture files are the user's own: left out)
@@ -3756,6 +3765,53 @@ class Project:
         path = self.table_path(owner, table.id)
         fileio.make_dirs(path.parent)
         atomic_write_json(path, table.to_json())
+
+    def table_ids(self, owner: TextOwner) -> list[str]:
+        """The IDs of the tables stored for `owner` (whether or not still in its text)."""
+        folder = owner.folder / TABLES_DIR
+        try:
+            return sorted(p.stem for p in folder.glob("*.json") if p.is_file())
+        except OSError:
+            return []
+
+    def table_picture_path(self, owner: TextOwner, image: str) -> Path | None:
+        """A table cell's picture ("images/x.svg", relative to the owner's folder) as a
+        path; None for anything that would point outside the owner's folder (a hand-edited
+        file)."""
+        if not image:
+            return None
+        path = (owner.folder / image).resolve()
+        try:
+            path.relative_to(owner.folder.resolve())
+        except ValueError:
+            return None
+        return path
+
+    def add_table_picture(self, owner: TextOwner, source: Path | None = None,
+                          data: bytes | None = None, ext: str = ".png",
+                          vector: bytes | Path | None = None, vector_ext: str = "") -> str:
+        """Store a picture for a table cell (a file, or pasted PNG/SVG bytes with ChemDraw's
+        vector original) in the owner's images/ folder, next to its figures; returns its
+        path relative to the owner's folder, for the cell's "image" (core/tables.py). As for
+        figures, pass `vector` only for a picture really drawn from it."""
+        self._check_writable()
+        source, ext = self._check_picture(source, ext, FIGURE_EXTENSIONS)
+        folder = owner.folder / SECTION_IMAGES_DIR
+        fileio.make_dirs(folder)
+        stem = slugify(Path(source).stem, 30) if source is not None else "table-picture"
+        dest = self._write_picture(folder, stem, source, data, ext, vector, vector_ext)
+        return f"{SECTION_IMAGES_DIR}/{dest.name}"
+
+    def _table_picture_moved(self, owner: TextOwner, table_id: str, old: str, new: Path) -> None:
+        """A table cell's picture re-rendered under another name (e.g. .png → .svg)."""
+        table = self.read_table(owner, table_id)
+        if table is None:
+            return
+        rel = new.relative_to(owner.folder).as_posix()
+        for _r, _c, cell in table.cells():
+            if cell.image == old:
+                cell.image = rel
+        self.write_table(owner, table)
 
     def add_table(self, owner: TextOwner, table: Table | None = None) -> str:
         """Store a new table (empty 3 × 3 if none is given); returns its ID."""

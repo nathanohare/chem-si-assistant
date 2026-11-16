@@ -564,7 +564,25 @@ You can switch between chart types (bars, pie/donut) and change the status colou
   - merged cells and header rows;
   - footnotes under the table;
   - pasting a table from Word or Excel.
-- Structures inside tables are left for a later dedicated table editor.
+- Structures inside tables are left for a later dedicated table editor. *(Now built as
+  pictures in table cells: see "Pictures in table cells" below.)*
+- *Pictures in table cells (as built):* a cell can hold one picture, printed above its text
+  (e.g. a ligand's structure with its name under it, or a reaction scheme in a merged cell
+  across the top of an optimisation table, so the scheme and the data print together under
+  the table's one "Table S…" caption). Stored in the cell's JSON as `"image":
+  "images/x.svg"` (relative to the owner's folder, the file in `images/` next to the
+  figures) and an optional `"image_width"` in cm (absent = the picture's own size, shrunk
+  to the text width; every automatic size can be typed over, §2.7). **Table editor:**
+  **Paste picture** (from the clipboard: a ChemDraw drawing is kept as a vector picture
+  with its original, as for figures, so **Re-render pasted pictures** redraws it too),
+  **Picture…** (a file), **Remove picture**, and a **Picture width** box for the selected
+  cell; Ctrl+V on the grid pastes a picture into the selected cell when the clipboard holds
+  a picture and no text or table. The grid shows a small copy of the picture above the
+  cell's text; the text's own table preview marks such cells "[picture]". Merging keeps the
+  first picture among the merged cells; splitting leaves it in the top-left cell. A missing
+  picture is left out with a warning. A table's pictures stay in `images/` when the table
+  is removed (as removed figures' pictures go to the Trash, these stay put: a cell's
+  picture may be shared by a copied table). X-ray crystal data tables cannot hold pictures.
 - *As built (sections):*
   - project.json stores `"section_tree": [{"id", "children": [...]}]`. Projects with the old flat `"section_order"` open unchanged and are converted when next saved.
   - If a sub-section was saved somewhere it isn't allowed (inside a File/Data section, or a 4th level), it is moved up to sit after its parent, so nothing is lost.

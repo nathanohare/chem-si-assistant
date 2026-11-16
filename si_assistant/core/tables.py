@@ -14,6 +14,16 @@ A table is a paragraph "!table{t-1a2b3c} Caption" in the text; its cells are sto
      "breakable": true}                 optional: may run over a page break even when it
                                         would fit on the next page (see `breakable` below)
 
+A cell may also hold a picture, printed above its text: a structure or scheme pasted from
+ChemDraw, or a picture file (e.g. a ligand drawn with its name under it, or a reaction
+scheme in a merged cell across the top of an optimisation table):
+
+    {"text": "(R)-BINAP", "image": "images/table-picture.svg", "image_width": 3.5}
+
+"image" is the picture's file, relative to the folder that holds tables/ (it is stored in
+images/ next to the figures); "image_width" (cm, optional) is a printed width typed for it
+("" / absent = the picture's own size, shrunk to fit the text width).
+
 Cell texts and footnotes use the stored text format (core/markup.py): bold, italic,
 super/subscript, compound mentions and citations. This module has no Qt code, so every
 change to the grid (adding, deleting, merging cells) can be unit-tested.
@@ -44,6 +54,8 @@ class Cell:
     colspan: int = 1
     rowspan: int = 1
     align: str = ""         # "" = the column's alignment
+    image: str = ""         # a picture printed above the text ("" = none), e.g. "images/x.svg"
+    image_width: float | None = None   # its printed width in cm (None = its own size)
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"text": self.text}
@@ -53,7 +65,15 @@ class Cell:
             out["rowspan"] = self.rowspan
         if self.align in ALIGNS:
             out["align"] = self.align
+        if self.image:
+            out["image"] = self.image
+            if self.image_width:
+                out["image_width"] = self.image_width
         return out
+
+    def is_blank(self) -> bool:
+        """No text and no picture."""
+        return not self.text.strip() and not self.image
 
     @classmethod
     def from_json(cls, data: Any) -> "Cell":
@@ -63,8 +83,11 @@ class Cell:
             return cls()
         align = str(data.get("align", ""))
         text = data.get("text")
+        image = data.get("image")
+        image = image.strip() if isinstance(image, str) else ""
         return cls("" if text is None else str(text), _span(data.get("colspan"), MAX_COLS),
-                   _span(data.get("rowspan"), MAX_ROWS), align if align in ALIGNS else "")
+                   _span(data.get("rowspan"), MAX_ROWS), align if align in ALIGNS else "",
+                   image, _width(data.get("image_width")) if image else None)
 
 
 def _span(value: Any, limit: int) -> int:
@@ -72,6 +95,15 @@ def _span(value: Any, limit: int) -> int:
         return max(1, min(limit, int(value)))
     except (TypeError, ValueError, OverflowError):   # (e.g. Infinity typed into the file)
         return 1
+
+
+def _width(value: Any) -> float | None:
+    """A printed width in cm read from a file: a positive number, else None (own size)."""
+    try:
+        width = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return round(width, 2) if 0 < width < 1000 else None
 
 
 def _list(value: Any) -> list:
@@ -193,7 +225,11 @@ class Table:
                     yield r, c, cell
 
     def is_empty(self) -> bool:
-        return not any(cell.text.strip() for _r, _c, cell in self.cells())
+        return all(cell.is_blank() for _r, _c, cell in self.cells())
+
+    def pictures(self) -> list[str]:
+        """The picture files of the cells (as stored, e.g. "images/x.svg"), in order."""
+        return [cell.image for _r, _c, cell in self.cells() if cell.image]
 
     # ------------------------------------------------------------------ rows and columns
 
@@ -302,18 +338,20 @@ class Table:
             return False
         texts = [cell.text for r, c, cell in self.cells()
                  if r0 <= r <= r1 and c0 <= c <= c1 and cell.text.strip()]
+        picture = next(((cell.image, cell.image_width) for r, c, cell in self.cells()
+                        if r0 <= r <= r1 and c0 <= c <= c1 and cell.image), ("", None))
         first = self.rows[r0][c0]
         for r in range(r0, r1 + 1):
             for c in range(c0, c1 + 1):
                 self.rows[r][c] = None
         self.rows[r0][c0] = Cell(" ".join(texts), c1 - c0 + 1, r1 - r0 + 1,
-                                 first.align if first is not None else "")
+                                 first.align if first is not None else "", *picture)
         self.normalize()
         return True
 
     def split(self, r: int, c: int) -> bool:
         """Undo a merge: the merged cell covering (r, c) becomes separate cells again (its
-        text stays in the top-left one)."""
+        text and picture stay in the top-left one)."""
         ar, ac = self.anchor(r, c)
         cell = self.rows[ar][ac]
         if cell.rowspan == 1 and cell.colspan == 1:

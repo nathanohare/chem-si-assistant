@@ -1005,16 +1005,18 @@ class Builder:
             self.warnings.append(f"{where}: a table could not be found or is empty "
                                  f"(tables/{table_id}.json); left out.")
             return ""
-        return self.table_figure(table, label, caption, where)
+        return self.table_figure(table, label, caption, where, owner.folder)
 
-    def table_figure(self, table: Table, label: str, caption: list[Run], where: str) -> str:
+    def table_figure(self, table: Table, label: str, caption: list[Run], where: str,
+                     folder: Path | None = None) -> str:
         """A table given as such (e.g. an X-ray structure's crystal data, §13v) as a figure."""
         self.kinds["table"] += 1
         # The style keeps a table whole (moving it to the next page) unless it is taller than
         # a page or the table editor's "may run over a page break" is ticked (`breakable`); then
         # it continues on the next page with its header rows repeated.
         split = ", split: true" if table.breakable else ""
-        return (f"#si-table({self.table_code(table, where)}, {self.notes_code(table, where)}, "
+        return (f"#si-table({self.table_code(table, where, folder)}, "
+                f"{self.notes_code(table, where)}, "
                 f"[{runs_to_typst([Run(label or 'Table')])}], {self.caption_code(caption)}"
                 f"{split})")
 
@@ -1023,7 +1025,32 @@ class Builder:
         notes = [n for n in notes if n]
         return "[" + "#linebreak()".join(notes) + "]" if notes else "none"
 
-    def table_code(self, table: Table, where: str) -> str:
+    def cell_picture(self, cell, folder: Path | None, where: str) -> str:
+        """A table cell's picture (core/tables.py) as Typst image(...), at its own size (or
+        the width typed for it), never wider than the text; "" if it has none or it is
+        missing (with a warning)."""
+        if not cell.image:
+            return ""
+        path = None
+        if folder is not None:
+            path = (folder / cell.image).resolve()
+            try:
+                path.relative_to(folder.resolve())
+            except ValueError:   # (a hand-edited file pointing elsewhere)
+                path = None
+        if path is None or not path.exists():
+            self.warnings.append(f"{where}: a picture in a table cell is no longer in the "
+                                 f"project ({cell.image}); left out.")
+            return ""
+        if cell.image_width:
+            width = round(min(TEXT_WIDTH_IN, cell.image_width / CM_PER_IN), 3)
+            img = self.image(path, (width, 9.0), natural=False)
+        else:
+            img = self.image(path, (TEXT_WIDTH_IN, 7.0))
+        return img[0] if img else ""
+
+    def table_code(self, table: Table, where: str, folder: Path | None = None) -> str:
+        """The Typst table. `folder` holds the cells' pictures (the owner's folder)."""
         t = table.copy()
         header = t.header_rows
         for r, _c, cell in t.cells():   # a header cell cannot reach below the header
@@ -1039,7 +1066,11 @@ class Builder:
                 args.append(f"rowspan: {cell.rowspan}")
             if cell.align:
                 args.append(f"align: {cell.align} + horizon")
-            body = f"[{self.cell_text(cell.text, where)}]"
+            text = self.cell_text(cell.text, where)
+            picture = self.cell_picture(cell, folder, where)
+            if picture:   # the picture above the text (e.g. a structure with its name)
+                text = f"#{picture}" + (f"#linebreak(){text}" if text else "")
+            body = f"[{text}]"
             return f"table.cell({', '.join(args)}){body}" if args else body
 
         head = [cell_code(cell) for r, _c, cell in t.cells() if r < header]

@@ -4,6 +4,15 @@ What changed in each version of Chem SI Assistant. The newest version is at the 
 (The release workflow copies a version's section into its GitHub Release notes, which the
 program's update check shows.)
 
+## [Unreleased]
+
+- **Pictures in table cells.** A table cell can now hold a structure or picture, printed
+  above its text: a list of ligands drawn with their names, or a reaction scheme in a
+  merged cell across the top of an optimisation table (the scheme and the data then print
+  together under one "Table S…" caption). In the table editor: **Paste picture** (or
+  Ctrl+V on the grid) for a structure copied from ChemDraw, **Picture…** for a file,
+  **Picture width** and **Remove picture**.
+
 ## [1.3.0] - 2026-10-14
 
 - **A new look**, matched to Chem Illustrator: a light grey-blue window with white panels,

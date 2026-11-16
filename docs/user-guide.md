@@ -315,6 +315,14 @@ You can also simply paste a picture, a ChemDraw drawing or a table copied from W
 Excel. Type the caption on the line under it. Right-click a figure or table to change it
 (edit table, label, printed size, replace picture…).
 
+A table cell can also hold a picture, printed above the cell's text: for example a list of
+ligands, each drawn with its name under it, or a reaction scheme in a merged cell across
+the top of an optimisation table (so the scheme and the results print together under one
+"Table S…" caption). In the table editor, select the cell and click **Paste picture** (or
+press Ctrl+V on the grid) after copying a structure in ChemDraw, or **Picture…** for a
+picture file. **Picture width** sets how wide it prints (“own size” prints it as drawn);
+**Remove picture** takes it out again.
+
 You don't have to format chemistry by hand. "1H NMR", "CDCl3" and "J = 7.2 Hz" are fine as
 typed; the compiled SI formats them (¹H NMR, CDCl₃, *J*). A blue underline marks formatting
 the program can fix for you (see [Error checks and warnings](#error-checks-and-warnings)).

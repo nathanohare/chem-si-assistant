@@ -3,7 +3,8 @@ selected cell's text (bold, italic, super/subscript, mentions, citations).
 
 Rows and columns can be added and deleted, cells merged and split, header rows chosen
 (ruled off and repeated after a page break), each column or cell aligned, footnotes added,
-and a table pasted from Word or Excel. The table itself is core/tables.Table; this dialog
+and a table pasted from Word or Excel. A cell can also hold a picture (a structure or
+scheme pasted from ChemDraw, or a picture file), printed above its text. The table itself is core/tables.Table; this dialog
 only edits a copy of it, so Cancel leaves everything as it was (after asking, if anything
 was changed: Escape pressed twice must not throw a table away).
 """
@@ -12,11 +13,15 @@ from __future__ import annotations
 
 import html
 
-from PySide6.QtCore import QEvent, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QGuiApplication, QKeySequence, QTextCursor, QTextDocument
+from pathlib import Path
+from typing import Callable
+
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
+from PySide6.QtGui import (QAction, QColor, QGuiApplication, QImage, QKeySequence, QTextCursor,
+                           QTextDocument)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
-                               QFormLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-                               QMessageBox, QSpinBox, QStyle,
+                               QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
+                               QLineEdit, QMessageBox, QSpinBox, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
                                QTableWidgetItem, QToolBar, QVBoxLayout, QWidget)
 
@@ -29,6 +34,8 @@ from .structure_widgets import paste_key
 
 TEXT_ROLE = Qt.ItemDataRole.UserRole          # the cell's stored text
 ALIGN_ROLE = Qt.ItemDataRole.UserRole + 1     # "left" / "center" / "right"
+IMAGE_ROLE = Qt.ItemDataRole.UserRole + 2     # the cell's picture ("images/x.svg") or ""
+THUMB_HEIGHT = 90                             # pixels: a cell's picture in the grid
 ALIGN_NAMES = {"left": "Left", "center": "Centre", "right": "Right"}
 
 
@@ -79,6 +86,13 @@ class CellDelegate(QStyledItemDelegate):
         doc.setTextWidth(max(20.0, width))
         return doc
 
+    def _thumb_size(self, image: QImage, width: float) -> QSize:
+        """The picture's size in the grid: at most THUMB_HEIGHT high and the cell wide."""
+        if image.isNull() or not image.height():
+            return QSize(0, 0)
+        scale = min(1.0, THUMB_HEIGHT / image.height(), max(20.0, width) / image.width())
+        return QSize(max(1, int(image.width() * scale)), max(1, int(image.height() * scale)))
+
     def paint(self, painter, option, index) -> None:
         opt = QStyleOptionViewItem(option)
         self.initStyleOption(opt, index)
@@ -86,17 +100,28 @@ class CellDelegate(QStyledItemDelegate):
         style = opt.widget.style() if opt.widget else QGuiApplication.style()
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
         doc = self._doc(index, opt.rect.width() - 6)
-        painter.save()
-        top = opt.rect.top() + max(0.0, (opt.rect.height() - doc.size().height()) / 2)
-        painter.translate(opt.rect.left() + 3, top)
-        doc.drawContents(painter)
-        painter.restore()
+        image = self.dialog.thumbnail(index.data(IMAGE_ROLE) or "")
+        thumb = self._thumb_size(image, opt.rect.width() - 6)
+        has_text = bool((index.data(TEXT_ROLE) or "").strip())
+        height = thumb.height() + (doc.size().height() if has_text else 0)
+        top = opt.rect.top() + max(0.0, (opt.rect.height() - height) / 2)
+        if not thumb.isEmpty():   # the picture above the text, centred like the PDF's
+            left = opt.rect.left() + (opt.rect.width() - thumb.width()) // 2
+            painter.drawImage(QRect(left, int(top), thumb.width(), thumb.height()), image)
+            top += thumb.height()
+        if has_text or thumb.isEmpty():
+            painter.save()
+            painter.translate(opt.rect.left() + 3, top)
+            doc.drawContents(painter)
+            painter.restore()
 
     def sizeHint(self, option, index) -> QSize:  # noqa: N802
         # (Before the grid is laid out its columns have no width yet.)
         width = max(self.dialog.grid.columnWidth(index.column()), 120)
         doc = self._doc(index, width - 6)
-        return QSize(int(doc.idealWidth()) + 10, int(doc.size().height()) + 6)
+        thumb = self._thumb_size(self.dialog.thumbnail(index.data(IMAGE_ROLE) or ""), width - 6)
+        return QSize(max(int(doc.idealWidth()), thumb.width()) + 10,
+                     int(doc.size().height()) + thumb.height() + 6)
 
     def createEditor(self, parent, option, index):  # noqa: N802
         return None
@@ -149,8 +174,13 @@ def block_from_qtable(doc: QTextDocument, found) -> list[list[Cell | None]] | No
 
 class TableEditorDialog(QDialog):
     def __init__(self, table: Table, caption: str = "", auto_label: str = "",
-                 parent: QWidget | None = None, new: bool = False):
+                 parent: QWidget | None = None, new: bool = False,
+                 pictures: "CellPictures | None" = None):
         super().__init__(parent)
+        # Where the cells' pictures are kept, and how new ones are stored (None: this table
+        # cannot hold pictures, e.g. an X-ray structure's crystal data).
+        self.pictures = pictures
+        self._thumbs: dict[str, QImage] = {}
         self.setWindowTitle("New table" if new else "Edit table")
         self.resize(940, 760)
         self._table = table.copy()
@@ -166,7 +196,9 @@ class TableEditorDialog(QDialog):
         intro = QLabel("Click a cell and type (its text is edited in the box under the grid, "
                        "with bold, italic, sub/superscript and @ mentions). Select several "
                        f"cells to merge them. {paste_key()} pastes a table copied from Word "
-                       "or Excel.")
+                       "or Excel"
+                       + (", or a structure copied from ChemDraw into the selected cell "
+                          "(printed above its text)." if pictures is not None else "."))
         intro.setWordWrap(True)
         intro.setStyleSheet("color: palette(placeholder-text);")
 
@@ -196,7 +228,16 @@ class TableEditorDialog(QDialog):
                  lambda: self._align("right")),
                 (None, None, None, None),
                 ("paste", "Paste table", "Paste a table copied from Word or Excel at the "
-                 "selected cell (the table grows as needed)", self.paste_table)):
+                 "selected cell (the table grows as needed)", self.paste_table),
+                *(((None, None, None, None),
+                   ("picture_paste", "Paste picture", "Put the structure or picture on the "
+                    "clipboard (e.g. copied from ChemDraw) into the selected cell, above its "
+                    "text", self.paste_picture),
+                   ("picture_file", "Picture…", "Put a picture file into the selected cell, "
+                    "above its text", self.choose_picture),
+                   ("picture_remove", "Remove picture", "Take the picture out of the selected "
+                    "cell (its text stays)", self.remove_picture))
+                  if pictures is not None else ())):
             if key is None:
                 self.toolbar.addSeparator()
                 continue
@@ -228,6 +269,23 @@ class TableEditorDialog(QDialog):
         self.cell_edit.changed.connect(self._cell_text_changed)
         self.cell_edit.edit.installEventFilter(self)
         self.cell_label = QLabel()
+        # The selected cell's picture: its printed width (0 = its own size).
+        self.picture_width = QDoubleSpinBox()
+        self.picture_width.setRange(0, 50)
+        self.picture_width.setDecimals(1)
+        self.picture_width.setSingleStep(0.5)
+        self.picture_width.setSuffix(" cm")
+        self.picture_width.setSpecialValueText("own size")
+        self.picture_width.setToolTip("How wide the selected cell's picture is printed. "
+                                      "“Own size” prints it as drawn (pasted ChemDraw "
+                                      "structures at your bond length), shrunk only if it is "
+                                      "wider than the text.")
+        self.picture_width.valueChanged.connect(self._picture_width_changed)
+        self.picture_width_label = QLabel("Picture width:")
+        cell_row = QHBoxLayout()
+        cell_row.addWidget(self.cell_label, 1)
+        cell_row.addWidget(self.picture_width_label)
+        cell_row.addWidget(self.picture_width)
 
         self.header_rows = QSpinBox()
         self.header_rows.setRange(0, 10)
@@ -276,7 +334,7 @@ class TableEditorDialog(QDialog):
         layout.addWidget(intro)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.grid, 1)
-        layout.addWidget(self.cell_label)
+        layout.addLayout(cell_row)
         layout.addWidget(self.cell_edit)
         layout.addLayout(form)
         layout.addWidget(buttons)
@@ -312,6 +370,7 @@ class TableEditorDialog(QDialog):
                 if cell is not None:
                     item.setData(TEXT_ROLE, cell.text)
                     item.setData(ALIGN_ROLE, cell.align or t.columns[c])
+                    item.setData(IMAGE_ROLE, cell.image)
                     if r < t.header_rows:
                         item.setBackground(header_fill)
                 self.grid.setItem(r, c, item)
@@ -354,7 +413,16 @@ class TableEditorDialog(QDialog):
         self.cell_edit.blockSignals(True)
         self.cell_edit.set_markup(cell.text if cell is not None else "")
         self.cell_edit.blockSignals(False)
+        self._show_picture_width(cell)
         self._update_actions()
+
+    def _show_picture_width(self, cell: Cell | None) -> None:
+        has = cell is not None and bool(cell.image)
+        self.picture_width.blockSignals(True)
+        self.picture_width.setValue((cell.image_width or 0) if has else 0)
+        self.picture_width.blockSignals(False)
+        self.picture_width.setVisible(has)
+        self.picture_width_label.setVisible(has)
 
     def _cell_text_changed(self) -> None:
         if self._loading:
@@ -376,6 +444,8 @@ class TableEditorDialog(QDialog):
         cell = self._table.rows[r][c] if self._table.n_rows else None
         self.actions_["split"].setEnabled(cell is not None and (cell.rowspan > 1
                                                                 or cell.colspan > 1))
+        if "picture_remove" in self.actions_:
+            self.actions_["picture_remove"].setEnabled(cell is not None and bool(cell.image))
         self.actions_["del_rows"].setEnabled(self._table.n_rows > 1)
         self.actions_["del_cols"].setEnabled(self._table.n_cols > 1)
         # (a table has at most MAX_ROWS x MAX_COLS: core/tables.py)
@@ -471,6 +541,88 @@ class TableEditorDialog(QDialog):
         self._fill_grid((r, c))
         warn_left_out(self, left_out)
 
+    # ---- pictures in cells
+
+    def thumbnail(self, image: str) -> QImage:
+        """A cell's picture for the grid (null if it has none or it cannot be read)."""
+        if not image or self.pictures is None:
+            return QImage()
+        hit = self._thumbs.get(image)
+        if hit is None:
+            from ..compile.qt_images import read_image
+            try:
+                hit = read_image(self.pictures.folder / image, 400)
+            except Exception:  # noqa: BLE001 — an unreadable picture just isn't shown
+                hit = QImage()
+            self._thumbs[image] = hit
+        return hit
+
+    def _set_picture(self, image: str) -> None:
+        r, c = self._current()
+        cell = self._table.rows[r][c]
+        if cell is None:
+            return
+        if cell.image != image:
+            cell.image, cell.image_width = image, None
+        self._fill_grid((r, c))
+
+    def _store_picture(self, store: Callable[[], str | None]) -> None:
+        try:
+            image = store()
+        except Exception as e:  # noqa: BLE001 — report, never lose the table being edited
+            QMessageBox.warning(self, "Could not add the picture", str(e))
+            return
+        if image:
+            self._set_picture(image)
+
+    def paste_picture(self) -> bool:
+        """The clipboard's picture into the selected cell; False if there was none."""
+        if self.pictures is None:
+            return False
+        found: list[bool] = []
+
+        def store() -> str | None:
+            image = self.pictures.paste()
+            found.append(image is not None)
+            if image is None:
+                QMessageBox.information(self, "Paste picture", "There is no picture on the "
+                                        "clipboard. Copy a structure in ChemDraw (or a "
+                                        "picture) first.")
+            return image
+        self._store_picture(store)
+        return bool(found and found[0])
+
+    def choose_picture(self) -> None:
+        if self.pictures is None:
+            return
+        from .text_objects import choose_figure_file
+        path = choose_figure_file(self)
+        if path is not None:
+            self._store_picture(lambda: self.pictures.from_file(path))
+
+    def remove_picture(self) -> None:
+        self._set_picture("")
+
+    def _picture_width_changed(self, value: float) -> None:
+        r, c = self._current()
+        cell = self._table.rows[r][c]
+        if cell is not None and cell.image:
+            cell.image_width = round(value, 2) if value > 0 else None
+
+    def _clipboard_has_only_picture(self) -> bool:
+        """A picture on the clipboard and no table or text (Ctrl+V then pastes it into the
+        selected cell rather than as a table)."""
+        data = QGuiApplication.clipboard().mimeData()
+        if data is None or (data.hasText() and data.text().strip()) or data.hasHtml():
+            return False
+        if data.hasImage() or any("pdf" in f.lower() for f in data.formats()):
+            return True
+        from . import clipboard_image
+        try:
+            return clipboard_image.clipboard_has_vector()
+        except Exception:  # noqa: BLE001
+            return False
+
     def _copy_cells(self) -> None:
         r0, c0, r1, c1 = self._selected_rect()
         lines = []
@@ -507,7 +659,10 @@ class TableEditorDialog(QDialog):
         key, mods = event.key(), event.modifiers()
         if obj is self.grid:
             if event.matches(QKeySequence.StandardKey.Paste):
-                self.paste_table()
+                if self.pictures is not None and self._clipboard_has_only_picture():
+                    self.paste_picture()
+                else:
+                    self.paste_table()
                 return True
             if event.matches(QKeySequence.StandardKey.Copy):
                 self._copy_cells()
@@ -554,7 +709,7 @@ class TableEditorDialog(QDialog):
         pasted from Word)."""
         if self._state() != self._start:
             return True
-        return self._new and any(cell.text.strip() for _r, _c, cell in self._table.cells())
+        return self._new and not self._table.is_empty()
 
     def reject(self) -> None:
         if self.has_changes() and QMessageBox.question(
@@ -602,3 +757,33 @@ def _column_name(c: int) -> str:
 def _range(r0: int, c0: int, r1: int, c1: int):
     from PySide6.QtWidgets import QTableWidgetSelectionRange
     return QTableWidgetSelectionRange(r0, c0, r1, c1)
+
+
+class CellPictures:
+    """Where a table's cell pictures are kept (`folder`, which the cells' "image" paths are
+    relative to) and how new ones are stored there. `store(source=…)` stores a file, and
+    `store(data=…, ext=…, vector=…, vector_ext=…)` pasted bytes; both return the new
+    picture's path relative to `folder` (core/project.Project.add_table_picture)."""
+
+    def __init__(self, folder: Path, store: Callable[..., str], paste_dpi: int = 0):
+        self.folder = Path(folder)
+        self._store = store
+        self.paste_dpi = paste_dpi
+
+    def from_file(self, path: Path) -> str:
+        # (a user's file: no "ChemDraw original", as for figures)
+        return self._store(source=Path(path))
+
+    def paste(self) -> str | None:
+        """Store the clipboard's picture (rendered from ChemDraw's vector original, which is
+        kept, as for pasted figures); None if there is none."""
+        from .clipboard_image import DEFAULT_DPI, clipboard_picture, image_to_png
+        picture = clipboard_picture(self.paste_dpi or DEFAULT_DPI)
+        if picture is not None:
+            return self._store(data=picture.data, ext=picture.ext, vector=picture.source,
+                               vector_ext=picture.source_ext)
+        data = QGuiApplication.clipboard().mimeData()
+        image = QImage(data.imageData()) if data is not None and data.hasImage() else None
+        if image is None or image.isNull():
+            return None
+        return self._store(data=image_to_png(image), ext=".png")
