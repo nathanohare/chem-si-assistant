@@ -6,6 +6,12 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **HRMS ion labels for salts.** Project settings ▸ Output ▸ **HRMS ion for salts** can
+  print a salt's ion as **[M−Br]⁺** (M = the whole salt) instead of [M]⁺ (M = the cation).
+  The counter-ion is recognised from the structure ([M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺,
+  [M−Na]⁻…); the m/z is the same either way. Each compound's HRMS field also has a
+  **Printed as** box for a label of your own. Atom counts in the printed ion are now
+  subscripted ([M+NH₄]⁺).
 - **Table and text formatting.** The table editor sets the **text size of selected
   cells**, **column widths** (or "Fit columns to their text"), **Shrink to fit the page
   width** for wide tables, and the table's **caption and footnote sizes**. Project settings
