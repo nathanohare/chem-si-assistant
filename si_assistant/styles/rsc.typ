@@ -66,22 +66,24 @@
 
 // The cover page. `heading`: auto = this style's own ("Electronic Supplementary
 // Information"); `extra`: optional text under the affiliations (Front matter ▸ Cover page).
+// `spacing` multiplies the space between its parts (Cover page ▸ Spacing: 1 normal,
+// 2 more, 3 much more).
 #let si-cover(heading: auto, title: [], authors: [], affiliations: [], contact: [],
-              extra: none) = {
+              extra: none, spacing: 1) = {
   align(left)[
     #text(font: si-head-font, size: 14pt, weight: "bold",
           if heading == auto [Electronic Supplementary Information] else { heading })
-    #v(1em)
+    #v(1em * spacing)
     #text(font: si-head-font, size: 13pt, weight: "bold", title)
-    #v(1em)
+    #v(1em * spacing)
     #authors
-    #v(0.6em)
+    #v(0.6em * spacing)
     #text(size: 9.5pt, affiliations)
-    #v(0.4em)
+    #v(0.4em * spacing)
     #text(size: 9.5pt, contact)
   ]
-  if extra != none { v(1.2em); extra }
-  v(1.5em)
+  if extra != none { v(1.2em * spacing); extra }
+  v(1.5em * spacing)
 }
 
 // A structure drawing under a compound title.

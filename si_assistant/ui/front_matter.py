@@ -170,6 +170,21 @@ class CoverPagePanel(FrontPanel):
         self.heading_edit.setPlaceholderText(
             front.style_cover_heading(s.get("journal_style", "ACS")) + "  (journal style)")
         self.title_edit = QLineEdit(str(s.get("title", "") or ""))
+        # Spacing: how spaced out the cover's parts are (core/front.COVER_SPACINGS).
+        self.spacing = QComboBox()
+        for name, factor in front.COVER_SPACINGS.items():
+            self.spacing.addItem(name if factor == 1 else f"{name} ({factor:g}× the space)",
+                                 factor)
+        current = front.cover_spacing(s)
+        index = self.spacing.findData(current)
+        if index < 0:   # (a number typed into project.json by hand: shown and kept)
+            self.spacing.addItem(f"{current:g}× the space", current)
+            index = self.spacing.count() - 1
+        self.spacing.setCurrentIndex(index)
+        self.spacing.setToolTip("How much space is left between the heading, the title, the "
+                                "authors, the affiliations, the emails and the extra text.")
+        self.spacing.setEnabled(not ro)
+        self.spacing.currentIndexChanged.connect(self._changed)
         for edit in (self.heading_edit, self.title_edit):
             edit.setReadOnly(ro)
             edit.textEdited.connect(self._changed)
@@ -200,6 +215,7 @@ class CoverPagePanel(FrontPanel):
         form = QFormLayout()
         form.addRow("Heading:", self.heading_edit)
         form.addRow("Manuscript title:", self.title_edit)
+        form.addRow("Spacing:", self.spacing)
         self.layout_.addLayout(form)
         self.layout_.addWidget(_wrapped("<b>Authors</b> — affiliation markers separated by "
                                         "commas, e.g. <i>a,b</i>. Tick the corresponding "
@@ -220,6 +236,7 @@ class CoverPagePanel(FrontPanel):
     def save(self) -> None:
         s = self.project.settings
         front.store_cover_heading(s, self.heading_edit.text())
+        front.store_cover_spacing(s, float(self.spacing.currentData() or 1))
         s["title"] = self.title_edit.text().strip()
         s["authors"] = [
             {"name": name, "affiliations": [m.strip() for m in affs.split(",") if m.strip()],

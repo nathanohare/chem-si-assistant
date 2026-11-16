@@ -71,6 +71,24 @@ def test_cover_page_saves_title_authors_and_extra_text(window, tmp_path):
     assert "Enamides" in win.windowTitle()
 
 
+def test_cover_page_spacing_is_saved(window, tmp_path):
+    p = Project.create(tmp_path, "F")
+    p.acquire_lock("Tester")
+    p.settings["cover"] = {"spacing": 2.5}   # typed into project.json by hand: kept
+    p.save_settings()
+    win = window(p)
+    win.select("front", "cover")
+    panel = win.panel
+    assert panel.spacing.currentData() == 2.5 and "2.5×" in panel.spacing.currentText()
+    panel.spacing.setCurrentIndex(panel.spacing.findData(2.0))   # "More"
+    win.select("front", "toc")          # switching away saves
+    assert Project.open(p.folder).settings["cover"] == {"spacing": 2}
+    win.select("front", "cover")
+    win.panel.spacing.setCurrentIndex(win.panel.spacing.findData(1.0))
+    win.select("front", "toc")
+    assert "cover" not in Project.open(p.folder).settings   # normal: nothing stored
+
+
 def test_toc_and_general_information_pages_save(window, tmp_path):
     p = Project.create(tmp_path, "F")
     p.acquire_lock("Tester")

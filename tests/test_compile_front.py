@@ -232,3 +232,49 @@ def test_preview_of_front_pages(nested):
     assert '"General Information"' in src and "#si-cover(" not in src
     src, _ = typst(p, only=("front", "cover"))
     assert "#si-cover(" in src and "#outline(" not in src
+
+
+def test_cover_spacing_setting():
+    s = {}
+    assert front.cover_spacing(s) == 1
+    front.store_cover_spacing(s, 2)
+    assert s == {"cover": {"spacing": 2}} and front.cover_spacing(s) == 2
+    front.store_cover_heading(s, "Supplementary Data")
+    front.store_cover_spacing(s, 1)   # normal is not stored; the heading stays
+    assert s == {"cover": {"heading": "Supplementary Data"}}
+    front.store_cover_heading(s, "")
+    assert s == {}
+    # Hand-edited project.json: kept within range, nonsense ignored.
+    assert front.cover_spacing({"cover": {"spacing": "2.5"}}) == 2.5
+    assert front.cover_spacing({"cover": {"spacing": 100}}) == front.MAX_COVER_SPACING
+    assert front.cover_spacing({"cover": {"spacing": "lots"}}) == 1
+    assert front.cover_spacing({"cover": "x"}) == 1
+
+
+@pytest.mark.parametrize("style", ["ACS", "RSC", "Wiley"])
+def test_cover_spacing_spreads_out_the_cover(nested, style):
+    p, _parts = nested
+    p.settings["journal_style"] = style
+    p.settings["affiliations"] = [{"marker": "a", "text": "Auburn University"}]
+    p.settings["authors"][0]["affiliations"] = ["a"]
+
+    def gap() -> float:   # from the title's top to the affiliation's top, in pt
+        options = CompileOptions.from_settings(p.settings)
+        result = compile_pdf(p, options, image_info, convert_to_png)
+        ys = {}
+
+        def visit(text, cm, tm, *_):   # each piece of text and its height on the page
+            y = tm[4] * cm[1] + tm[5] * cm[3] + cm[5]
+            for key in ("Nested", "Auburn"):
+                if key in text:
+                    ys.setdefault(key, y)
+        PdfReader(str(result.pdf)).pages[0].extract_text(visitor_text=visit)
+        return ys["Nested"] - ys["Auburn"]
+
+    src, _ = typst(p, only=("front", "cover"))
+    assert "spacing:" not in src
+    normal = gap()
+    front.store_cover_spacing(p.settings, 3)
+    src, _ = typst(p, only=("front", "cover"))
+    assert ", spacing: 3)" in src
+    assert gap() > normal + 20

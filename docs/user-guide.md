@@ -284,6 +284,8 @@ Deleted items go to the project's Trash, from which you can restore them.
 
 - **Cover page:**
   - heading (empty = the journal's usual heading) and manuscript title;
+  - **Spacing:** Normal, More or Much more space between the heading, title, authors,
+    affiliations, emails and extra text;
   - authors, with affiliation markers (e.g. `a,b`), a tick for the corresponding author,
     and email;
   - affiliations;
