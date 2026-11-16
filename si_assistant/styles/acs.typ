@@ -63,21 +63,23 @@
 
 // The cover page. `heading`: auto = this style's own ("Supporting Information");
 // `extra`: optional text under the affiliations (Front matter ▸ Cover page).
+// `spacing` multiplies the space between its parts (Cover page ▸ Spacing: 1 normal,
+// 2 more, 3 much more).
 #let si-cover(heading: auto, title: [], authors: [], affiliations: [], contact: [],
-              extra: none) = {
+              extra: none, spacing: 1) = {
   align(center)[
     #text(size: 16pt, weight: "bold", if heading == auto [Supporting Information] else { heading })
-    #v(1em)
+    #v(1em * spacing)
     #text(size: 14pt, weight: "bold", title)
-    #v(1em)
+    #v(1em * spacing)
     #authors
-    #v(0.6em)
+    #v(0.6em * spacing)
     #text(size: 10pt, affiliations)
-    #v(0.4em)
+    #v(0.4em * spacing)
     #text(size: 10pt, contact)
   ]
-  if extra != none { v(1.2em); extra }
-  v(1.5em)
+  if extra != none { v(1.2em * spacing); extra }
+  v(1.5em * spacing)
 }
 
 // A structure drawing under a compound title.

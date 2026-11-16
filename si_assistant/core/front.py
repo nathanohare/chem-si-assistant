@@ -3,8 +3,10 @@ choice of what to export (SPEC §13k.4, §13k.10).
 
 Stored in project.json:
 
-    "cover": {"heading": "..."}            only when it differs from the journal style's
+    "cover": {"heading": "...",            only when it differs from the journal style's
                                            own heading ("Supporting Information")
+              "spacing": 2}                only when not 1: the space between the cover's
+                                           parts, times this (COVER_SPACINGS)
     "toc": {"title", "depth", "figures", "tables", "schemes", "dots", "font_size"}
     "general_information": {"heading": "...",   only when not "General Information"
                             "numbered": true}   only when numbered like a section
@@ -72,6 +74,39 @@ def authors(settings: dict) -> list[dict[str, Any]]:
 
 def affiliations(settings: dict) -> list[dict[str, Any]]:
     return _rows(settings, "affiliations")
+
+
+# Cover page ▸ Spacing: the space between the cover's parts (heading, title, authors,
+# affiliations, emails, extra text), times this. A number typed into project.json by hand
+# (between MIN and MAX) is used as it is.
+COVER_SPACINGS = {"Normal": 1.0, "More": 2.0, "Much more": 3.0}
+MIN_COVER_SPACING, MAX_COVER_SPACING = 0.5, 6.0
+
+
+def cover_spacing(settings: dict) -> float:
+    """How spaced out the cover is (1 = the style's normal spacing)."""
+    value = _stored(settings, "cover").get("spacing", 1)
+    try:
+        value = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 1.0
+    if value != value:   # (NaN)
+        return 1.0
+    return min(MAX_COVER_SPACING, max(MIN_COVER_SPACING, value))
+
+
+def store_cover_spacing(settings: dict, value: float) -> None:
+    """Store the cover's spacing; normal (1) is not stored."""
+    cover = dict(_stored(settings, "cover"))
+    value = min(MAX_COVER_SPACING, max(MIN_COVER_SPACING, float(value)))
+    if abs(value - 1.0) < 1e-9:
+        cover.pop("spacing", None)
+    else:
+        cover["spacing"] = int(value) if float(value).is_integer() else round(value, 2)
+    if cover:
+        settings["cover"] = cover
+    else:
+        settings.pop("cover", None)
 
 
 def style_cover_heading(style: str) -> str:

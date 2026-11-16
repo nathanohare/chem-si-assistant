@@ -875,8 +875,10 @@ class Builder:
         emails = [str(a.get("email", "")) for a in front.authors(s) if a.get("corresponding")
                   and a.get("email")]
         contact = runs_to_typst([Run("*Email: " + "; ".join(emails))]) if emails else ""
+        spacing = front.cover_spacing(s)
+        spacing = f", spacing: {spacing:g}" if spacing != 1 else ""   # (Cover page ▸ Spacing)
         return (f"#si-cover(heading: {heading}, title: [{title}], authors: [{names}], "
-                f"affiliations: [{affs}], contact: [{contact}], extra: {extra})")
+                f"affiliations: [{affs}], contact: [{contact}], extra: {extra}{spacing})")
 
     def table_of_contents(self) -> str:
         """The TOC page (Front matter ▸ Table of contents). Which headings it lists was

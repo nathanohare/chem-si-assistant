@@ -6,6 +6,8 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Cover page spacing.** Front matter ▸ Cover page has a **Spacing** box: Normal, More
+  or Much more space between the heading, title, authors, affiliations and emails.
 - **Italic prefixes in compound names.** The compiled SI prints the conventional italics in
   compound names: *N*-, *N*,*N*-, *O*-, *S*-, *tert*-, *sec*-, *cis*/*trans*, (*E*)/(*Z*),
   (*R*)/(*S*) and *o*-/*m*-/*p*-. Typing *…* in a name chooses the italics by hand instead.
