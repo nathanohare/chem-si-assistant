@@ -188,6 +188,75 @@ def suggested_adduct(info: chem.MolInfo) -> str | None:
     return f"[M]{n if n > 1 else ''}{'+' if info.charge > 0 else '-'}"
 
 
+# ---- how the ion is printed (SPEC §13f.3)
+
+# Project setting: how a salt's ion is labelled when M is its charged piece and the adduct
+# is plain [M]⁺/[M]⁻. "piece" prints the adduct as it is ([M]⁺, M = the cation);
+# "whole" prints it for M = the whole salt, with the other pieces taken off ([M−Br]⁺).
+SALT_LABEL_KEY = "hrms_salt_ion_label"
+SALT_LABEL_PIECE = "piece"
+SALT_LABEL_WHOLE = "whole"
+# Per compound, in the HRMS field: the label printed instead (empty = automatic).
+ION_LABEL_KEY = "ion_label"
+
+
+def salt_label_style(project) -> str:
+    style = project.settings.get(SALT_LABEL_KEY) if project is not None else None
+    return SALT_LABEL_WHOLE if style == SALT_LABEL_WHOLE else SALT_LABEL_PIECE
+
+
+def salt_ion_label(mol, value: dict, adduct: str) -> str | None:
+    """The ion written for M = the whole salt, e.g. "[M-Br]+" for a pyridinium bromide
+    whose cation is M with the adduct [M]+, "[M-2Br]2+" for a dibromide, "[M-Na]-" for a
+    sodium carboxylate. None when this does not apply: one piece, a typed M formula, the
+    whole structure chosen as M, an adduct that adds or removes atoms, or pieces whose
+    charges don't add up to a neutral salt (the adduct is printed as it is then). The m/z
+    is the same either way: it is the charged piece's."""
+    if mol is None or F.part_text(value.get("formula")).strip():
+        return None
+    try:
+        sp = hrms_species(mol, value)
+        a = chem.parse_adduct(adduct or "[M+H]+")
+    except chem.ChemError:
+        return None
+    if sp is None or not sp.choices or sp.manual:
+        return None
+    key = sp.key or (sp.automatic[0] if sp.automatic else "")
+    if not key.startswith("frag:"):
+        return None
+    if a.delta or a.multimer != 1 or a.radical or not sp.info.charge or \
+            a.charge != sp.info.charge:
+        return None
+    others = chem.fragment_smiles(mol)
+    chosen = key[len("frag:"):]
+    if others.count(chosen) != 1:
+        return None   # (two copies of M: which one is the ion is not clear)
+    others.remove(chosen)
+    pieces = dict(chem.species(mol))
+    if not others or any(smi not in pieces for smi in others):
+        return None
+    if sum(pieces[smi].charge for smi in others) != -sp.info.charge:
+        return None   # (not a neutral salt as drawn)
+    terms = []
+    for smi in dict.fromkeys(others):   # (in the order drawn, each once)
+        n = others.count(smi)
+        terms.append(f"-{n if n > 1 else ''}{chem.piece_name(smi)}")
+    z = abs(a.charge)
+    return f"[M{''.join(terms)}]{z if z > 1 else ''}{'+' if a.charge > 0 else '-'}"
+
+
+def printed_ion_label(project, mol, value: dict) -> str:
+    """The ion label printed in the HRMS sentence: the compound's own typed label if any,
+    else [M−X]⁺ for a salt when the project asks for it, else the adduct."""
+    typed = F.part_text(value.get(ION_LABEL_KEY)).strip()
+    if typed:
+        return typed
+    adduct = F.part_text(value.get("adduct")).strip() or "[M+H]+"
+    if salt_label_style(project) == SALT_LABEL_WHOLE:
+        return salt_ion_label(mol, value, adduct) or adduct
+    return adduct
+
+
 def charged_adduct_hint(info: chem.MolInfo, adduct: str) -> str:
     """A gentle warning when M is already an ion but the adduct adds atoms or charge."""
     if not info.charge:
