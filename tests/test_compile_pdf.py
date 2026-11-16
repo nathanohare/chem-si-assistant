@@ -169,6 +169,7 @@ def test_acs_drawings_option_and_preview(sample):
 
 def test_two_spectra_per_page(sample):
     p, _parts = sample
+    p.set_spectra_defaults({"per_page": 1})
     one = len(PdfReader(str(compile_sample(p).pdf)).pages)
     p.set_spectra_defaults({"per_page": 2})   # (on the Spectra section, SPEC §13k.12)
     two = len(PdfReader(str(compile_sample(p).pdf)).pages)

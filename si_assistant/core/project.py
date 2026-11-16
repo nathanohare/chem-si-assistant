@@ -420,6 +420,9 @@ class Project:
         fileio.make_dirs(folder)
         (folder / SECTIONS_DIR).mkdir(exist_ok=True)
         settings = default_settings(name)
+        # New projects print two spectra on a page (issue #1); older projects keep their
+        # one. Carried into the Spectra section when it is added (ensure_spectra_section).
+        settings["spectra_per_page"] = spectra_mod.NEW_PROJECT_PER_PAGE
         atomic_write_json(folder / PROJECT_FILE, {
             "format_version": FORMAT_VERSION, SAVED_BY_KEY: _program_version(), **settings,
             "section_tree": [],

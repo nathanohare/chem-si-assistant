@@ -256,6 +256,7 @@ def test_layouts_in_the_source(sample, per_page, orientation):
 @pytest.mark.parametrize("per_page,orientation,pages", [(2, "landscape", 2), (4, "portrait", 1)])
 def test_layouts_in_the_pdf(sample, per_page, orientation, pages):
     p, _parts = sample
+    p.set_spectra_defaults({"per_page": 1})
     reader, _ = compiled(p)
     before = len(reader.pages)
     p.set_spectra_defaults({"per_page": per_page, "orientation": orientation})
@@ -579,3 +580,18 @@ def test_every_style_compiles_every_option(sample, style):
     assert landscape[-2:] == [True, False]
     cache = json.loads((p.folder / "build" / "crop_cache.json").read_text(encoding="utf-8"))
     assert len(cache) == 3 and all(v is not None for v in cache.values())
+
+
+def test_new_projects_print_two_spectra_on_a_page(tmp_path):
+    """Issue #1: a new project starts with two spectra on a page; a project made before
+    (no setting, no Spectra section) keeps one."""
+    from si_assistant.core.project import Project
+    new = Project.create(tmp_path / "a", "New")
+    new.ensure_spectra_section()
+    assert new.spectra_defaults()["per_page"] == S.NEW_PROJECT_PER_PAGE == 2
+    old = Project.create(tmp_path / "b", "Old")
+    old.settings.pop("spectra_per_page")
+    old.save_settings()
+    old = Project.open(old.folder)
+    old.ensure_spectra_section()
+    assert old.spectra_defaults()["per_page"] == 1

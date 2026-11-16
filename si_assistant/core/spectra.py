@@ -82,6 +82,9 @@ DEFAULTS: dict[str, Any] = {
     # hrms.print_reports, core/ms_reports.prints_reports).
     "hrms_reports": False,
 }
+# A new project starts with two spectra on a page (DEFAULTS keeps one, so projects made
+# before this keep printing as they did).
+NEW_PROJECT_PER_PAGE = 2
 SECTION_ONLY_KEYS = ("nmr_links", "link_style", "link_back", "hrms_reports")
 LINK_STYLES = {"plain": "Like normal text", "blue": "Blue",
                "blue_underline": "Blue and underlined"}
