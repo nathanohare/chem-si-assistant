@@ -13,6 +13,13 @@ program's update check shows.)
   spectra pages are pictures drawn exactly as in the PDF. Page numbers S1, S2…, the header
   and footer, and the Text and tables settings are kept. Word fills in the table of
   contents' page numbers when it opens the file.
+- **Page flow.** Headings no longer stay behind at the bottom of a page with only a line of
+  what follows: **Keep headings with** (2 lines by default) moves them on. A short bold or
+  italic line typed as a sub-heading is kept with what follows too. New settings in the
+  Compile window and Project settings ▸ Page: how hard to avoid single lines at page edges,
+  keeping each compound on one page, and whether a compound's data start a new paragraph,
+  a new line with no extra space, or run on after the procedure. Each section and compound
+  has a **Page breaks** button: start on a new page, keep together, or allow splitting.
 - **"et al." in the page header.** Project settings ▸ Page ▸ **{authors} shows**: all
   names (as before) or **First author et al.**, e.g. "O'Hare et al." ("O'Hare and Smith"
   for two authors).

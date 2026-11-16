@@ -52,8 +52,9 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_TAB_ALIGNMENT, WD_TA
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
+from docx.text.paragraph import Paragraph as DocxParagraph
 
-from ..core import formatting, front, headings, ms_reports
+from ..core import formatting, front, headings, ms_reports, page_flow
 from ..core import page as page_setup
 from ..core import scheme_editor
 from ..core.markup import SUB, SUPER, Paragraph, Run, parse
@@ -67,7 +68,7 @@ from .document import (_BAD_VALUE, ATTACHMENT_MAX_HEIGHT_IN, CM_PER_IN, HRMS_HEA
                        TEXT_WIDTH_IN, Builder, CompileError, CompileOptions,
                        note_auto_unplaced)
 from .reaction_scheme import SchemeWriter
-from .text import format_chemistry, leave_alone, link_target
+from .text import format_chemistry, is_emphasis_line, leave_alone, link_target
 
 DOCX_NAME = "SI.docx"
 PICTURE_PPI = 300         # structures, schemes, figures drawn by Typst
@@ -535,6 +536,8 @@ class WordWriter:
         pf.space_after = Pt(self.fmt["space_after"] if self.fmt["space_after"] is not None
                             else half)
         pf.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+        # Page flow (core/page_flow.py): Word's widow/orphan control has no "strong" level.
+        pf.widow_control = self.b.flow.widows != "off"
         # (the document defaults too: a style Word adds itself starts from these)
         defaults = styles.element.find(qn("w:docDefaults"))
         rpr = defaults.find(qn("w:rPrDefault") + "/" + qn("w:rPr")) \
@@ -630,23 +633,82 @@ class WordWriter:
         self.portrait = portrait
         self._page(section, portrait)
 
+    @staticmethod
+    def _starts_page(last) -> bool:
+        """Whether what follows body element `last` is at the top of a page anyway (None =
+        the document is still empty)."""
+        if last is None:
+            return True
+        if last.tag == qn("w:p"):
+            br = last.find(".//" + qn("w:br"))
+            if br is not None and br.get(qn("w:type")) == "page" and \
+                    not "".join(t.text or "" for t in last.iter(qn("w:t"))):
+                return True   # (already a page break: "weak", as in Typst)
+            if last.find(qn("w:pPr")) is not None and \
+                    last.find(qn("w:pPr")).find(qn("w:sectPr")) is not None:
+                return True   # (a section break just started a new page)
+        return False
+
     def page_break(self) -> None:
         """Start a new page (unless the document is still empty)."""
         body = self.doc.element.body
-        last = body[-2] if len(body) > 1 else None   # (the last is the sectPr)
-        if last is None:
+        if self._starts_page(body[-2] if len(body) > 1 else None):   # (last: the sectPr)
             return
-        if last.tag == qn("w:p"):
-            if last.find(".//" + qn("w:br")) is not None and \
-                    last.find(".//" + qn("w:br")).get(qn("w:type")) == "page" and \
-                    not "".join(t.text or "" for t in last.iter(qn("w:t"))):
-                return   # (already a page break: "weak", as in Typst)
-            if last.find(qn("w:pPr")) is not None and \
-                    last.find(qn("w:pPr")).find(qn("w:sectPr")) is not None:
-                return   # (a section break just started a new page)
         p = self.doc.add_paragraph()
         p.paragraph_format.space_before = p.paragraph_format.space_after = Pt(0)
         p.add_run().add_break(WD_BREAK.PAGE)
+
+    def body_mark(self) -> int:
+        """Where the next thing written goes among the body's elements (for with_page_flow)."""
+        return len(self.doc.element.body) - 1   # (the last element is the sectPr)
+
+    def with_page_flow(self, start: int, data: dict, keep_default: bool) -> None:
+        """A compound's or section's own page flow (Builder.with_page_flow), applied to
+        what was written since body_mark() gave `start`: kept on one page (Word's "keep
+        with next" and "keep lines together"; a table's rows don't split) and/or on a new
+        page ("page break before")."""
+        body = self.doc.element.body
+        items = list(body)[start:-1]
+        if not items:
+            return
+        breaks = any(br.get(qn("w:type")) == "page" for el in items
+                     for br in el.iter(qn("w:br"))) or \
+            any(True for el in items for _ in el.iter(qn("w:sectPr")))
+        if page_flow.keeps_together(data, keep_default) and not breaks:
+            for n, el in enumerate(items):
+                last = n == len(items) - 1
+                if el.tag == qn("w:tbl"):
+                    for tr in el.iter(qn("w:tr")):
+                        trpr = tr.get_or_add_trPr()
+                        if trpr.find(qn("w:cantSplit")) is None:
+                            trpr.append(OxmlElement("w:cantSplit"))
+                    paragraphs = [] if last else list(el.iter(qn("w:p")))
+                else:
+                    paragraphs = [el] if el.tag == qn("w:p") else []
+                for q in paragraphs:
+                    pf = DocxParagraph(q, self.doc._body).paragraph_format
+                    pf.keep_together = True
+                    if not (last and q is el):
+                        pf.keep_with_next = True
+        if page_flow.item_flow(data)["new_page"]:
+            before = body[start - 1] if start > 0 else None
+            if not self._starts_page(before):
+                first = items[0]
+                if first.tag == qn("w:p"):
+                    DocxParagraph(first, self.doc._body).paragraph_format.page_break_before = True
+                else:   # (a table first: a page break paragraph before it)
+                    p = OxmlElement("w:p")
+                    first.addprevious(p)
+                    para = DocxParagraph(p, self.doc._body)
+                    para.paragraph_format.space_before = Pt(0)
+                    para.paragraph_format.space_after = Pt(0)
+                    para.add_run().add_break(WD_BREAK.PAGE)
+
+    def keep_emphasis(self, paragraph, runs: list[Run], has_next: bool) -> None:
+        """Page flow: a short line wholly in bold or italic (a heading typed as text) is
+        kept with what follows, like a heading (paragraphs_to_typst's keep_lines)."""
+        if has_next and self.b.flow.emphasis_lines and is_emphasis_line(runs):
+            paragraph.paragraph_format.keep_with_next = True
 
     # ------------------------------------------------------------------ text
 
@@ -1035,7 +1097,7 @@ class WordWriter:
         if self.options.format_text:
             paragraphs = [replace(p, runs=format_chemistry(p.runs)) for p in paragraphs]
         index = 0
-        for p in paragraphs:
+        for i, p in enumerate(paragraphs):
             if not p.is_object:
                 if not any(r.text or r.ref for r in p.runs):
                     continue
@@ -1044,7 +1106,9 @@ class WordWriter:
                     self.heading(level, p.runs, outlined=level <= outlined_levels,
                                  numbered=numbered_headings, align=p.stored_align)
                 else:
-                    self.paragraph(p.runs, p.stored_align)
+                    has_next = i + 1 < len(paragraphs) and not paragraphs[i + 1].is_object
+                    self.keep_emphasis(self.paragraph(p.runs, p.stored_align), p.runs,
+                                       has_next)
                 continue
             item = b.labels.at(owner.key, index) if owner is not None else None
             label = item.label if item is not None else ""
@@ -1285,6 +1349,7 @@ class WordWriter:
                                                   b.nmr_link(compound))
         except _BAD_VALUE as e:
             raise b.bad_value(compound, e) from e
+        start = self.body_mark()
         p = self.doc.add_paragraph(style=COMPOUND_TITLE)
         self.add_runs(p, block.title)
         if b.toc_rank >= 4:
@@ -1295,13 +1360,14 @@ class WordWriter:
         if show_structure:
             self.structure(compound)
         where = b.compound_notes(compound, block, display_id)
-        for para in b.link_paragraphs(block.paragraphs, where):
+        paras = b.link_paragraphs(block.paragraphs, where)
+        for i, para in enumerate(paras):
             if not any(r.text or r.ref for r in para.runs):
                 continue
             if para.heading:
                 self.heading(level + para.heading, para.runs, outlined=False, numbered=False)
             else:
-                self.paragraph(para.runs)
+                self.keep_emphasis(self.paragraph(para.runs), para.runs, i + 1 < len(paras))
         for index, fig in enumerate(block.figures):
             img = b.image(fig.path, (TEXT_WIDTH_IN, 4.0))
             item = b.labels.at(compound.id, index)
@@ -1310,6 +1376,7 @@ class WordWriter:
                 if self.options.format_text:
                     caption = format_chemistry(caption)
                 self.figure(img, caption, item.label if item else "")
+        self.with_page_flow(start, compound.data, b.flow.keep_compounds)
 
     def scheme(self, scheme: SchemePage, level: int = 2) -> None:
         writer = SchemeWriter(self.b, scheme)
@@ -1408,6 +1475,7 @@ class WordWriter:
         headings still waiting."""
         if section.id in skip:
             return lead
+        start = self.body_mark()
         if section.type == SPECTRA_SECTION:
             if front.SPECTRA_KEY in skip:
                 return lead
@@ -1440,6 +1508,12 @@ class WordWriter:
             if child.id in skip:
                 continue
             lead = self.section_block(child, level + 1, compounds, skip, lead)
+        if section.type != SPECTRA_SECTION:   # (always starts a page of its own)
+            data = section.data
+            if any(s.type == SPECTRA_SECTION for s in self.project.subtree(section)):
+                # (the spectra pages are never squeezed onto one page with the rest)
+                data = {page_flow.KEY: {**page_flow.item_flow(data), "keep": "split"}}
+            self.with_page_flow(start, data, False)
         return lead
 
     def flush_lead(self, lead: list) -> None:

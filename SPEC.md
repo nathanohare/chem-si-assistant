@@ -510,6 +510,15 @@ Build order: quick items (6, 9, 10, 7, 2a) → front matter and custom sections 
   - {date} is the compile date, e.g. "3 October 2026". {authors} is the author names separated by commas. A **"{authors} shows"** choice beside the header (stored as `page.author_style`) can shorten it to the first author's surname: "O'Hare et al." for three or more authors, "O'Hare and Smith" for two, "O'Hare" for one. The surname is the last word of the name, with particles such as van/der/de kept and Jr./III dropped; a name typed "O'Hare, N. P." gives the part before the comma. Default: all names, as before. Override: type the text into the header instead of {authors}. Header/footer text gets the same formula formatting as other text (CDCl3 → CDCl₃).
   - The tab shows a live example of page 2 of 20.
 
+**2b. Page flow** (Nathan, 2026-11-16: headings and single lines were left at the bottom of a page, e.g. a section heading with its one-line lead-in on S3 and an italic sub-heading line on S14; and a gap between a compound's procedure and its data on S20). Project settings ▸ Page ▸ Page flow, also shown in the Compile window (both change the same project settings, `"page_flow"` in project.json; `core/page_flow.py`):
+- **Keep headings with:** N lines (0–6, default 2; 0 = Off). A heading (section, sub-section, general procedure, compound title, heading typed in a text) moves to the next page unless it and N lines of what follows fit on the page. A short paragraph after it (a one-line lead-in) counts, so the heading no longer stays behind with just that line.
+- **Avoid single lines at page edges:** Off / Normal (default) / Strong: how hard the typesetter avoids a paragraph's first line alone at a page bottom (orphan) or its last line alone at the top (widow).
+- **Keep a short bold or italic line with what follows, like a heading** (on by default): a paragraph of at most 90 characters wholly in bold or wholly in italic, not ending in . : ; or , (a heading typed as text) is kept with N lines of what follows.
+- **Keep each compound on one page** (off by default): a compound entry that fits on a page is moved whole to the next page instead of being split; one longer than a page still splits.
+- **Data after the procedure:** New paragraph (with paragraph space; the default, as before) / New line, no extra space / Same paragraph (run on). Only for text the program writes; a compound's own SI text prints as typed.
+- **Each section and compound has a “Page breaks” button** (section: beside its name; compound: in its header): **Start on a new page**, and Keep together: for a compound “Use the project setting” / “Keep on one page” / “Allow splitting over pages”; for a section “May split over pages (normal)” / “Keep on one page”. Stored in its section.json / compound.json as `"page_flow": {"new_page": bool, "keep": "default" | "together" | "split"}`, only when not the default. Setting it is one undo step.
+- *As built:* Typst code after the journal style (`page_flow.typst_definitions`): `si-need(lines, before)` places an invisible unbreakable block as tall as `before` + `lines` lines + 2.4em of spacing and then moves back up by the same height, so nothing moves unless that space is not left on the page, when everything goes to the next page. Headings get it through `show heading`; bold/italic lines are given it by `paragraphs_to_typst(keep_lines=…)`. `si-together` measures its content and makes it unbreakable only when it fits on a page. Widows/orphans are Typst's `text.costs` (0%, 100%, 600%). Content holding a page break (a sub-section on a new page, a many-page attachment) is never kept together (Typst allows no page break there); a section holding the Spectra section is never kept together. “New line” puts a line break (not justified) between the procedure and the data. Superscript references were checked and do not change the line spacing; the S20 gap was the paragraph space.
+
 **3. Project dashboard.** Clicking the project (the top item of the tree) shows:
 - overall and per-section progress;
 - a chart of missing required fields by field;
@@ -1324,7 +1333,12 @@ sent to a journal that wants Word.
    window's ticks), order, IDs, labels, mentions, links, the compound blocks' text and
    every compile note. So the Word SI and the PDF always say the same thing. That
    includes figures printed without a number or caption (issue #3) and the structure's
-   place on spectra, "auto" included (issue #1). A new compile feature is added to both.
+   place on spectra, "auto" included (issue #1), and the page flow (§13k.2b) through
+   Word's own controls: widow/orphan control (Word has no "strong" level, so Normal and
+   Strong both switch it on), "keep with next" for headings and short bold/italic lines,
+   "keep with next" + "keep lines together" (and rows that don't split) for a compound or
+   section kept on one page, and "page break before" for one on a new page. A new compile
+   feature is added to both.
 3. **Editable text:** cover, General Information, custom sections, general procedures,
    compound blocks, captions, table cells and footnotes, HRMS text listings and the
    References are Word text with bold, italic, underline, super- and subscripts. Section

@@ -15,6 +15,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 
 from ..core import chemtext
+from ..core.page_flow import EMPHASIS_MAX_CHARS
 from ..core.markup import NORMAL, SUB, SUPER, Paragraph, Run, mention_kind
 
 # ---------------------------------------------------------------------- Typst output
@@ -55,7 +56,7 @@ def typst_label(text: str) -> str:
 
 
 def typst_string(text: str) -> str:
-    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
 def run_to_typst(run: Run) -> str:
@@ -143,16 +144,23 @@ def resolve_links(runs: list[Run], mention_text, known_refs: set[str] | None,
 
 
 def paragraphs_to_typst(paragraphs: list[Paragraph], heading_offset: int = 1,
-                        outlined_levels: int = 2, numbered: bool = False) -> str:
+                        outlined_levels: int = 2, numbered: bool = False,
+                        keep_lines: int = 0) -> str:
     """Paragraphs become Typst paragraphs; headings shift down by `heading_offset`
     (inside a section titled at level 1, "# Heading" becomes level 2). Headings typed in
     a text are not numbered (only real sections are: 1, 1.1, 1.1.1 in numbered styles)
     unless `numbered` (Heading numbers ▸ Outline or Numbers: core/headings.py).
-    Those at level `outlined_levels` or above are listed in the table of contents."""
+    Those at level `outlined_levels` or above are listed in the table of contents.
+    `keep_lines` > 0: a short line wholly in bold or italic (a heading typed as text) is
+    kept on the same page as that many lines of what follows (core/page_flow.py)."""
     out = []
-    for p in paragraphs:
+    for i, p in enumerate(paragraphs):
         body = runs_to_typst(p.runs)
         if not body:
+            continue
+        if (keep_lines and not p.heading and i + 1 < len(paragraphs)
+                and is_emphasis_line(p.runs)):
+            out.append(f"#si-need({keep_lines}, [{body}])\n{aligned_paragraph(body, p.stored_align)}")
             continue
         if p.heading:
             level = p.heading + heading_offset
@@ -161,6 +169,18 @@ def paragraphs_to_typst(paragraphs: list[Paragraph], heading_offset: int = 1,
             body = f"#heading(level: {level}, outlined: {outlined}{numbering})[{body}]"
         out.append(aligned_paragraph(body, p.stored_align))
     return "\n\n".join(out)
+
+
+def is_emphasis_line(runs: list[Run]) -> bool:
+    """A short paragraph set wholly in bold or wholly in italic, not ending like a sentence
+    or a lead-in (".", ":"): reads as a heading typed as plain text."""
+    shown = [r for r in runs if r.text.strip() or r.ref]
+    if not shown or any(r.ref for r in shown):
+        return False
+    text = "".join(r.text for r in runs).strip()
+    if not text or len(text) > EMPHASIS_MAX_CHARS or text[-1] in ".:;,":
+        return False
+    return all(r.bold for r in shown) or all(r.italic for r in shown)
 
 
 def aligned_paragraph(body: str, align: str) -> str:
