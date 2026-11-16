@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QAbstractButton, QComboBox, QDialog, QHBoxLayout,
                                QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton,
                                QScrollArea, QTextEdit, QToolButton, QVBoxLayout, QWidget)
 
+from .page_flow_ui import PageFlowButton
 from ..core import chem, checks, procedures
 from ..core import fields as F
 from ..core.project import Compound, Project, ProjectError
@@ -161,6 +162,12 @@ class CompoundPanel(QWidget):
         line2.addWidget(self.formula_label)
         line2.addSpacing(12)
         line2.addWidget(self.completion_label, 1)
+        # Its own page breaks in the compiled SI (core/page_flow.py, SPEC §13k.2b).
+        self.page_flow = PageFlowButton(project, lambda: self.compound.data,
+                                        lambda: project.save_compound(self.compound),
+                                        self._shown_id, compound=True)
+        self.page_flow.setAutoRaise(True)
+        line2.addWidget(self.page_flow)
         line2.addWidget(collapse_all)
         line2.addWidget(expand_all)
         lines = QVBoxLayout()

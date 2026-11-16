@@ -137,7 +137,7 @@ class CompileDialog(QDialog):
     def __init__(self, project: Project, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Compile SI")
-        self.resize(640, 640)
+        self.resize(640, 820)
         self.project = project
         options = CompileOptions.from_settings(project.settings)
 
@@ -184,6 +184,11 @@ class CompileDialog(QDialog):
         form.addRow("Spectra:", spectra_note)
         form.addRow(self.format_text)
         form.addRow(self.open_pdf)
+        # The same settings as Project settings ▸ Page ▸ Page flow (SPEC §13k.2b).
+        from .page_flow_ui import PageFlowSettings
+        self.flow = PageFlowSettings(project.settings)
+        self.flow.setToolTip("Also in Project settings ▸ Page. Each section and compound can "
+                             "set its own with the “Page breaks” button on its page.")
         buttons = QDialogButtonBox()
         buttons.addButton("Compile", QDialogButtonBox.ButtonRole.AcceptRole)
         buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
@@ -197,6 +202,7 @@ class CompileDialog(QDialog):
         layout.addWidget(QLabel("The SI is saved as <b>build/SI.pdf</b> in the project folder "
                                 "(with SI.typ, the source, next to it)."))
         layout.addLayout(form)
+        layout.addWidget(self.flow)
         layout.addLayout(include_row)
         layout.addWidget(self.export, 1)
         layout.addWidget(self.nothing)
@@ -213,6 +219,7 @@ class CompileDialog(QDialog):
         self.project.settings.update({
             "compile_structures": o.structures, "format_text": o.format_text})
         front.store_excluded(self.project.settings, o.excluded)
+        self.flow.apply(self.project.settings)
         if not self.project.read_only:
             self.project.save_settings()
 

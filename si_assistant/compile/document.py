@@ -36,6 +36,7 @@ from ..core.ids import is_device_name
 from ..core import labels as label_rules
 from ..core import ms_reports
 from ..core import page as page_setup
+from ..core import page_flow
 from ..core import scheme_editor
 from ..core import spectra as spectra_mod
 from ..core.markup import Paragraph, Run, mention_kind, parse
@@ -565,6 +566,9 @@ class Builder:
         self.link_back = self.nmr_links and bool(links.get("link_back"))
         self.link_style = str(links.get("link_style", "plain"))
         self.placed_labels: set[str] = set()   # Typst labels put in (each only once)
+        # How text flows over pages (headings kept with what follows, compounds kept
+        # together…: core/page_flow.py, SPEC §13k.2b).
+        self.flow = page_flow.flow_settings(project.settings)
         self._unnumbered_mentioned = 0   # mentions of figures printed without a number
 
     # ------------------------------------------------------------------ links
@@ -970,7 +974,8 @@ class Builder:
             if p is None or p.is_object:
                 if run_of_text:
                     out.append(paragraphs_to_typst(run_of_text, heading_offset, outlined_levels,
-                                                   numbered_headings))
+                                                   numbered_headings,
+                                                   keep_lines=self.flow.emphasis_lines))
                     run_of_text = []
                 if p is None:
                     continue
@@ -1268,7 +1273,8 @@ class Builder:
                 self.warnings.append(f"{where}: its general procedure no longer exists; the "
                                      "“Prepared according to…” sentence was left out.")
         out.append(paragraphs_to_typst(self.link_paragraphs(block.paragraphs, where),
-                                       heading_offset=level, outlined_levels=0))
+                                       heading_offset=level, outlined_levels=0,
+                                       keep_lines=self.flow.emphasis_lines))
         for index, fig in enumerate(block.figures):
             img = self.image(fig.path, (TEXT_WIDTH_IN, 4.0))
             item = self.labels.at(compound.id, index)
@@ -1279,7 +1285,23 @@ class Builder:
                 out.append(self.inline_figure(img[0], caption, item.label if item else ""))
         if display_id == "ID?":
             self.warnings.append(f"“{compound.name or 'A compound'}” has no ID (printed as “ID?”).")
-        return "\n\n".join(x for x in out if x)
+        return self.with_page_flow("\n\n".join(x for x in out if x), compound.data,
+                                   self.flow.keep_compounds)
+
+    @staticmethod
+    def with_page_flow(code: str, data: dict, keep_default: bool) -> str:
+        """A compound's or section's own page flow (core/page_flow.py): on a new page
+        and/or kept on one page when it fits."""
+        if not code:
+            return code
+        # (something that starts a page of its own inside, e.g. a sub-section on a new
+        # page or a many-page attachment, runs over pages anyway: Typst allows no page
+        # break inside a kept-together block)
+        if page_flow.keeps_together(data, keep_default) and "#pagebreak" not in code:
+            code = f"#si-together[\n{code}\n]"
+        if page_flow.item_flow(data)["new_page"]:
+            code = PAGE_BREAK + "\n\n" + code
+        return code
 
     def scheme(self, scheme: SchemePage, level: int = 2) -> str:
         # Made with the scheme editor (SPEC §13n.4): laid out by the style.
@@ -1414,7 +1436,14 @@ class Builder:
             out.append(self.section_block(child, level + 1, compounds, skip, lead))
             lead = ""
         out.append(lead)   # (only when there was no sub-section to take it)
-        return "\n\n".join(x for x in out if x)
+        code = "\n\n".join(x for x in out if x)
+        if section.type == SPECTRA_SECTION:   # (always starts a page of its own)
+            return code
+        data = section.data
+        if any(s.type == SPECTRA_SECTION for s in self.project.subtree(section)):
+            # (the spectra pages are never squeezed onto one page with the rest)
+            data = {page_flow.KEY: {**page_flow.item_flow(data), "keep": "split"}}
+        return self.with_page_flow(code, data, False)
 
     # ------------------------------------------------------------------ spectra (SPEC §13k.12)
 
@@ -1797,7 +1826,8 @@ class Builder:
                  f"{self.page_args()})",
                  headings.typst_set_rule(p.settings),   # (Project settings ▸ Heading numbers)
                  # (Project settings ▸ Text and tables: line and paragraph spacing, captions)
-                 formatting.typst_rules(p.settings)]
+                 formatting.typst_rules(p.settings),
+                 page_flow.typst_definitions(self.flow)]   # (Page flow, SPEC §13k.2b)
         if self.nmr_links:
             parts.append(link_definition(self.link_style))
         if self.options.only is None:

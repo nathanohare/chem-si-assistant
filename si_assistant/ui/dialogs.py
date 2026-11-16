@@ -677,6 +677,11 @@ class PageTab(QWidget):
         layout.addSpacing(8)
         layout.addWidget(QLabel("<b>Example</b>"))
         layout.addWidget(self.example)
+        layout.addSpacing(8)
+        # (also in the Compile window: SPEC §13k.2b)
+        from .page_flow_ui import PageFlowSettings
+        self.flow = PageFlowSettings(settings)
+        layout.addWidget(self.flow)
         layout.addStretch()
         self.update_example()
 
@@ -709,6 +714,7 @@ class PageTab(QWidget):
 
     def apply(self, settings: dict) -> None:
         self._page.store_page_settings(settings, self.values())
+        self.flow.apply(settings)
 
 
 class TextTablesTab(QWidget):
