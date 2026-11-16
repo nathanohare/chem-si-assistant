@@ -308,6 +308,10 @@ Text boxes have a small toolbar:
 - alignment;
 - **αβγ…** for symbols;
 - **H₂**, which subscripts chemical formulas as you type (on by default);
+- **¶** (Ctrl+Shift+8, also View ▸ Show formatting marks), which shows the normally
+  hidden marks: ¶ at the end of each paragraph, ↵ at line breaks, · for spaces and → for
+  tabs. They are never printed. Off by default; the choice applies to every text box and
+  is remembered on your computer.
 - **@ Mention** (or type `@`), which refers to a compound, scheme, figure or table. The
   number updates itself if things are renumbered.
 - **Cite** (see [References and citations](#references-and-citations)).
@@ -324,6 +328,32 @@ the top of an optimisation table (so the scheme and the results print together u
 press Ctrl+V on the grid) after copying a structure in ChemDraw, or **Picture…** for a
 picture file. **Picture width** sets how wide it prints (“own size” prints it as drawn);
 **Remove picture** takes it out again.
+
+#### Table and text formatting
+
+If a table's cells wrap onto several lines, or a caption or the text spacing is not as you
+want it, these settings change it. Every one of them is shown in the live preview and the
+compiled PDF, is saved in the project, and starts at "Default" / "As the style", so
+nothing changes until you set it.
+
+- **In the table editor** (double-click a table):
+  - **Text size** sets the size of the selected cells (select several, or a whole row or
+    column, first). "Default" uses the project's table size.
+  - **Column width** sets the printed width of the selected columns in cm; "Automatic"
+    makes a column as wide as its text needs. **Fit columns to their text** sets every
+    column back to Automatic.
+  - **Shrink to fit the page width**: a table wider than the page is printed smaller as a
+    whole (text and columns), so no cell has to wrap. This is the quickest fix for a wide
+    optimisation table.
+  - **Caption size** and **Footnote size** for this table.
+- **Right-click a figure ▸ Caption size…** for one figure's caption; a scheme's
+  **Layout… ▸ Caption size** for one scheme.
+- **Project settings ▸ Text and tables** sets the defaults for the whole SI: line spacing,
+  space before and after paragraphs, the caption size, and the size of table cells, of
+  header rows (with **Header rows in bold**) and of table footnotes. Tick **Also for
+  captions given a size of their own** (or the same for tables) to apply the new default
+  everywhere, clearing sizes set for single captions, cells or footnotes. Edit ▸ Undo
+  takes it back.
 
 You don't have to format chemistry by hand. "1H NMR", "CDCl3" and "J = 7.2 Hz" are fine as
 typed; the compiled SI formats them (¹H NMR, CDCl₃, *J*). A blue underline marks formatting

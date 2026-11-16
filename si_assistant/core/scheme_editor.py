@@ -86,12 +86,15 @@ DEFAULT_LAYOUT: dict[str, Any] = {
     "align_ids": True,            # the IDs of a row on one line, under its lowest structure
     "show_label": False,          # print "Scheme S1. Name" under it (numbered, listed);
                                   # off by default: a data section's scheme stands alone
+    "caption_size_pt": 0.0,       # its caption's size; 0 = the document's caption size
+                                  # (Project settings ▸ Text and tables)
 }
 MIN_TEXT_PT = 6.0                 # conditions printed smaller than this: a compile warning
 LIMITS: dict[str, tuple[float, float]] = {
     "cond_size_pt": (5.0, 20.0), "cond_structure_pct": (10.0, 300.0),
     "arrow_before_mm": (0.0, 50.0), "arrow_after_mm": (0.0, 50.0),
-    "arrow_min_mm": (2.0, 150.0), "scale_pct": (20.0, 300.0), "gap_mm": (0.0, 20.0)}
+    "arrow_min_mm": (2.0, 150.0), "scale_pct": (20.0, 300.0), "gap_mm": (0.0, 20.0),
+    "caption_size_pt": (0.0, 30.0)}
 CHOICES: dict[str, tuple[str, ...]] = {"top_align": ALIGNS, "bottom_align": ALIGNS,
                                        "fit": FITS, "yields": YIELD_PLACES}
 SWITCHES = ("align_ids", "show_label")         # on/off settings (true/false in the JSON)

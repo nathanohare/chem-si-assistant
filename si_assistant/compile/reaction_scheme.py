@@ -22,6 +22,7 @@ size times "structure size in conditions".
 from __future__ import annotations
 
 from ..core import scheme_editor as se
+from ..core import formatting
 from ..core.markup import Run, parse
 from .text import format_chemistry, runs_to_typst, typst_string
 
@@ -242,8 +243,12 @@ class SchemeWriter:
                 # (the conditions' printed size comes back from Typst under this key:
                 # compile/run.py warns when shrinking made it too small)
                 f"key: {typst_string(self.scheme.name)}"]
-        return ("#si-reaction-scheme((\n  " + ",\n  ".join(items) + ",\n), "
+        code = ("#si-reaction-scheme((\n  " + ",\n  ".join(items) + ",\n), "
                 + ", ".join(args) + ")")
+        # Its own caption size (its Layout…), else the document's (Project settings ▸ Text
+        # and tables).
+        size = float(lay.get("caption_size_pt") or 0)
+        return formatting.caption_size_code(code, size if size > 0 else None)
 
 
 def editor_scheme(builder, scheme) -> str:
