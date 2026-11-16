@@ -28,7 +28,7 @@ from datetime import date
 from pathlib import Path
 
 from .. import resources
-from ..core import chem, headings
+from ..core import chem, formatting, headings
 from ..core import drawing_scale
 from ..core import fields as F
 from ..core import front
@@ -977,7 +977,9 @@ class Builder:
                 else:
                     img = self.image(path, (TEXT_WIDTH_IN, 7.0))
                 if img:
-                    out.append(aligned_object(self.inline_figure(img[0], p.runs, label),
+                    size = (self.project.figures(owner).get(p.figure, {}).get("caption_size")
+                            if p.figure and owner is not None else None)
+                    out.append(aligned_object(self.inline_figure(img[0], p.runs, label, size),
                                               p.stored_align))
             else:
                 run_of_text.append(p)
@@ -988,11 +990,14 @@ class Builder:
         body = runs_to_typst(caption)
         return f"[{body}]" if body.strip() else "none"
 
-    def inline_figure(self, code: str, caption: list[Run], label: str = "") -> str:
-        """A figure: a picture in a text, or a file shown inline with a compound."""
+    def inline_figure(self, code: str, caption: list[Run], label: str = "",
+                      caption_size: float | None = None) -> str:
+        """A figure: a picture in a text, or a file shown inline with a compound.
+        `caption_size`: its own caption size in pt (None = the document's)."""
         self.kinds["si-figure"] += 1
-        return (f"#si-figure({code}, [{runs_to_typst([Run(label or 'Figure')])}], "
-                f"{self.caption_code(caption)})")
+        return formatting.caption_size_code(
+            f"#si-figure({code}, [{runs_to_typst([Run(label or 'Figure')])}], "
+            f"{self.caption_code(caption)})", caption_size)
 
     def cell_text(self, text: str, where: str) -> str:
         """A table cell or footnote: its paragraphs on separate lines."""
@@ -1021,15 +1026,21 @@ class Builder:
         # a page or the table editor's "may run over a page break" is ticked (`breakable`); then
         # it continues on the next page with its header rows repeated.
         split = ", split: true" if table.breakable else ""
-        return (f"#si-table({self.table_code(table, where, folder)}, "
+        code = (f"#si-table({self.table_code(table, where, folder)}, "
                 f"{self.notes_code(table, where)}, "
                 f"[{runs_to_typst([Run(label or 'Table')])}], {self.caption_code(caption)}"
                 f"{split})")
+        # A caption size of its own (table editor), else the document's (set in document()).
+        return formatting.caption_size_code(code, table.caption_size)
 
     def notes_code(self, table: Table, where: str) -> str:
         notes = [self.cell_text(n, where) for n in table.footnotes]
         notes = [n for n in notes if n]
-        return "[" + "#linebreak()".join(notes) + "]" if notes else "none"
+        if not notes:
+            return "none"
+        size = table.notes_size if table.notes_size is not None \
+            else formatting.table_defaults(self.project.settings)["notes_size"]
+        return "[" + formatting.text_size_code("#linebreak()".join(notes), size) + "]"
 
     def cell_picture(self, cell, folder: Path | None, where: str) -> str:
         """A table cell's picture (core/tables.py) as Typst image(...), at its own size (or
@@ -1064,7 +1075,9 @@ class Builder:
                 cell.rowspan = min(cell.rowspan, header - r)
         t.normalize()
 
-        def cell_code(cell) -> str:
+        defaults = formatting.table_defaults(self.project.settings)
+
+        def cell_code(cell, in_header: bool = False) -> str:
             args = []
             if cell.colspan > 1:
                 args.append(f"colspan: {cell.colspan}")
@@ -1076,18 +1089,35 @@ class Builder:
             picture = self.cell_picture(cell, folder, where)
             if picture:   # the picture above the text (e.g. a structure with its name)
                 text = f"#{picture}" + (f"#linebreak(){text}" if text else "")
+            # Its own size (selected cells in the table editor), else the header rows' or
+            # the cells' default (Project settings ▸ Text and tables).
+            size = cell.size if cell.size is not None else (
+                defaults["header_size"] if in_header else None)
+            text = formatting.text_size_code(text, size, in_header and defaults["header_bold"])
             body = f"[{text}]"
             return f"table.cell({', '.join(args)}){body}" if args else body
 
-        head = [cell_code(cell) for r, _c, cell in t.cells() if r < header]
+        head = [cell_code(cell, True) for r, _c, cell in t.cells() if r < header]
         body = [cell_code(cell) for r, _c, cell in t.cells() if r >= header]
         aligns = ", ".join(f"{a} + horizon" for a in t.columns)
-        parts = [f"columns: {t.n_cols}", f"align: ({aligns},)", "stroke: none",
+        if any(w is not None for w in t.widths):   # widths typed in the table editor (cm)
+            columns = "(" + ", ".join("auto" if w is None else f"{w:g}cm"
+                                      for w in t.widths) + ",)"
+        else:
+            columns = str(t.n_cols)
+        parts = [f"columns: {columns}", f"align: ({aligns},)", "stroke: none",
                  "table.hline(stroke: 0.8pt)"]
         if head:
             parts += ["table.header(" + ", ".join(head) + ")", "table.hline(stroke: 0.5pt)"]
         parts += body + ["table.hline(stroke: 0.8pt)"]
-        return "table(" + ", ".join(parts) + ")"
+        code = "table(" + ", ".join(parts) + ")"
+        if defaults["size"] is not None:   # the cells' default size (header rows too)
+            code = f"{{ set text(size: {defaults['size']:g}pt); {code} }}"
+        if t.fit_width:   # shrunk (text and all) to the text width when wider
+            code = ("layout(room => { let t = " + code + "; let w = measure(t).width; "
+                    "if w > room.width { scale(room.width / w * 100%, reflow: true, t) } "
+                    "else { t } })")
+        return code
 
     def text_section(self, section: Section, level: int = 1) -> str:
         """A custom section: its heading at `level` (its depth in the tree), then its text,
@@ -1130,7 +1160,8 @@ class Builder:
                 out.append("#pagebreak(weak: true)")
             out.append(f"#align(center, {code})")
         if caption:
-            out.append(f"#align(center, text(size: 10pt)[{runs_to_typst([Run(caption)])}])")
+            size = formatting.formatting(self.project.settings)["caption_size"] or 10
+            out.append(f"#align(center, text(size: {size:g}pt)[{runs_to_typst([Run(caption)])}])")
         return "\n\n".join(out)
 
     def page_aspect(self, path: Path, page: int | None) -> float | None:
@@ -1697,7 +1728,9 @@ class Builder:
         parts = ['#import "style.typ": *',
                  f"#show: si-doc.with(title: {typst_string(str(p.settings.get('title') or ''))}, "
                  f"{self.page_args()})",
-                 headings.typst_set_rule(p.settings)]   # (Project settings ▸ Heading numbers)
+                 headings.typst_set_rule(p.settings),   # (Project settings ▸ Heading numbers)
+                 # (Project settings ▸ Text and tables: line and paragraph spacing, captions)
+                 formatting.typst_rules(p.settings)]
         if self.nmr_links:
             parts.append(link_definition(self.link_style))
         if self.options.only is None:
