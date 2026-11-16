@@ -666,6 +666,19 @@ piece that is M. Automatic takes the largest piece that is not a common counter-
 BF₄⁻, PF₆⁻, OTf⁻, OTs⁻, BArF⁻, Na⁺, K⁺, NBu₄⁺…) and shows which one it took. A typed M formula
 (✎) may carry a charge, e.g. "C10H16N+".
 
+**How a salt's ion is printed:** with its cation as M, a pyridinium bromide is printed as
+[M]⁺ by default. To print it the way M = the whole salt is written, as **[M−Br]⁺**, choose
+Project settings ▸ Output ▸ **HRMS ion for salts** ▸ "[M−Br]⁺". The counter-ion is
+recognised from the structure: [M−Br]⁺, [M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺ for a dibromide,
+[M−Na]⁻ for a sodium salt; a less common one is written as its formula. This only changes
+the label: the m/z is the cation's either way. It applies when the adduct is [M]⁺ or [M]⁻
+(the usual one for a charged M); other adducts are printed as they are.
+
+**Printed as:** a label typed in a compound's HRMS **Printed as** box is printed instead of
+the automatic one, for that compound only (e.g. "[M−Br]+" in a project left on [M]⁺, or a
+label of your own). Leave it empty for the automatic label, which the box shows in grey. The
+m/z is still calculated from M and the adduct.
+
 **Which value is used:** of all the m/z values in all the files, those within your HRMS
 tolerance (Project settings ▸ Output) of a calculated isotope peak of the chosen ion. A
 value the report itself marks as measured ("Meas. m/z", "found") beats an unmarked one; the

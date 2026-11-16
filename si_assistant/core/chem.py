@@ -440,6 +440,42 @@ def is_counter_ion(smiles: str) -> bool:
     return mol is not None and _counter_ion_key(mol) in _COUNTER_IONS
 
 
+def fragment_smiles(mol: Chem.Mol) -> list[str]:
+    """Every piece of a structure as the canonical SMILES species gives it, one entry per
+    copy (so the dibromide of a dication gives the bromide twice)."""
+    return [Chem.MolToSmiles(Chem.RemoveHs(frag))
+            for frag in Chem.GetMolFrags(mol, asMols=True, sanitizeFrags=True)]
+
+
+# How a counter-ion is written in an ion label such as [M−Br]⁺ or [M−OTf]⁺ (SPEC §13f.3).
+# Any other piece is written as its formula.
+_COUNTER_ION_NAMES = {
+    "[F-]": "F", "[Cl-]": "Cl", "[Br-]": "Br", "[I-]": "I",
+    "F[B-](F)(F)F": "BF4", "F[P-](F)(F)(F)(F)F": "PF6", "F[Sb-](F)(F)(F)(F)F": "SbF6",
+    "F[As-](F)(F)(F)(F)F": "AsF6", "[O-]Cl(=O)(=O)=O": "ClO4", "[O-][N+](=O)[O-]": "NO3",
+    "[O-]S(=O)(=O)C(F)(F)F": "OTf", "O=S(=O)([N-]S(=O)(=O)C(F)(F)F)C(F)(F)F": "NTf2",
+    "CS(=O)(=O)[O-]": "OMs", "Cc1ccc(S(=O)(=O)[O-])cc1": "OTs",
+    "[O-]C(=O)C(F)(F)F": "CF3CO2",
+    "FC(F)(F)c1cc(cc(c1)C(F)(F)F)[B-](c1cc(cc(c1)C(F)(F)F)C(F)(F)F)"
+    "(c1cc(cc(c1)C(F)(F)F)C(F)(F)F)c1cc(cc(c1)C(F)(F)F)C(F)(F)F": "BArF",
+    "c1ccc([B-](c2ccccc2)(c2ccccc2)c2ccccc2)cc1": "BPh4",
+    "[Li+]": "Li", "[Na+]": "Na", "[K+]": "K", "[Rb+]": "Rb", "[Cs+]": "Cs", "[NH4+]": "NH4",
+}
+_COUNTER_ION_NAME_KEYS = {
+    _counter_ion_key(m): name for smi, name in _COUNTER_ION_NAMES.items()
+    if (m := Chem.MolFromSmiles(smi)) is not None}
+
+
+def piece_name(smiles: str) -> str:
+    """How a piece of a salt is written in an ion label: the usual name of a common
+    counter-ion ("Br", "BF4", "OTf", "Na"…), else its formula ("C2H3O2")."""
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return smiles
+    name = _COUNTER_ION_NAME_KEYS.get(_counter_ion_key(mol))
+    return name or mol_info(mol).formula
+
+
 def main_species(pieces: list[tuple[str, MolInfo]]) -> int:
     """Index (in species' list) of the automatic M of a structure with several pieces:
     the largest piece that is not a common counter-ion (so the cation of a triflate,

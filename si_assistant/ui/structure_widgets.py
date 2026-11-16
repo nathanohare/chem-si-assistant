@@ -889,6 +889,23 @@ class HrmsEditor(PartsEditor):
         row.addWidget(self.formula_preview, 1)
         grid.addLayout(row, grid.rowCount(), 0, 1, -1)
 
+        # The ion as printed in the SI (SPEC §13f.3): empty = automatic (the adduct, or
+        # [M−Br]⁺ for a salt when the project asks for it). Only the label: the m/z is
+        # still calculated from M and the adduct.
+        self.label_edit = QLineEdit(F.part_text(value.get(checks.ION_LABEL_KEY, "")))
+        self.label_edit.setMaximumWidth(220)
+        self.label_edit.setToolTip(
+            "The ion as it is printed in the SI, e.g. [M−Br]+ or [M−OTf]+. Leave empty to "
+            "print it automatically. Only the printed label changes: the m/z is still "
+            "calculated from M and the adduct.\nFor salts, Project settings ▸ HRMS ion for "
+            "salts chooses between [M]+ and [M−Br]+ for every compound.")
+        self.label_edit.textEdited.connect(lambda *_: self.changed.emit())
+        label_row = QHBoxLayout()
+        label_row.addWidget(QLabel("Printed as:"))
+        label_row.addWidget(self.label_edit)
+        label_row.addStretch(1)
+        grid.addLayout(label_row, grid.rowCount(), 0, 1, -1)
+
         self.calc = QLabel()
         self.calc.setWordWrap(True)
         self.calc.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -914,6 +931,7 @@ class HrmsEditor(PartsEditor):
         value = self.compound.values[self.defn.key]
         value["species"] = self._species_key
         value["formula"] = self.formula_edit.text().strip()
+        value[checks.ION_LABEL_KEY] = self.label_edit.text().strip()
         # Kept from what is stored: the report files and the printing choice (saved by
         # their own actions), and where a found m/z filled from a report came from.
         for key in (ms_reports.REPORTS_KEY, ms_reports.PRINT_KEY):
@@ -957,6 +975,7 @@ class HrmsEditor(PartsEditor):
         value.update({k: get_part_value(w) for k, w in self.widgets.items()})
         value["species"] = self._species_key
         value["formula"] = self.formula_edit.text().strip()
+        value[checks.ION_LABEL_KEY] = self.label_edit.text().strip()
         value.pop(ms_reports.FOUND_FROM_KEY, None)
         if self._found_from is not None:
             value[ms_reports.FOUND_FROM_KEY] = dict(self._found_from)
@@ -1043,6 +1062,15 @@ class HrmsEditor(PartsEditor):
         self.species_box.setCurrentIndex(max(index, 0))
         self.species_box.blockSignals(False)
 
+    def _show_printed_label(self, mol) -> None:
+        """The automatic label as the Printed as box's placeholder; a typed one highlighted."""
+        value = self._value_on_screen()
+        value[checks.ION_LABEL_KEY] = ""
+        auto = checks.printed_ion_label(self.project, mol, value)
+        self.label_edit.setPlaceholderText(f"auto: {chem.adduct_display(auto)}")
+        typed = bool(self.label_edit.text().strip())
+        self.label_edit.setStyleSheet(self.MANUAL_STYLE if typed else "")
+
     def refresh_calculation(self, opening: bool = False) -> None:
         # The found m/z: typed by hand (it is the user's own from now on), or filled from
         # the reports when something else changed (SPEC §13n.3a).
@@ -1067,6 +1095,7 @@ class HrmsEditor(PartsEditor):
         except chem.ChemError:
             pass
         self._fill_species(auto)
+        self._show_printed_label(mol)
         manual = bool(self.formula_edit.text().strip())
         auto_formula = species_text = ""
         auto_counts = None
@@ -1121,6 +1150,10 @@ class HrmsEditor(PartsEditor):
         text = (f"<b>Calcd</b> for {formula_html(mono.formula)}{star} {display}: "
                 f"<b>{mono.mz:.4f}</b>"
                 f"<br><span style='color:#888'>Isotope pattern (m/z): {pattern}</span>")
+        printed = checks.printed_ion_label(self.project, mol, self._value_on_screen())
+        if printed.strip() != adduct.strip():
+            text += (f"<br><span style='color:#888'>Printed in the SI as "
+                     f"{html_escape(chem.adduct_display(printed))}.</span>")
         hint = checks.charged_adduct_hint(sp.info, adduct)
         if hint:
             text += f"<br><span style='color:#d35400'>⚠ {hint}</span>"

@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from ..core import fields as F
-from ..core import headings, ms_reports
+from ..core import checks, headings, ms_reports
 from ..core.compound_ids import LETTERS, NUMBERS, pattern_ids
 from ..core.ids import new_id
 from ..core.lock import LockInfo
@@ -162,6 +162,20 @@ class ProjectSettingsDialog(QDialog):
         # the box is changed: see apply)
         self._tolerance_shown = self.tolerance.value()
         oform.addRow("HRMS tolerance:", self.tolerance)
+        # How a salt's ion is printed (SPEC §13f.3); a compound's "Printed as" box wins.
+        self.salt_label = QComboBox()
+        self.salt_label.addItem("[M]⁺ — M is the charged piece (e.g. the pyridinium cation)",
+                                checks.SALT_LABEL_PIECE)
+        self.salt_label.addItem("[M−Br]⁺ — M is the whole salt, the counter-ion taken off",
+                                checks.SALT_LABEL_WHOLE)
+        self.salt_label.setCurrentIndex(
+            max(0, self.salt_label.findData(checks.salt_label_style(project))))
+        self.salt_label.setToolTip(
+            "How the HRMS ion of a salt is printed when its charged piece is M and the "
+            "adduct is [M]⁺ or [M]⁻: as [M]⁺, or for M = the whole salt as [M−Br]⁺, "
+            "[M−OTf]⁺, [M−2Br]²⁺, [M−Na]⁻… The calculated m/z is the same either way. A "
+            "compound's own “Printed as” label (in its HRMS field) is used instead.")
+        oform.addRow("HRMS ion for salts:", self.salt_label)
         spectra_note = QLabel("Spectra per page, the structure's position on them and the rest "
                               "of the spectra layout are set on the Spectra section's page in "
                               "the tree.")
@@ -335,6 +349,10 @@ class ProjectSettingsDialog(QDialog):
         headings.store_heading_numbers(s, self.heading_numbers.currentData())
         if self.tolerance.value() != self._tolerance_shown:
             s["hrms_tolerance_ppm"] = self.tolerance.value()
+        if self.salt_label.currentData() == checks.SALT_LABEL_WHOLE:
+            s[checks.SALT_LABEL_KEY] = checks.SALT_LABEL_WHOLE
+        else:   # (the default is not written into project.json)
+            s.pop(checks.SALT_LABEL_KEY, None)
         s["auto_nmr_31P"] = self.auto_31p.isChecked()
         s["auto_nmr_11B"] = self.auto_11b.isChecked()
         s["paste_dpi"] = self.paste_dpi.currentData()
