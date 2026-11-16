@@ -1261,6 +1261,50 @@ Nathan asked for the program to look like his other program, Chem Illustrator (n
 3. *As built:* `core/chem_names.py` (`italic_spans`, `name_runs`); `compile/blocks.py`
    `compound_title`. Tests: `tests/test_chem_names.py`.
 
+## 13y. Table and text formatting (Nathan, 2026-11-16)
+
+Nathan's request: the first tables of his SI wrapped their cells over several lines, with
+no way to change text size or column widths; captions and text spacing had few options;
+and he wanted Word's Show/Hide ¶. His choices: settings for selected cells, with a
+document-wide default (header rows with their own default); a caption default that can be
+applied to the whole document, with per-caption overrides; PDF output now (Word export,
+which the program does not have, is a separate future task).
+
+1. **Document defaults** (Project settings ▸ **Text and tables**, `core/formatting.py`):
+   line spacing (× the style's own: Typst `leading` = 1.3 em × n − 0.7 em, so 1 = the
+   styles' 0.6 em), space before and after paragraphs (pt; the gap between two paragraphs
+   is the after of one plus the before of the next, each half of the style's 1 em when
+   not set), caption size (figures, tables, schemes and an Attachment section's caption),
+   table cell size, header row size and **bold**, table footnote size. Stored as
+   `"formatting": {…}` in project.json, only the values set; nothing set = the style's own
+   and no Typst code is added, so existing projects print unchanged. They are Typst rules
+   placed after the style (`#set par(...)`, `#show figure.caption: set text(...)`), or
+   set rules inside the table and its cells, so a user's own copy of a style keeps working.
+2. **Per table** (table editor): text size of the selected cells (`"size"` on the cell),
+   column widths in cm (`"widths"`, null = automatic; "Fit columns to their text" clears
+   them), **Shrink to fit the page width** (`"fit_width"`: Typst measures the table at
+   its natural width and scales it, text and all, to the text width when wider), caption
+   size (`"caption_size"`) and footnote size (`"notes_size"`). A cell's own size wins over
+   the header and cell defaults. Merging keeps the first cell's size; widths follow
+   inserted and deleted columns.
+3. **Per caption:** a figure's right-click ▸ **Caption size…** (`"caption_size"` in its
+   figure entry); a scheme's Layout… ▸ **Caption size** (`caption_size_pt`, 0 = the
+   document's; hidden in Project settings ▸ Schemes, whose default is the document's).
+   "Also for captions given a size of their own" / "Also for cells and footnotes given a
+   size of their own" in the settings tab clears those (`Project.clear_caption_sizes`,
+   `clear_table_sizes`), as part of the settings' undo step.
+4. **Show formatting marks:** a **¶** toggle in every text box's toolbar (Ctrl+Shift+8)
+   and View ▸ Show formatting marks: Qt's own marks for paragraph ends, line breaks,
+   spaces and tabs. Off by default; one switch for every text box, remembered on the
+   computer (like the H₂ toggle), never stored in the project or printed.
+5. *Not yet:* per-paragraph spacing in the text editor, column widths by dragging in the
+   table editor's grid, and Word (.docx) export.
+6. *As built:* `core/formatting.py`, `core/tables.py`, `compile/document.py`,
+   `compile/reaction_scheme.py`, `ui/format_widgets.py`, `ui/table_editor.py`,
+   `ui/dialogs.py` (TextTablesTab), `ui/text_objects.py`, `ui/rich_text.py`,
+   `ui/text_checks.py`. Tests: `tests/test_formatting.py` (including PDFs checked for the
+   printed sizes, and a 12-column table that stays on one line when shrunk to fit).
+
 ## 14. Glossary
 
 - **SI** — Supporting/Supplemental Information.
