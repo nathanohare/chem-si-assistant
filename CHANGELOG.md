@@ -6,6 +6,9 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **"et al." in the page header.** Project settings ▸ Page ▸ **{authors} shows**: all
+  names (as before) or **First author et al.**, e.g. "O'Hare et al." ("O'Hare and Smith"
+  for two authors).
 - **HRMS ion labels for salts.** Project settings ▸ Output ▸ **HRMS ion for salts** can
   print a salt's ion as **[M−Br]⁺** (M = the whole salt) instead of [M]⁺ (M = the cation).
   The counter-ion is recognised from the structure ([M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺,
