@@ -989,7 +989,8 @@ the headings you type in a section's text and the General Information heading ar
 numbered too; compound titles and general procedures never are.
 Other tabs there set:
 - structure drawings (bond length, fonts…);
-- page headers and footers;
+- page headers and footers (the **{authors} shows** box there can shorten {authors} to
+  "O'Hare et al.");
 - figure, table and scheme labels;
 - the NMR impurity table;
 - your name.

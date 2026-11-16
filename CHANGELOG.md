@@ -6,6 +6,9 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **"et al." in the page header.** Project settings ▸ Page ▸ **{authors} shows**: all
+  names (as before) or **First author et al.**, e.g. "O'Hare et al." ("O'Hare and Smith"
+  for two authors).
 - **Heading numbers.** Project settings ▸ Output ▸ **Heading numbers**: as the journal
   style does, an **outline** (sections 1, 2, 3; the next level A, B, C; then a, b, c),
   1, 1.1, 1.1.1, or none, in any style. The outline and 1.1.1 also number the headings
