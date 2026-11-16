@@ -1228,6 +1228,22 @@ class Builder:
             img = self.structure_image(compound, STRUCTURE_MAX)
             if img:
                 out.append(f"#si-structure({img})")
+        where = self.compound_notes(compound, block, display_id)
+        out.append(paragraphs_to_typst(self.link_paragraphs(block.paragraphs, where),
+                                       heading_offset=level, outlined_levels=0))
+        for index, fig in enumerate(block.figures):
+            img = self.image(fig.path, (TEXT_WIDTH_IN, 4.0))
+            item = self.labels.at(compound.id, index)
+            if img:
+                caption = [Run(fig.caption)]
+                if self.options.format_text:
+                    caption = format_chemistry(caption)
+                out.append(self.inline_figure(img[0], caption, item.label if item else ""))
+        return "\n\n".join(x for x in out if x)
+
+    def compound_notes(self, compound: Compound, block: CompoundBlock, display_id: str) -> str:
+        """The compile notes about a compound's block (its general procedure sentence, a
+        missing ID); returns how the notes name it. Also used by the Word export."""
         where = f"{display_id} ({compound.name})" if compound.name else display_id
         if not block.custom_text:
             problems: list[str] = []
@@ -1240,19 +1256,9 @@ class Builder:
                     and self.project.compound_gp(compound) is None):
                 self.warnings.append(f"{where}: its general procedure no longer exists; the "
                                      "“Prepared according to…” sentence was left out.")
-        out.append(paragraphs_to_typst(self.link_paragraphs(block.paragraphs, where),
-                                       heading_offset=level, outlined_levels=0))
-        for index, fig in enumerate(block.figures):
-            img = self.image(fig.path, (TEXT_WIDTH_IN, 4.0))
-            item = self.labels.at(compound.id, index)
-            if img:
-                caption = [Run(fig.caption)]
-                if self.options.format_text:
-                    caption = format_chemistry(caption)
-                out.append(self.inline_figure(img[0], caption, item.label if item else ""))
         if display_id == "ID?":
             self.warnings.append(f"“{compound.name or 'A compound'}” has no ID (printed as “ID?”).")
-        return "\n\n".join(x for x in out if x)
+        return where
 
     def scheme(self, scheme: SchemePage, level: int = 2) -> str:
         # Made with the scheme editor (SPEC §13n.4): laid out by the style.
@@ -1639,6 +1645,20 @@ class Builder:
         settings (the Spectra section's defaults, then its own) give how many share a page
         and the page's orientation; a spectrum that needs another layout starts a new
         page. `heading` (Typst) goes at the top of the first page. "" if there are none."""
+        out = []
+        for i, (orientation, per_page, slots) in enumerate(self.spectra_page_list(compounds,
+                                                                                  limit)):
+            landscape = "true" if orientation == "landscape" else "false"
+            top = heading + "\n" if heading and i == 0 else ""
+            out.append(f"#page(flipped: {landscape})[\n{top}"
+                       f"#si-spectra-page({per_page}, {landscape}, ({', '.join(slots)},))\n]")
+        return "\n\n".join(out)
+
+    def spectra_page_list(self, compounds: list[Compound],
+                          limit: int = 0) -> list[tuple[str, int, list[str]]]:
+        """The spectra pages of `compounds` (spectra_pages): (orientation, spectra per page,
+        each spectrum's si-spectrum code) for each page. Also used by the Word export
+        (compile/word.py), which prints each page as a picture."""
         defaults = self.project.spectra_defaults()
         entries: list[spectra_mod.Spectrum] = []
         problems: list[str] = []
@@ -1667,13 +1687,7 @@ class Builder:
                     or len(pages[-1][2]) >= per_page):
                 pages.append((orientation, per_page, []))
             pages[-1][2].append(code)
-        out = []
-        for i, (orientation, per_page, slots) in enumerate(pages):
-            landscape = "true" if orientation == "landscape" else "false"
-            top = heading + "\n" if heading and i == 0 else ""
-            out.append(f"#page(flipped: {landscape})[\n{top}"
-                       f"#si-spectra-page({per_page}, {landscape}, ({', '.join(slots)},))\n]")
-        return "\n\n".join(out)
+        return pages
 
     def spectra_of_preview(self, compounds: list[Compound]) -> str:
         """The spectra shown after a compound, scheme or section in the toolbar Preview."""

@@ -23,6 +23,8 @@ name = B.app_name()
 datas = B.data_files()
 # pyspellchecker's English word list (the other languages are not used).
 datas += collect_data_files("spellchecker", includes=["resources/en.json.gz"])
+# python-docx's blank Word document and header/footer parts (the Word export starts from them).
+datas += collect_data_files("docx", includes=["templates/*"])
 # RDKit's data folder (fonts for structure drawings, functional groups, salts…).
 datas += collect_data_files("rdkit", includes=["Data/**/*"])
 # The package information of 'cryptography' and cffi, which holds their licence texts
@@ -37,7 +39,7 @@ a = Analysis(
     hiddenimports=[
         # Imported inside functions or by Qt itself, so PyInstaller may not see them.
         "PySide6.QtPdf", "PySide6.QtPdfWidgets", "PySide6.QtSvg", "rdkit.Chem.rdChemReactions",
-        "pypdf", "spellchecker",
+        "pypdf", "spellchecker", "docx", "lxml.etree", "lxml._elementpath",
         # pypdf looks for 'cryptography' only when it starts, and quietly does without it,
         # so make sure it comes along: without it, PDFs that instrument software saved with
         # edit restrictions (AES-encrypted, empty opening password) can't be read. It is

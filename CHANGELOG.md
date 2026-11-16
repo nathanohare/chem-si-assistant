@@ -6,6 +6,13 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Word export.** Compile SI ▸ **Save as** makes the SI as a **Word document**
+  (build/SI.docx), or as both a PDF and a Word document. The Word file has the same
+  content as the PDF: text, headings (Word's Heading styles), compound data, tables (Word
+  tables with merged cells and rules) and references are editable; structures, schemes and
+  spectra pages are pictures drawn exactly as in the PDF. Page numbers S1, S2…, the header
+  and footer, and the Text and tables settings are kept. Word fills in the table of
+  contents' page numbers when it opens the file.
 - **Table and text formatting.** The table editor sets the **text size of selected
   cells**, **column widths** (or "Fit columns to their text"), **Shrink to fit the page
   width** for wide tables, and the table's **caption and footnote sizes**. Project settings

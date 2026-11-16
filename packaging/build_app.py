@@ -358,6 +358,7 @@ def verify(app_dir: Path, platform: str = sys.platform) -> list[str]:
               data / "si_assistant" / "icons" / "app_icon_256.png",
               data / "si_assistant" / "example" / "Example project" / "project.json",
               data / "spellchecker" / "resources" / "en.json.gz",
+              data / "docx" / "templates" / "default.docx",
               data / "rdkit" / "Data" / "Fonts",
               data / "docs" / "user-guide.md", data / "LICENSE",
               data / "THIRD_PARTY_NOTICES.md", executable(app_dir, platform)]

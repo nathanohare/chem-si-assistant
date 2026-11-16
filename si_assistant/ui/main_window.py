@@ -30,7 +30,8 @@ from ..core.undo import UndoContext
 from . import (feedback_ui, help_ui, restart, rich_text, text_checks, theme, undo_keys,
                update_ui, wheel_guard)
 from ..compile.document import CompileOptions
-from .compile_ui import CompileDialog, PreviewWindow, open_file, run_compile, show_warnings
+from .compile_ui import (CompileDialog, PreviewWindow, open_file, run_compile,
+                         run_word_compile, show_warnings)
 from .compound_panel import CompoundPanel, make_read_only
 from .warnings_panel import WarningsPanel
 from .scheme_panel import SchemePanel
@@ -3477,13 +3478,18 @@ class MainWindow(QMainWindow):
             self._save(dlg.remember)
         if self._preview is not None:
             self._preview.release()
-        result = run_compile(self, self.project, dlg.options())
-        if result is None:
-            return
-        self.statusBar().showMessage(f"SI compiled: {result.pdf}", 6000)
-        if dlg.open_pdf.isChecked():
-            open_file(result.pdf)
-        show_warnings(self, result, "SI compiled")
+        kind = dlg.output_format()   # PDF, Word or both (SPEC §13z)
+        for run in ((run_compile,) if kind == "pdf" else (run_word_compile,) if kind == "docx"
+                    else (run_compile, run_word_compile)):
+            if self.project is None or self.project.read_only:
+                return
+            result = run(self, self.project, dlg.options())
+            if result is None:
+                return
+            self.statusBar().showMessage(f"SI compiled: {result.pdf}", 6000)
+            if dlg.open_pdf.isChecked():
+                open_file(result.pdf)
+            show_warnings(self, result, "SI compiled")
 
     def preview_current(self) -> None:
         if self.project is None or self.project.read_only:

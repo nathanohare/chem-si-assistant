@@ -246,11 +246,24 @@ def _compile(folder: Path) -> str:
     return f"{result.pdf} ({pages} pages){note}"
 
 
+def _word() -> str:
+    """python-docx and its blank document (the Word export, SPEC §13z) came along."""
+    import io
+    from docx import Document
+    doc = Document()
+    doc.add_heading("Supporting Information", level=1)
+    out = io.BytesIO()
+    doc.save(out)
+    if not out.getvalue().startswith(b"PK"):
+        raise RuntimeError("no Word file")
+    return f"Word file {len(out.getvalue()):,} bytes"
+
+
 def run(report: Path, project: Path | None = None) -> int:
     """Run every check, write `report` (JSON) and return the exit code (0 = all passed)."""
     checks: list[tuple[str, Callable[[], str]]] = [
         ("files", _files), ("python", _python), ("spelling", _spelling),
-        ("rdkit", _rdkit), ("typst", _typst), ("pdf", _pdf), ("qt", _qt),
+        ("rdkit", _rdkit), ("typst", _typst), ("pdf", _pdf), ("word", _word), ("qt", _qt),
         ("example", _example)]
     if project is not None:
         checks.append(("compile", lambda: _compile(project)))

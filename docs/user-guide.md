@@ -1004,12 +1004,38 @@ In the Compile SI window you choose:
 - the structures: "ChemDraw pictures where available; program drawings otherwise" (the
   default) or "Program drawings for every compound";
 - whether chemistry text is formatted automatically;
-- whether to open the PDF when it's ready;
+- what to save: a **PDF**, a **Word document**, or both (see below);
+- whether to open the file when it's ready;
 - which parts to include. Untick a section to leave it out, together with its
   sub-sections and its compounds' spectra.
 
 The PDF is saved as **build/SI.pdf** in the project folder. If that file is open in a PDF
 viewer that locks it, the new one gets a numbered name instead.
+
+### The SI as a Word document
+
+Choose **Save as: Word document** (or **PDF and Word document**) in the Compile SI window to
+get **build/SI.docx**, for a journal that asks for Word or to make last changes by hand.
+It has the same content and order as the PDF:
+
+- Text, headings, compound data, captions, tables and references are ordinary Word text
+  you can edit. Section headings use Word's **Heading 1, 2, 3…** styles, so Word's
+  navigation pane shows them.
+- Tables are Word tables, with their merged cells, rules, sizes and column widths.
+- Structures, schemes, X-ray drawings and the spectra pages are **pictures**, drawn
+  exactly as in the PDF. Each spectra page is one picture (with its header line and
+  structure box); landscape spectra pages are landscape pages in Word too.
+- Page numbers (S1, S2…), the header and footer, and Project settings ▸ Text and tables
+  are kept.
+- When Word opens the file it asks whether to **update the fields**: answer **Yes**, so
+  the table of contents gets its page numbers. (Later, select everything with Ctrl+A and
+  press F9 to update them again after editing.) A heading you add in Word is not added to
+  the table of contents.
+- The References are formatted by the program in the journal's pattern; check unusual
+  references (books, web pages) once.
+
+The Word file is made from the project each time, so changes you make in Word are not
+read back: make lasting changes in the program and compile again.
 
 The **journal style** (ACS, Wiley or RSC) is chosen in **Project Settings ▸ Output**.
 **Heading numbers**, next to it, numbers the headings: as the journal style does (none in
