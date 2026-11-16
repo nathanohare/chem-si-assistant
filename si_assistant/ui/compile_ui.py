@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
                                QVBoxLayout, QWidget)
 
 from ..compile.document import CompileOptions, build
-from ..compile.qt_images import content_box, convert_to_png, image_info
+from ..compile.qt_images import content_box, convert_to_png, image_info, ink_map
 from ..compile.run import CompileError, CompileResult, partial_pdf, place_pdf, typeset_pdf
 from ..compile.word import finish_docx, prepare_docx
 from ..core import front
@@ -314,7 +314,7 @@ def run_compile(parent: QWidget, project: Project, options: CompileOptions,
     QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
         built = build(project, options, image_info, convert_to_png, name=name,
-                      crop=content_box)
+                      crop=content_box, ink=ink_map)
         warnings = in_background(lambda: typeset_pdf(built.typ_path, project.folder, name,
                                                      list(built.warnings)))
         if project.read_only:
@@ -348,7 +348,8 @@ def run_word_compile(parent: QWidget, project: Project, options: CompileOptions,
         return None
     QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
-        built = prepare_docx(project, options, image_info, convert_to_png, crop=content_box)
+        built = prepare_docx(project, options, image_info, convert_to_png, crop=content_box,
+                             ink=ink_map)
         path, warnings = in_background(lambda: finish_docx(built, name))
         return CompileResult(path, None, warnings)
     except CompileError as e:

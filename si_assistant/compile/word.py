@@ -58,12 +58,14 @@ from ..core import page as page_setup
 from ..core import scheme_editor
 from ..core.markup import SUB, SUPER, Paragraph, Run, parse
 from ..core.project import (GENERAL_OWNER, SPECTRA_SECTION, Compound, Project,
-                            SchemePage, Section, TextOwner, figure_width_cm)
+                            SchemePage, Section, TextOwner, figure_uncaptioned,
+                            figure_width_cm)
 from ..core.tables import Table
 from .blocks import CompoundBlock, compound_block
 from .document import (_BAD_VALUE, ATTACHMENT_MAX_HEIGHT_IN, CM_PER_IN, HRMS_HEADING,
                        HRMS_PAGE_IN, SPECTRA_HEADING, STRUCTURE_MAX, STYLES_DIR,
-                       TEXT_WIDTH_IN, Builder, CompileError, CompileOptions)
+                       TEXT_WIDTH_IN, Builder, CompileError, CompileOptions,
+                       note_auto_unplaced)
 from .reaction_scheme import SchemeWriter
 from .text import format_chemistry, leave_alone, link_target
 
@@ -1050,10 +1052,12 @@ class WordWriter:
             if p.table:
                 self.table(owner, p.table, label, p.runs, where, p.stored_align)
                 continue
-            path, width_cm = None, None
+            path, width_cm, bare = None, None, False
             if p.figure and owner is not None:
                 path = self.project.figure_path(owner, p.figure)
-                width_cm = figure_width_cm(self.project.figures(owner).get(p.figure, {}))
+                entry = self.project.figures(owner).get(p.figure, {})
+                width_cm = figure_width_cm(entry)
+                bare = figure_uncaptioned(entry)
                 if path is None:
                     b.warnings.append(f"{where}: a figure's picture is no longer in the "
                                       "project; left out.")
@@ -1066,7 +1070,10 @@ class WordWriter:
                               natural=False)
             else:
                 img = b.image(path, (TEXT_WIDTH_IN, 7.0))
-            if img:
+            if img and bare:   # just the picture: no number, no caption (issue #3)
+                where_to = p.stored_align if p.stored_align in ("left", "right") else "center"
+                self.image_code_picture(self.picture_paragraph(where_to).add_run(), img)
+            elif img:
                 size = (self.project.figures(owner).get(p.figure, {}).get("caption_size")
                         if p.figure and owner is not None else None)
                 self.figure(img, p.runs, label, p.stored_align, size)
@@ -1834,7 +1841,7 @@ class WordWriter:
 # ---------------------------------------------------------------------- building
 
 def prepare_docx(project: Project, options: CompileOptions, image_info, converter=None,
-                 crop=None) -> WordBuild:
+                 crop=None, ink=None) -> WordBuild:
     """Build the Word SI (everything but the pictures) from the project, with a Builder
     as for the PDF (so the same notes come back). Reads the project and uses Qt (through
     image_info and converter), so it runs on the window's thread."""
@@ -1842,6 +1849,7 @@ def prepare_docx(project: Project, options: CompileOptions, image_info, converte
     b = Builder(project, options, image_info, name="word")
     b.converter = converter
     b.crops.detect = crop
+    b.inks.detect = ink   # (the structure's auto placement on spectra, as for the PDF)
     b.build.mkdir(parents=True, exist_ok=True)
     if b.assets.exists():
         shutil.rmtree(b.assets, ignore_errors=True)
@@ -1857,6 +1865,8 @@ def prepare_docx(project: Project, options: CompileOptions, image_info, converte
     with leave_alone(project.dictionary_words()):
         writer.document()
     b.crops.save()
+    b.inks.save()
+    note_auto_unplaced(b)
     return WordBuild(writer, b.warnings)
 
 
@@ -1897,6 +1907,6 @@ def finish_docx(built: WordBuild, name: str = "SI") -> tuple[Path, list[str]]:
 
 
 def compile_docx(project: Project, options: CompileOptions, image_info, converter=None,
-                 crop=None, name: str = "SI") -> tuple[Path, list[str]]:
+                 crop=None, name: str = "SI", ink=None) -> tuple[Path, list[str]]:
     """prepare_docx and finish_docx in one go: build/<name>.docx and the notes."""
-    return finish_docx(prepare_docx(project, options, image_info, converter, crop), name)
+    return finish_docx(prepare_docx(project, options, image_info, converter, crop, ink), name)

@@ -80,3 +80,21 @@ def test_inline_figures(project, compound, tmp_path):
     project.attach_compound_file(compound, "files", other, {"placement": "exclude"})
     figs = compound_block(project, compound, "3g").figures
     assert [(f.path.name, f.caption) for f in figs] == [("hplc.png", "HPLC trace")]
+
+
+def test_hrms_sentence_prints_salt_ion_as_set(project, compound):
+    # SPEC §13f.3: a pyridinium bromide is [M]+ by default, [M−Br]+ when the project asks
+    # for M = the whole salt, and the compound's own label when one is typed. The m/z is
+    # the cation's in every case.
+    from si_assistant.core import checks
+    project.set_structure(compound, "C(c1ccccc1)[n+]1ccccc1.[Br-]")
+    compound.values["hrms"] = {"ionization": "ESI", "adduct": "[M]+", "found": "170.0966"}
+    calcd = "calcd for C_{12}H_{12}N 170.0964; found 170.0966"
+    text = show([Paragraph(hrms_sentence(project, compound))])
+    assert "[M]^{+} " + calcd in text
+    project.settings[checks.SALT_LABEL_KEY] = checks.SALT_LABEL_WHOLE
+    text = show([Paragraph(hrms_sentence(project, compound))])
+    assert "[M−Br]^{+} " + calcd in text
+    compound.values["hrms"][checks.ION_LABEL_KEY] = "[M−BF4]+"
+    text = show([Paragraph(hrms_sentence(project, compound))])
+    assert "[M−BF_{4}]^{+} " + calcd in text

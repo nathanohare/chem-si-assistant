@@ -79,10 +79,11 @@ def test_sample_si_as_word(sample):
     assert title.text.startswith(FACTS["c2_name"]) and "(2)" in title.text
     assert any(r.text == "3" and r.font.subscript for r in runs_of(doc))
     assert any(r.text == "1" and r.font.superscript for r in runs_of(doc))   # ¹H NMR
-    # Pictures: structures, the scheme, the figure and the spectra pages.
+    # Pictures: structures, the scheme, the figure and the spectra page (new projects
+    # print two spectra on a page, so compound 2's two spectra share one).
     with zipfile.ZipFile(path) as z:
         media = [n for n in z.namelist() if n.startswith("word/media/")]
-    assert len(media) >= 6
+    assert len(media) >= 5
     # The table: a Word table with its merged cell and footnotes.
     table = doc.tables[0]
     assert "Entry" in table.rows[0].cells[0].text

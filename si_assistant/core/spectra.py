@@ -51,6 +51,9 @@ PER_PAGE = (1, 2, 4)
 ORIENTATIONS = {"portrait": "Portrait", "landscape": "Landscape"}
 CORNERS = {"top-left": "Top left", "top-right": "Top right",
            "bottom-left": "Bottom left", "bottom-right": "Bottom right"}
+PLACES = {"on": "On the spectrum (in a corner)", "auto": "On the spectrum, in blank space (auto)",
+          "above": "Above the spectrum", "beside": "Beside the spectrum"}
+OUTSIDE_PLACES = ("above", "beside")
 
 # The defaults reproduce the earlier automatic appendix: one spectrum per portrait page,
 # the header line above it, the structure + ID on a white box in the top-left corner.
@@ -60,6 +63,12 @@ DEFAULTS: dict[str, Any] = {
     "header_line": True,              # "2 — ¹H NMR (400 MHz, CDCl₃)" above each spectrum
     "struct_box": True,               # the structure + ID box is printed on the spectrum
     "corner": "top-left",             # where the structure + ID box goes (unless dragged)
+    # Issue #1: where the box goes. "on": over the spectrum, in `corner` (or where dragged);
+    # "auto": over the spectrum where it covers only blank paper (the corner first);
+    # "above" / "beside": next to the spectrum, which is made smaller to leave it room.
+    "struct_place": "on",
+    "auto_shrink": False,             # "auto": make the structure smaller to fit, if needed
+    "auto_min_scale": 0.5,            # ... but no smaller than this structure size
     "struct_frame": False,            # 12.2: a frame around the structure + ID
     "struct_frame_color": "#000000",
     "struct_frame_width": 0.5,        # pt
@@ -82,6 +91,9 @@ DEFAULTS: dict[str, Any] = {
     # hrms.print_reports, core/ms_reports.prints_reports).
     "hrms_reports": False,
 }
+# A new project starts with two spectra on a page (DEFAULTS keeps one, so projects made
+# before this keep printing as they did).
+NEW_PROJECT_PER_PAGE = 2
 SECTION_ONLY_KEYS = ("nmr_links", "link_style", "link_back", "hrms_reports")
 LINK_STYLES = {"plain": "Like normal text", "blue": "Blue",
                "blue_underline": "Blue and underlined"}
@@ -115,6 +127,10 @@ def _clean_value(key: str, value: Any) -> Any:
             return value if value in ORIENTATIONS else None
         if key == "corner":
             return value if value in CORNERS else None
+        if key == "struct_place":
+            return value if value in PLACES else None
+        if key == "auto_min_scale":
+            return min(SCALE_RANGE[1], max(SCALE_RANGE[0], float(value)))
         if key == "link_style":
             return value if value in LINK_STYLES else None
         if isinstance(default, bool):
@@ -590,6 +606,7 @@ CORNER_INSET_IN = 0.4 / 2.54            # the box's distance from the spectrum's
 STYLE_TEXT_PT = {"ACS": 11.0, "Wiley": 11.0, "RSC": 10.5}   # the ID's size when "auto"
 CAPTION_PT = DEFAULTS["caption_size"]    # the caption under the structure (its default)
 BOX_INSET_PT = 3.0                      # the box's padding
+GAP_IN = 0.3 * 11 / 72                  # between the header, the box and the spectrum
 
 
 def grid(per_page: int, landscape: bool) -> tuple[int, int]:
@@ -614,13 +631,19 @@ def slot_size_in(style: str, per_page: int, orientation: str) -> tuple[float, fl
 
 def shown_size_in(slot: tuple[float, float], aspect: float | None,
                   crop: tuple[float, float, float, float] | None = None,
-                  header: bool = False) -> tuple[float, float]:
+                  header: bool = False, place: str = "on",
+                  box_in: tuple[float, float] = (0.0, 0.0)) -> tuple[float, float]:
     """The printed size (inches) of the part of a spectrum that is shown: as large as fits
     in its slot (below the header line), keeping its shape; `aspect` = the whole page's
-    height / width, `crop` = the part shown."""
+    height / width, `crop` = the part shown. With `place` "above" or "beside", the
+    structure + ID box (`box_in`) takes room of its own (styles/*.typ si-spectrum)."""
     w, h = slot
     if header:
         h = max(0.1, h - HEADER_IN)
+    if place == "above" and box_in[1] > 0:
+        h = max(0.1, h - box_in[1] - GAP_IN)
+    elif place == "beside" and box_in[0] > 0:
+        w = max(0.1, w - box_in[0] - GAP_IN)
     if not aspect:
         return w, h
     l, t, r, b = crop or (0.0, 0.0, 1.0, 1.0)
@@ -640,6 +663,154 @@ def structure_size_in(natural: tuple[float, float] | None, scale: float) -> tupl
     return w * fit, h * fit
 
 
+def box_size_in(structure_in: tuple[float, float] | None, id_text: str, id_pt: float,
+                caption: str = "", caption_pt: float = CAPTION_PT) -> tuple[float, float]:
+    """About how large (inches) the structure + ID box prints: the structure, the ID and
+    the caption one above the other, with the box's padding. The text is estimated from
+    its length (the UI measures it with Qt; this is for compiling, where auto placement
+    keeps some blank space around the box anyway)."""
+    lines = []
+    if structure_in:
+        lines.append(structure_in)
+    if id_text:
+        lines.append((len(id_text) * 0.62 * id_pt / 72, id_pt * 1.25 / 72))
+    if caption:
+        lines.append((len(caption) * 0.5 * caption_pt / 72, caption_pt * 1.25 / 72))
+    if not lines:
+        return 0.0, 0.0
+    gap = 0.4 * id_pt / 72
+    inset = 2 * BOX_INSET_PT / 72
+    return (max(w for w, _h in lines) + inset,
+            sum(h for _w, h in lines) + gap * (len(lines) - 1) + inset)
+
+
+# ---------------------------------------------------------------------- auto placement
+# Issue #1: "auto" puts the structure + ID box over the spectrum where it covers only
+# blank paper. The spectrum page is drawn small (INK_CELLS on its long side) and every
+# cell with anything darker than near-white counts as ink; the box (plus a little
+# clearance) must cover no ink cell. The place nearest the chosen corner wins; with
+# "auto_shrink" the structure is made smaller step by step (down to "auto_min_scale")
+# until it fits. If nothing fits, the box goes above the spectrum instead (never over it).
+
+INK_CELLS = 240                  # the ink map's long side
+INK_WHITE = 235                  # greyscale (0 = black) at or above this is blank paper
+AUTO_CLEARANCE_IN = 0.06         # blank space kept around the box
+AUTO_SHRINK_STEP = 0.9           # each try makes the structure this much smaller
+
+
+def ink_map_of(gray, white: int = INK_WHITE, cells: int = INK_CELLS):
+    """Which parts of a spectrum page hold something (a 2-D bool numpy array, about
+    `cells` on its long side) from a greyscale picture (2-D uint8 array, 0 = black). A
+    cell is ink if any pixel in it is darker than `white`, so thin lines are never lost."""
+    import numpy as np
+    h, w = gray.shape
+    if not h or not w:
+        return np.zeros((0, 0), bool)
+    k = max(1, -(-max(h, w) // cells))   # pixels per cell (rounded up)
+    ph, pw = -(-h // k) * k, -(-w // k) * k
+    ink = np.zeros((ph, pw), bool)
+    ink[:h, :w] = gray < white
+    return ink.reshape(ph // k, k, pw // k, k).any(axis=(1, 3))
+
+
+def pack_ink(ink) -> dict:
+    """An ink map as JSON (for build/ink_cache.json)."""
+    import base64
+    import numpy as np
+    return {"shape": list(ink.shape),
+            "bits": base64.b64encode(np.packbits(ink.astype(bool)).tobytes()).decode("ascii")}
+
+
+def unpack_ink(data):
+    """The ink map stored by pack_ink, or None if it is unusable."""
+    import base64
+    import numpy as np
+    try:
+        rows, cols = (int(v) for v in data["shape"])
+        bits = np.frombuffer(base64.b64decode(data["bits"]), np.uint8)
+        if rows <= 0 or cols <= 0 or len(bits) * 8 < rows * cols:
+            return None
+        return np.unpackbits(bits)[:rows * cols].reshape(rows, cols).astype(bool)
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def blank_spot(ink, box_frac: tuple[float, float], corner: str = "top-left",
+               clearance_frac: tuple[float, float] = (0.0, 0.0),
+               inset_frac: tuple[float, float] = (0.0, 0.0)) -> tuple[float, float] | None:
+    """Where a box `box_frac` (width, height as fractions of the map) covers no ink, with
+    `clearance_frac` of blank space around it, as the fractions of its centre; the place
+    nearest to where `corner` would put it (`inset_frac` in from the corner). None if there
+    is no such place."""
+    import numpy as np
+    rows, cols = ink.shape
+    if not rows or not cols:
+        return None
+    need_w = box_frac[0] + 2 * clearance_frac[0]
+    need_h = box_frac[1] + 2 * clearance_frac[1]
+    bw, bh = int(np.ceil(need_w * cols)), int(np.ceil(need_h * rows))
+    if bw < 1 or bh < 1 or bw > cols or bh > rows:
+        return None
+    total = np.zeros((rows + 1, cols + 1), np.int32)
+    total[1:, 1:] = ink.astype(np.int32).cumsum(0).cumsum(1)
+    inked = total[bh:, bw:] - total[:-bh, bw:] - total[bh:, :-bw] + total[:-bh, :-bw]
+    ys, xs = np.nonzero(inked == 0)          # top-left cells of every blank place
+    if not len(ys):
+        return None
+    cx = (xs + bw / 2) / cols                # their centres, as fractions
+    cy = (ys + bh / 2) / rows
+    # Where the corner would put the box's centre.
+    half_w, half_h = need_w / 2, need_h / 2
+    tx = 1 - inset_frac[0] - half_w if corner.endswith("right") else inset_frac[0] + half_w
+    ty = 1 - inset_frac[1] - half_h if corner.startswith("bottom") else inset_frac[1] + half_h
+    best = int(np.argmin((cx - tx) ** 2 + (cy - ty) ** 2))
+    return round(float(cx[best]), 4), round(float(cy[best]), 4)
+
+
+def crop_ink(ink, crop: tuple[float, float, float, float] | None):
+    """The part of a page's ink map that is shown (auto-crop)."""
+    if crop is None:
+        return ink
+    rows, cols = ink.shape
+    l, t, r, b = crop
+    r0, r1 = int(t * rows), max(int(t * rows) + 1, int(round(b * rows)))
+    c0, c1 = int(l * cols), max(int(l * cols) + 1, int(round(r * cols)))
+    return ink[r0:r1, c0:c1]
+
+
+def auto_place(ink, shown_in: tuple[float, float], box_at, scale: float, corner: str,
+               shrink: bool = False, min_scale: float = 0.5
+               ) -> tuple[float, float, float] | None:
+    """Where the structure + ID box covers only blank paper on a shown spectrum: (x, y,
+    structure size), x/y the box centre as fractions of the shown spectrum (as a dragged
+    box's). `ink`: the shown part's ink map; `shown_in`: its printed size; `box_at(scale)`:
+    the box's printed size (inches) with the structure at that size. With `shrink`, smaller
+    structure sizes are tried down to `min_scale`. None if it fits nowhere."""
+    w_in, h_in = shown_in
+    if ink is None or w_in <= 0 or h_in <= 0:
+        return None
+    clearance = (AUTO_CLEARANCE_IN / w_in, AUTO_CLEARANCE_IN / h_in)
+    inset = (max(0.0, CORNER_INSET_IN - AUTO_CLEARANCE_IN) / w_in,
+             max(0.0, CORNER_INSET_IN - AUTO_CLEARANCE_IN) / h_in)
+    sizes = [scale]
+    if shrink:
+        floor = min(scale, max(SCALE_RANGE[0], min_scale))
+        s = scale
+        while s * AUTO_SHRINK_STEP > floor + 1e-9:
+            s *= AUTO_SHRINK_STEP
+            sizes.append(round(s, 3))
+        if sizes[-1] > floor:
+            sizes.append(round(floor, 3))
+    for size in sizes:
+        bw, bh = box_at(size)
+        if bw <= 0 or bh <= 0:
+            return None
+        spot = blank_spot(ink, (bw / w_in, bh / h_in), corner, clearance, inset)
+        if spot is not None:
+            return spot[0], spot[1], size
+    return None
+
+
 # ---------------------------------------------------------------------- auto-crop cache
 
 CROP_CACHE_FILE = "crop_cache.json"
@@ -652,10 +823,13 @@ class CropCache:
     delete). Keyed by the file's path in the project, size, modification time and page,
     so a replaced file is measured again."""
 
+    FILE = CROP_CACHE_FILE
+    VERSION = CROP_VERSION
+
     def __init__(self, project, detect=None):
         self.project = project
         self.detect = detect   # (path, page or None) -> (l, t, r, b) | None, needs Qt
-        self.path = Path(project.folder) / "build" / CROP_CACHE_FILE
+        self.path = Path(project.folder) / "build" / self.FILE
         self._data: dict[str, Any] | None = None
         self._dirty = False
 
@@ -665,7 +839,7 @@ class CropCache:
             rel = path.resolve().relative_to(Path(self.project.folder).resolve()).as_posix()
         except (OSError, ValueError):
             return None
-        return f"v{CROP_VERSION}|{rel}|{st.st_size}|{st.st_mtime_ns}|{page_key(page)}"
+        return f"v{self.VERSION}|{rel}|{st.st_size}|{st.st_mtime_ns}|{page_key(page)}"
 
     def _load(self) -> dict[str, Any]:
         if self._data is None:
@@ -680,23 +854,33 @@ class CropCache:
             ) -> tuple[float, float, float, float] | None:
         """The content box of one spectrum page, measured once (None: nothing to cut, or
         it can't be measured here). `measure=False`: only what was measured before."""
+        return self._get(path, page, measure)
+
+    # (what is stored for a page, and how it is read back: overridden by InkCache)
+    def _read(self, value):
+        return _valid_box(value)
+
+    def _store(self, found):
+        return list(found) if found else None
+
+    def _get(self, path: Path, page: int | None, measure: bool):
         key = self._key(path, page)
         data = self._load()
         if key is not None and key in data:
-            return _valid_box(data[key])
+            return self._read(data[key])
         if self.detect is None or not measure:
             return None
         try:
-            found = _valid_box(self.detect(path, page))
+            found = self._read(self._store(self.detect(path, page)))
             if found is None:
                 # "Nothing to cut" from a file that can't even be opened now (a picture
                 # that is locked, or an online-only OneDrive file while offline): raises.
                 with open(path, "rb"):
                     pass
-        except Exception:  # noqa: BLE001 — can't be read just now: not cropped, and not
+        except Exception:  # noqa: BLE001 — can't be read just now: not measured, and not
             return None    # remembered, so it is measured again next time
         if key is not None:
-            data[key] = list(found) if found else None
+            data[key] = self._store(found)
             self._dirty = True
         return found
 
@@ -705,7 +889,7 @@ class CropCache:
         from an older way of measuring)."""
         version, _, rest = key.partition("|")
         parts = [version] + rest.rsplit("|", 3)   # (a file name may hold "|" on Linux)
-        if len(parts) != 5 or version != f"v{CROP_VERSION}":
+        if len(parts) != 5 or version != f"v{self.VERSION}":
             return True
         try:
             st = (Path(self.project.folder) / parts[1]).stat()
@@ -726,6 +910,26 @@ class CropCache:
             self._dirty = False
         except OSError:
             pass
+
+
+class InkCache(CropCache):
+    """Where each spectrum page has ink (auto placement, issue #1): its ink map
+    (ink_map_of), remembered in build/ink_cache.json like the auto-crop boxes. `detect`:
+    (path, page or None) -> ink map | None (drawing the page needs Qt)."""
+
+    FILE = "ink_cache.json"
+    VERSION = 1
+
+    def ink(self, path: Path, page: int | None, measure: bool = True):
+        return self._get(path, page, measure)
+
+    def _read(self, value):
+        return unpack_ink(value) if value else None
+
+    def _store(self, found):
+        if found is None:
+            return None
+        return found if isinstance(found, dict) else pack_ink(found)
 
 
 def _valid_box(value) -> tuple[float, float, float, float] | None:

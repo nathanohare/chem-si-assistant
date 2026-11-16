@@ -319,7 +319,13 @@ Text boxes have a small toolbar:
 In custom sections and General Information there are also **Figure…** and **Table…**.
 You can also simply paste a picture, a ChemDraw drawing or a table copied from Word or
 Excel. Type the caption on the line under it. Right-click a figure or table to change it
-(edit table, label, printed size, replace picture…).
+(edit table, label, printed size, replace picture…). To print a figure as just the picture,
+with no "Figure S…" number and no caption (the other figures are then numbered without
+it), right-click it and tick **Print without number and caption**.
+
+In the table editor, a formula typed in a cell is subscripted when you move on with Enter
+or Tab, or click another cell (with **H₂** on). Copying cells (Ctrl+C on the grid) keeps
+their subscripts, bold and italics when you paste them into a table again.
 
 A table cell can also hold a picture, printed above the cell's text: for example a list of
 ligands, each drawn with its name under it, or a reaction scheme in a merged cell across
@@ -696,6 +702,19 @@ piece that is M. Automatic takes the largest piece that is not a common counter-
 BF₄⁻, PF₆⁻, OTf⁻, OTs⁻, BArF⁻, Na⁺, K⁺, NBu₄⁺…) and shows which one it took. A typed M formula
 (✎) may carry a charge, e.g. "C10H16N+".
 
+**How a salt's ion is printed:** with its cation as M, a pyridinium bromide is printed as
+[M]⁺ by default. To print it the way M = the whole salt is written, as **[M−Br]⁺**, choose
+Project settings ▸ Output ▸ **HRMS ion for salts** ▸ "[M−Br]⁺". The counter-ion is
+recognised from the structure: [M−Br]⁺, [M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺ for a dibromide,
+[M−Na]⁻ for a sodium salt; a less common one is written as its formula. This only changes
+the label: the m/z is the cation's either way. It applies when the adduct is [M]⁺ or [M]⁻
+(the usual one for a charged M); other adducts are printed as they are.
+
+**Printed as:** a label typed in a compound's HRMS **Printed as** box is printed instead of
+the automatic one, for that compound only (e.g. "[M−Br]+" in a project left on [M]⁺, or a
+label of your own). Leave it empty for the automatic label, which the box shows in grey. The
+m/z is still calculated from M and the adduct.
+
 **Which value is used:** of all the m/z values in all the files, those within your HRMS
 tolerance (Project settings ▸ Output) of a calculated isotope peak of the chosen ion. A
 value the report itself marks as measured ("Meas. m/z", "found") beats an unmarked one; the
@@ -746,10 +765,15 @@ Each spectrum can have its own header and caption ("empty = automatic").
 
 The Spectra section prints every compound's spectra, compound by compound. Its page sets
 the defaults for all spectra:
-- spectra per page and orientation;
+- spectra per page (two for a new project) and orientation;
 - a header line and a frame;
 - **auto-crop** of white margins;
-- the structure and compound number drawn on each spectrum (position, size, frame…), and
+- where the structure and compound number go: **on the spectrum** in a corner, **on the
+  spectrum in blank space (auto)**, which finds a place where they cover nothing of the
+  spectrum (tick **Make the structure smaller to fit, down to …%** to let it shrink the
+  structure when there is no room; if nothing fits they go above the spectrum and the
+  Compile window says so), or **above** or **beside** the spectrum, which never cover it;
+- the structure and compound number's size, frame…, and
   the caption under them (e.g. "¹H NMR (CDCl₃, 500 MHz)") with its **size** (9 pt unless
   changed; one spectrum can have its own on its compound's spectra page);
 - **links**: each NMR report in the compound data can link to its spectrum in the PDF, and

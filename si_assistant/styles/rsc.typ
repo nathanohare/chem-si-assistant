@@ -306,23 +306,17 @@
 //     blank white is cut, so the axes stay); the rest is scaled to fill the slot
 //   pos: (x, y) fractions of the shown spectrum for the box's centre (dragged), or none
 //     for `corner`; box-stroke / box-fill: the box's frame (or none) and background;
-//   id-size: auto = the text size; frame: a frame around the spectrum (or none).
+//   id-size: auto = the text size; frame: a frame around the spectrum (or none);
+//   spot: "on" (the box over the spectrum, at `pos` or `corner`), "above" or
+//     "beside" (the box next to the spectrum, which is made smaller to leave it room).
 #let si-spectrum(header, img, aspect, crop: none, structure: none, id: none, caption: none,
-                 pos: none, corner: top + left, box-stroke: none, box-fill: white,
+                 pos: none, corner: top + left, spot: "on", box-stroke: none, box-fill: white,
                  id-size: auto, id-bold: true, frame: none,
                  caption-size: 9pt) = layout(size => {
   let head = if header == none { none } else {
     align(center, text(size: 10.5pt, weight: "bold", header)) }
   let gap = 0.3em.to-absolute()
   let head-h = if head == none { 0pt } else { measure(head, width: size.width).height + gap }
-  let (l, t, r, b) = if crop == none { (0, 0, 1, 1) } else { crop }
-  let avail-h = size.height - head-h
-  let (w, h, full-w, full-h) = if aspect == none { (size.width, avail-h, size.width, avail-h) } else {
-    let shape = aspect * (b - t) / (r - l)
-    let w = calc.min(size.width, avail-h / shape)
-    let full-w = w / (r - l)
-    (w, w * shape, full-w, full-w * aspect)
-  }
   let label = if structure == none and id == none and caption == none { none } else {
     box(fill: box-fill, stroke: box-stroke, inset: 3pt, align(center, {
       if structure != none { structure }
@@ -337,10 +331,23 @@
       }
     }))
   }
-  let shown = align(center, box(width: w, height: h, stroke: frame, {
+  // "above" / "beside": the box gets room of its own next to the spectrum, which is made
+  // smaller to leave it (so the box never covers the spectrum).
+  let outside = label != none and (spot == "above" or spot == "beside")
+  let lab = if outside { measure(label) } else { none }
+  let room-w = if outside and spot == "beside" { size.width - lab.width - gap } else { size.width }
+  let (l, t, r, b) = if crop == none { (0, 0, 1, 1) } else { crop }
+  let avail-h = size.height - head-h - (if outside and spot == "above" { lab.height + gap } else { 0pt })
+  let (w, h, full-w, full-h) = if aspect == none { (room-w, avail-h, room-w, avail-h) } else {
+    let shape = aspect * (b - t) / (r - l)
+    let w = calc.min(room-w, avail-h / shape)
+    let full-w = w / (r - l)
+    (w, w * shape, full-w, full-w * aspect)
+  }
+  let plot = box(width: w, height: h, stroke: frame, {
     box(width: w, height: h, clip: true,
       place(top + left, dx: -l * full-w, dy: -t * full-h, img(full-w, full-h)))
-    if label != none {
+    if label != none and not outside {
       if pos == none {
         let at-right = corner == top + right or corner == bottom + right
         let at-bottom = corner == bottom + left or corner == bottom + right
@@ -352,6 +359,11 @@
           label)
       }
     }
-  }))
+  })
+  let shown = if outside and spot == "beside" {
+    align(center, stack(dir: ltr, spacing: gap, plot, label))
+  } else if outside {
+    align(center, stack(dir: ttb, spacing: gap, label, plot))
+  } else { align(center, plot) }
   if head == none { shown } else { stack(dir: ttb, spacing: gap, head, shown) }
 })

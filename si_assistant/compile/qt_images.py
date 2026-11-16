@@ -189,6 +189,20 @@ def content_box(path: Path, page: int | None) -> tuple[float, float, float, floa
     return content_box_of(arr)
 
 
+def ink_map(path: Path, page: int | None):
+    """Where a spectrum page has ink (core/spectra.ink_map_of), for placing the structure
+    on blank paper (issue #1). None if the page can't be read."""
+    import numpy as np
+    from ..core.spectra import ink_map_of
+    image = render_page(Path(path), page)
+    if image.isNull():
+        return None
+    gray = image.convertToFormat(QImage.Format.Format_Grayscale8)
+    w, h, stride = gray.width(), gray.height(), gray.bytesPerLine()
+    arr = np.frombuffer(gray.constBits(), np.uint8, count=stride * h).reshape(h, stride)[:, :w]
+    return ink_map_of(arr)
+
+
 # ---------------------------------------------------------------------- SVG (SPEC §13l.1)
 # Spectra pasted from Mnova are kept as SVG files (core/emf_svg.py). Typst prints them with
 # every SVG feature they use; Qt's SVG renderer, which draws them on screen, measures them
