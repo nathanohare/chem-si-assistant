@@ -27,11 +27,12 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QMimeData, QPointF, QRectF, QSizeF, Qt, QTimer, QUrl, Signal
+import shiboken6
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontMetricsF,
                            QGuiApplication, QIcon, QImage, QImageReader, QKeySequence,
                            QPainter, QPalette, QPen, QPixmap, QPyTextObject, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
-                           QTextImageFormat)
+                           QTextImageFormat, QTextOption)
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QPushButton, QTextEdit, QToolBar, QToolButton, QVBoxLayout,
@@ -734,6 +735,17 @@ class RichTextEdit(QTextEdit):
         # Red (spelling) and blue (chemistry formatting) underlines, SPEC §13k.1. They only
         # change how the text looks, never the stored markup.
         self.checks = text_checks.CheckHighlighter(self.document())
+
+    def show_marks(self, on: bool) -> None:
+        """Show (or hide) the formatting marks: ¶ at paragraph ends, ↵ at line breaks,
+        · for spaces, → for tabs (Qt draws them; the text itself is unchanged)."""
+        doc = self.document()
+        option = doc.defaultTextOption()
+        flags = option.flags()
+        marks = (QTextOption.Flag.ShowTabsAndSpaces
+                 | QTextOption.Flag.ShowLineAndParagraphSeparators)
+        option.setFlags(flags | marks if on else flags & ~marks)
+        doc.setDefaultTextOption(option)
 
     @property
     def base_size(self) -> float:
@@ -1597,6 +1609,21 @@ class RichTextEditor(QWidget):
         self.formula_act.toggled.connect(hub.set_formula_on)
         hub.formula_changed.connect(self._formula_switched)
         self.toolbar.addAction(self.formula_act)
+        # Show formatting marks (¶): shared by every text box, remembered on this computer.
+        self.marks_act = QAction("¶", self)
+        self.marks_act.setCheckable(True)
+        self.marks_act.setChecked(hub.marks_on)
+        self.marks_act.setToolTip(
+            "Show formatting marks: ¶ at the end of each paragraph, ↵ at line breaks, "
+            "· for spaces and → for tabs (Ctrl+Shift+8). Only shown here, never printed. "
+            "Applies to every text box on this computer.")
+        self.marks_act.setShortcut(QKeySequence("Ctrl+Shift+8"))
+        self.marks_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.marks_act.toggled.connect(hub.set_marks_on)
+        self.addAction(self.marks_act)
+        hub.marks_changed.connect(self._marks_switched)
+        self.edit.show_marks(hub.marks_on)
+        self.toolbar.addAction(self.marks_act)
         self._symbols_sep = self.toolbar.addSeparator()   # (Figure… and Table… go before it)
 
         sym_button = QToolButton(self)
@@ -1718,6 +1745,16 @@ class RichTextEditor(QWidget):
                     self.sub_act, *self.align_acts.values()):
             act.setEnabled(not read_only)
         self._sync_buttons()
+
+    def _marks_switched(self, on: bool) -> None:
+        """The ¶ toggle was switched (here, in another text box or the View menu)."""
+        if not shiboken6.isValid(self):
+            return
+        if self.marks_act.isChecked() != on:
+            self.marks_act.blockSignals(True)
+            self.marks_act.setChecked(on)
+            self.marks_act.blockSignals(False)
+        self.edit.show_marks(on)
 
     def _formula_switched(self, on: bool) -> None:
         """Another text box switched the Chemical formula toggle: show it here too."""

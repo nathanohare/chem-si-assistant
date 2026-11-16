@@ -21,7 +21,7 @@ from PySide6.QtGui import (QAction, QColor, QGuiApplication, QImage, QKeySequenc
                            QTextDocument)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMessageBox, QSpinBox, QStyle,
+                               QLineEdit, QMessageBox, QPushButton, QSpinBox, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
                                QTableWidgetItem, QToolBar, QVBoxLayout, QWidget)
 
@@ -29,12 +29,15 @@ from ..core import markup
 from ..core.markup import SUB, SUPER, Paragraph, mention_kind
 from ..core.tables import Cell, Table
 from . import rich_text
+from .format_widgets import optional_box, set_value, size_box, value_of
 from .rich_text import RichTextEditor, document_to_paragraphs
 from .structure_widgets import paste_key
 
 TEXT_ROLE = Qt.ItemDataRole.UserRole          # the cell's stored text
 ALIGN_ROLE = Qt.ItemDataRole.UserRole + 1     # "left" / "center" / "right"
 IMAGE_ROLE = Qt.ItemDataRole.UserRole + 2     # the cell's picture ("images/x.svg") or ""
+SIZE_ROLE = Qt.ItemDataRole.UserRole + 3      # the cell's own text size in pt, or None
+GRID_PT = 10.0                                # the printed size the grid's font stands for
 THUMB_HEIGHT = 90                             # pixels: a cell's picture in the grid
 ALIGN_NAMES = {"left": "Left", "center": "Centre", "right": "Right"}
 
@@ -79,7 +82,11 @@ class CellDelegate(QStyledItemDelegate):
 
     def _doc(self, index, width: float) -> QTextDocument:
         doc = QTextDocument()
-        doc.setDefaultFont(self.dialog.grid.font())
+        font = self.dialog.grid.font()
+        size = index.data(SIZE_ROLE)
+        if size and font.pointSizeF() > 0:   # a cell given its own size looks bigger/smaller
+            font.setPointSizeF(font.pointSizeF() * float(size) / GRID_PT)
+        doc.setDefaultFont(font)
         align = index.data(ALIGN_ROLE) or "center"
         css = {"left": "left", "right": "right"}.get(align, "center")
         doc.setHtml(f"<div align='{css}'>{markup_html(index.data(TEXT_ROLE) or '')}</div>")
@@ -309,8 +316,55 @@ class TableEditorDialog(QDialog):
             "rows are repeated there).")
         self._new = new
 
+        # ---- Formatting (SPEC §13y): the selected cells' text size, the selected columns'
+        # width, shrinking to the page width, and the caption's and footnotes' sizes. Every
+        # "Default" follows Project settings ▸ Text and tables.
+        self.size_box = size_box(
+            "Default", "Text size of the selected cells. “Default” uses Project settings ▸ "
+            "Text and tables (header rows have their own default there).")
+        self.size_box.valueChanged.connect(self._size_changed)
+        self.width_box = optional_box(
+            0.5, 30, 0.1, 1, " cm", "Automatic",
+            "Width of the selected columns in the printed table. “Automatic” makes a "
+            "column as wide as its text needs (sharing the page width with the others); a "
+            "width typed here wraps longer text inside it.")
+        self.width_box.valueChanged.connect(self._width_changed)
+        self.autofit_btn = QPushButton("Fit columns to their text")
+        self.autofit_btn.setToolTip("Set every column back to “Automatic”: each as wide as "
+                                    "its text needs.")
+        self.autofit_btn.clicked.connect(self._autofit)
+        self.autofit_btn.setAutoDefault(False)   # (Enter moves on in the grid, never this)
+        self.fit_box = QCheckBox("Shrink to fit the page width")
+        self.fit_box.setChecked(self._table.fit_width)
+        self.fit_box.setToolTip(
+            "If the table is wider than the text on the page, print all of it (text and "
+            "columns) smaller so every cell stays on one line, instead of wrapping cells.")
+        self.caption_size = size_box("Default", "Size of this table's caption. “Default” "
+                                     "uses Project settings ▸ Text and tables.")
+        set_value(self.caption_size, self._table.caption_size)
+        self.notes_size = size_box("Default", "Size of this table's footnotes. “Default” "
+                                   "uses Project settings ▸ Text and tables.")
+        set_value(self.notes_size, self._table.notes_size)
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Text size:"))
+        fmt_row.addWidget(self.size_box)
+        fmt_row.addSpacing(12)
+        fmt_row.addWidget(QLabel("Column width:"))
+        fmt_row.addWidget(self.width_box)
+        fmt_row.addWidget(self.autofit_btn)
+        fmt_row.addSpacing(12)
+        fmt_row.addWidget(self.fit_box)
+        fmt_row.addStretch()
+
         form = QFormLayout()
         form.addRow("Caption:", self.caption_edit)
+        sizes = QHBoxLayout()
+        sizes.addWidget(self.caption_size)
+        sizes.addSpacing(20)
+        sizes.addWidget(QLabel("Footnote size:"))
+        sizes.addWidget(self.notes_size)
+        sizes.addStretch()
+        form.addRow("Caption size:", sizes)
         notes_label = QLabel("Footnotes:\n(one per line)")
         self.notes_edit.setToolTip("One footnote per line, printed under the table. Mark them "
                                    "with superscript letters, e.g. ᵃ Isolated yield (and the "
@@ -334,6 +388,7 @@ class TableEditorDialog(QDialog):
         layout.addWidget(intro)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.grid, 1)
+        layout.addLayout(fmt_row)
         layout.addLayout(cell_row)
         layout.addWidget(self.cell_edit)
         layout.addLayout(form)
@@ -357,7 +412,9 @@ class TableEditorDialog(QDialog):
         self.grid.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch if t.n_cols <= 6 else QHeaderView.ResizeMode.Interactive)
         self.grid.setHorizontalHeaderLabels(
-            [f"{_column_name(c)} ({ALIGN_NAMES[t.columns[c]].lower()})" for c in range(t.n_cols)])
+            [f"{_column_name(c)} ({ALIGN_NAMES[t.columns[c]].lower()}"
+             + (f", {t.widths[c]:g} cm)" if t.widths[c] is not None else ")")
+             for c in range(t.n_cols)])
         self.grid.setVerticalHeaderLabels(
             [("Header" if r < t.header_rows else str(r - t.header_rows + 1))
              for r in range(t.n_rows)])
@@ -371,6 +428,7 @@ class TableEditorDialog(QDialog):
                     item.setData(TEXT_ROLE, cell.text)
                     item.setData(ALIGN_ROLE, cell.align or t.columns[c])
                     item.setData(IMAGE_ROLE, cell.image)
+                    item.setData(SIZE_ROLE, cell.size)
                     if r < t.header_rows:
                         item.setBackground(header_fill)
                 self.grid.setItem(r, c, item)
@@ -409,7 +467,12 @@ class TableEditorDialog(QDialog):
         r, c = self._table.anchor(row, col)
         cell = self._table.rows[r][c]
         self.cell_label.setText(f"<b>Cell {_column_name(c)}{r + 1}</b>"
-                                + (" (header row)" if r < self._table.header_rows else ""))
+                                + (" (header row)" if r < self._table.header_rows else "")
+                                + (f" · {cell.size:g} pt" if cell is not None
+                                   and cell.size is not None else ""))
+        set_value(self.size_box, cell.size if cell is not None else None)
+        set_value(self.width_box, self._table.widths[c] if c < len(self._table.widths)
+                  else None)
         self.cell_edit.blockSignals(True)
         self.cell_edit.set_markup(cell.text if cell is not None else "")
         self.cell_edit.blockSignals(False)
@@ -520,6 +583,54 @@ class TableEditorDialog(QDialog):
         current = self._current()
         self._fill_grid(current)
         self.grid.setRangeSelected(_range(r0, c0, r1, c1), True)
+
+    def _size_changed(self, _value: float) -> None:
+        """The text size box: every selected cell gets that size (or the default)."""
+        size = value_of(self.size_box)
+        r0, c0, r1, c1 = self._selected_rect()
+        done = set()
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                ar, ac = self._table.anchor(r, c)
+                if (ar, ac) in done:
+                    continue
+                done.add((ar, ac))
+                self._table.rows[ar][ac].size = size
+                item = self.grid.item(ar, ac)
+                if item is not None:
+                    item.setData(SIZE_ROLE, size)
+        cr, cc = self._current()
+        cell = self._table.rows[cr][cc]
+        self.cell_label.setText(f"<b>Cell {_column_name(cc)}{cr + 1}</b>"
+                                + (" (header row)" if cr < self._table.header_rows else "")
+                                + (f" · {size:g} pt" if size is not None and cell is not None
+                                   else ""))
+        self.grid.resizeRowsToContents()
+
+    def _width_changed(self, _value: float) -> None:
+        """The column width box: every selected column gets that width (or automatic)."""
+        width = value_of(self.width_box)
+        _r0, c0, _r1, c1 = self._selected_rect()
+        self._table.normalize()
+        for c in range(c0, c1 + 1):
+            self._table.widths[c] = width
+        self._refresh_headers()
+
+    def _autofit(self) -> None:
+        self._table.widths = [None] * self._table.n_cols
+        set_value(self.width_box, None)
+        self._refresh_headers()
+
+    def _refresh_headers(self) -> None:
+        t = self._table
+        for c in range(t.n_cols):
+            item = self.grid.horizontalHeaderItem(c)
+            text = (f"{_column_name(c)} ({ALIGN_NAMES[t.columns[c]].lower()}"
+                    + (f", {t.widths[c]:g} cm)" if t.widths[c] is not None else ")"))
+            if item is None:
+                self.grid.setHorizontalHeaderItem(c, QTableWidgetItem(text))
+            else:
+                item.setText(text)
 
     def _header_changed(self, value: int) -> None:
         if self._loading:
@@ -724,6 +835,9 @@ class TableEditorDialog(QDialog):
         t = self._table.copy()
         t.label = self.label_edit.text().strip()
         t.breakable = self.split_box.isChecked()
+        t.fit_width = self.fit_box.isChecked()
+        t.caption_size = value_of(self.caption_size)
+        t.notes_size = value_of(self.notes_size)
         t.header_rows = self.header_rows.value()
         t.footnotes = [line for line in self.notes_edit.markup().split("\n") if line.strip()]
         t.normalize()

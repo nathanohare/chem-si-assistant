@@ -1629,7 +1629,10 @@ class LayoutForm(QWidget):
                               ("none", "Not printed")]),
             "align_ids": QCheckBox("Line up compound IDs in each row"),
             "show_label": QCheckBox("Print “Scheme S1.” and the scheme's name under it"),
+            "caption_size_pt": number(0.0, L["caption_size_pt"][1], 1, " pt", 0.5),
         }
+        # 0 = the document's caption size (Project settings ▸ Text and tables).
+        self.fields["caption_size_pt"].setSpecialValueText("Same as other captions")
         for key in se.SWITCHES:
             self.fields[key].toggled.connect(lambda _on: self._changed())
         rows = [("cond_size_pt", "Conditions text size:",
@@ -1662,13 +1665,18 @@ class LayoutForm(QWidget):
                  "Off (the default): the scheme is printed on its own, with no label or "
                  "caption, and is not numbered or listed in the List of Schemes. On: it is "
                  "numbered (Scheme S1…) with its name as the caption, and can be mentioned "
-                 "in texts.")]
+                 "in texts."),
+                ("caption_size_pt", "Caption size:",
+                 "The size of this scheme's label and caption. “Same as other captions” "
+                 "uses Project settings ▸ Text and tables.")]
+        self.labels: dict[str, QLabel] = {}
         for key, text, tip in rows:
             w = self.fields[key]
             w.setToolTip(tip)
             label = QLabel(text)
             label.setToolTip(tip)
             form.addRow(label, w)
+            self.labels[key] = label
         self.example = LayoutExample()
         note = QLabel("Example: one step at about the printed size.")
         note.setStyleSheet("color: palette(placeholder-text);")
@@ -1733,6 +1741,9 @@ class SchemesTab(QWidget):
                        "can change these for itself (its Layout… button).")
         intro.setWordWrap(True)
         self.form = LayoutForm(se.project_layout(settings))
+        # (every caption's default size is in Project settings ▸ Text and tables)
+        self.form.fields["caption_size_pt"].hide()
+        self.form.labels["caption_size_pt"].hide()
         reset = QPushButton("Reset to the built-in defaults")
         reset.clicked.connect(lambda: self.form.set_values(se.DEFAULT_LAYOUT))
         layout = QVBoxLayout(self)

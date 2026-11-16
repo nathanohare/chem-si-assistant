@@ -216,6 +216,10 @@ class ProjectSettingsDialog(QDialog):
         self.style_box.currentTextChanged.connect(self._style_changed)
         tabs.addTab(self.page_tab, "Page")
 
+        # ---- Text and tables (line and paragraph spacing, caption and table sizes, §13y)
+        self.text_tab = TextTablesTab(s)
+        tabs.addTab(self.text_tab, "Text and tables")
+
         # ---- Labels (figure, table and scheme numbering, SPEC §13k.5a)
         self.labels_tab = LabelsTab(s)
         tabs.addTab(self.labels_tab, "Labels")
@@ -343,6 +347,12 @@ class ProjectSettingsDialog(QDialog):
         self.page_tab.apply(s)   # after journal_style: the footer is compared with its default
         self.labels_tab.apply(s)   # (likewise the figure word, "Fig." for RSC)
         self.impurities.apply(s)
+        self.text_tab.apply(s)
+        # "Use for every caption / table": sizes set for single ones go back to these.
+        if self.text_tab.all_captions.isChecked():
+            self.project.clear_caption_sizes()
+        if self.text_tab.all_tables.isChecked():
+            self.project.clear_table_sizes()
         self.project.save_settings()
 
 
@@ -681,6 +691,99 @@ class PageTab(QWidget):
 
     def apply(self, settings: dict) -> None:
         self._page.store_page_settings(settings, self.values())
+
+
+class TextTablesTab(QWidget):
+    """Project settings ▸ Text and tables (core/formatting.py): line and paragraph spacing
+    of the text, and the default sizes of captions and of tables' cells, header rows and
+    footnotes. Every box can be left at "As the style" (the journal style's own)."""
+
+    def __init__(self, settings: dict, parent: QWidget | None = None):
+        super().__init__(parent)
+        from ..core import formatting
+        from .format_widgets import optional_box, set_value, size_box
+        v = formatting.formatting(settings)
+        style = "As the style"
+        self.line_spacing = optional_box(
+            formatting.LINE_SPACING_RANGE[0], formatting.LINE_SPACING_RANGE[1], 0.05, 2,
+            " ×", f"{style} (1.00 ×)",
+            "Space from one line to the next, as a multiple of the journal style's own "
+            "(1.5 × = one and a half times as far apart).", first=1.0)
+        set_value(self.line_spacing, v["line_spacing"])
+        self.space_before = optional_box(0, 72, 1, 1, " pt", style,
+                                         "Extra space above every paragraph of text.")
+        set_value(self.space_before, v["space_before"])
+        self.space_after = optional_box(0, 72, 1, 1, " pt", style,
+                                        "Extra space below every paragraph of text.")
+        set_value(self.space_after, v["space_after"])
+        self.caption_size = size_box(style, "Size of every figure, table and scheme caption "
+                                     "(with its label, e.g. “Table S1.”)")
+        set_value(self.caption_size, v["caption_size"])
+        self.all_captions = QCheckBox("Also for captions given a size of their own (clears "
+                                      "those sizes)")
+        self.table_size = size_box(style, "Text size of every table's cells")
+        set_value(self.table_size, v["table_size"])
+        self.header_size = size_box("Same as the cells", "Text size of the header rows "
+                                    "(the column headings)")
+        set_value(self.header_size, v["table_header_size"])
+        self.header_bold = QCheckBox("Header rows in bold")
+        self.header_bold.setChecked(bool(v["table_header_bold"]))
+        self.notes_size = size_box(style, "Text size of every table's footnotes")
+        set_value(self.notes_size, v["table_notes_size"])
+        self.all_tables = QCheckBox("Also for cells and footnotes given a size of their own "
+                                    "(clears those sizes)")
+
+        intro = QLabel("Defaults for the whole SI. “As the style” keeps what the journal style "
+                       "does (ACS and Wiley: text 11 pt, captions and tables 10 pt, table "
+                       "footnotes 9 pt; RSC: text 10.5 pt, captions and tables 9.5 pt). A "
+                       "single table, cell, figure or scheme can be given its own sizes: in "
+                       "the table editor, a figure's right-click ▸ Caption size…, and a "
+                       "scheme's Layout….")
+        intro.setWordWrap(True)
+        form = QFormLayout()
+        form.addRow(QLabel("<b>Text</b>"))
+        form.addRow("Line spacing:", self.line_spacing)
+        form.addRow("Space before paragraphs:", self.space_before)
+        form.addRow("Space after paragraphs:", self.space_after)
+        form.addRow(QLabel("<b>Captions</b>"))
+        form.addRow("Caption size:", self.caption_size)
+        form.addRow("", self.all_captions)
+        form.addRow(QLabel("<b>Tables</b>"))
+        form.addRow("Cell text size:", self.table_size)
+        form.addRow("Header rows:", self.header_size)
+        form.addRow("", self.header_bold)
+        form.addRow("Footnote size:", self.notes_size)
+        form.addRow("", self.all_tables)
+        reset = QPushButton("Reset to the journal style")
+        reset.setAutoDefault(False)
+        reset.clicked.connect(self.reset)
+        layout = QVBoxLayout(self)
+        layout.addWidget(intro)
+        layout.addLayout(form)
+        layout.addWidget(reset, 0, Qt.AlignmentFlag.AlignLeft)
+        layout.addStretch()
+
+    def reset(self) -> None:
+        from .format_widgets import set_value
+        for box in (self.line_spacing, self.space_before, self.space_after,
+                    self.caption_size, self.table_size, self.header_size, self.notes_size):
+            set_value(box, None)
+        self.header_bold.setChecked(False)
+
+    def values(self) -> dict:
+        from .format_widgets import value_of
+        return {"line_spacing": value_of(self.line_spacing),
+                "space_before": value_of(self.space_before),
+                "space_after": value_of(self.space_after),
+                "caption_size": value_of(self.caption_size),
+                "table_size": value_of(self.table_size),
+                "table_header_size": value_of(self.header_size),
+                "table_header_bold": self.header_bold.isChecked(),
+                "table_notes_size": value_of(self.notes_size)}
+
+    def apply(self, settings: dict) -> None:
+        from ..core import formatting
+        formatting.store_formatting(settings, self.values())
 
 
 class LabelsTab(QWidget):
