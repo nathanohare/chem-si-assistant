@@ -19,6 +19,14 @@
   }
 }
 
+// Heading numbers as an outline (Project settings ▸ Heading numbers ▸ Outline):
+// 1. / A. / a. / i. by level; only the heading's own number is shown.
+#let si-outline-numbering(..n) = {
+  let k = n.pos()
+  let formats = ("1.", "A.", "a.", "i.")
+  numbering(formats.at(calc.min(k.len(), formats.len()) - 1), k.last())
+}
+
 // `header`/`footer`: none (this style's default: no header, page number on the right) or
 // a function as for si-page-line. Page numbers are `number-prefix` + 1/i/I.
 #let si-doc(title: "", header: none, footer: none, number-prefix: "S", number-style: "1",
@@ -34,7 +42,8 @@
   set text(font: si-font, size: 11pt, lang: "en")
   set par(justify: true, leading: 0.6em, spacing: 1em)
   // Sections are numbered 1., 1.1., 1.1.1. (levels 1-3). General procedures, compound
-  // titles and headings typed in a text are never numbered (they pass numbering: none).
+  // titles and headings typed in a text are not numbered (they pass numbering: none),
+  // except that Project settings ▸ Heading numbers can number text headings too.
   set heading(numbering: "1.1.")
   set figure.caption(separator: [: ])
   show figure.caption: set text(size: 10pt)
@@ -49,7 +58,7 @@
   // Deeper headings (typed inside the text of a sub-sub-section, or of a compound).
   show heading: it => if it.level <= 3 { it } else {
     block(above: 1em, below: 0.5em, sticky: true,
-      text(size: 11pt, weight: "regular", style: "italic", it.body)) }
+      text(size: 11pt, weight: "regular", style: "italic", { num(it); it.body })) }
   show outline.entry.where(level: 1): set text(weight: "bold")
   body
 }

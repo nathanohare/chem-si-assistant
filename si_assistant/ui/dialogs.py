@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QVBoxLayout, QWidget)
 
 from ..core import fields as F
-from ..core import ms_reports
+from ..core import headings, ms_reports
 from ..core.compound_ids import LETTERS, NUMBERS, pattern_ids
 from ..core.ids import new_id
 from ..core.lock import LockInfo
@@ -136,6 +136,19 @@ class ProjectSettingsDialog(QDialog):
             s = {**s, "journal_style": style}   # (what the tabs below are filled from)
         self.style_box.setCurrentText(style)
         oform.addRow("Journal style:", self.style_box)
+        # Heading numbers (core/headings.py): the style's own, an outline, 1.1.1 or none.
+        self.heading_numbers = QComboBox()
+        for key, name in headings.HEADING_NUMBERS.items():
+            self.heading_numbers.addItem(name, key)
+        self.heading_numbers.setCurrentIndex(
+            max(0, self.heading_numbers.findData(headings.heading_numbers(s))))
+        self.heading_numbers.setToolTip(
+            "How section headings are numbered. “Outline” numbers sections 1, 2, 3, the "
+            "next level A, B, C, then a, b, c — including the headings typed in a section's "
+            "text and the General Information heading. Compound titles and general "
+            "procedures are never numbered. “As the journal style does”: none in ACS; "
+            "1, 1.1 for sections in Wiley and RSC.")
+        oform.addRow("Heading numbers:", self.heading_numbers)
         self.tolerance = QDoubleSpinBox()
         self.tolerance.setRange(0.01, 1000.0)
         self.tolerance.setDecimals(2)
@@ -319,6 +332,7 @@ class ProjectSettingsDialog(QDialog):
         """Copy the dialog's values into the project and save."""
         s = self.project.settings
         s["journal_style"] = self.style_box.currentText()
+        headings.store_heading_numbers(s, self.heading_numbers.currentData())
         if self.tolerance.value() != self._tolerance_shown:
             s["hrms_tolerance_ppm"] = self.tolerance.value()
         s["auto_nmr_31P"] = self.auto_31p.isChecked()
