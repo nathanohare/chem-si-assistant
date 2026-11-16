@@ -154,6 +154,15 @@ class ObjectStore:
 
     # ---- tables
 
+    def cell_pictures(self):
+        """For the table editor: where this owner's table-cell pictures are kept, and how
+        new ones are stored (in images/, next to the figures)."""
+        from .clipboard_image import paste_dpi
+        from .table_editor import CellPictures
+        return CellPictures(self.folder,
+                            lambda **kw: self.project.add_table_picture(self.owner, **kw),
+                            paste_dpi(self.project.settings))
+
     def table(self, table_id: str) -> Table | None:
         path = self.project.table_path(self.owner, table_id)
         try:
@@ -560,7 +569,10 @@ class TableObject(QPyTextObject):
                     }.get(align, Qt.AlignmentFlag.AlignHCenter)
             # With its formatting (sub- and superscripts, italic), as in the table editor,
             # so "CH₂Cl₂" or a footnote mark "ᵃ" don't look like typing mistakes.
-            _draw_markup(painter, box.adjusted(4, 0, -4, 0), cell.text,
+            # (a cell's picture is marked, not drawn: the rows here are one line high)
+            text = ("[picture] " + cell.text if cell.text.strip() else "[picture]") \
+                if cell.image else cell.text
+            _draw_markup(painter, box.adjusted(4, 0, -4, 0), text,
                          bold if r < table.header_rows else font, flag,
                          self.edit.palette().text().color())
         # Rules as printed: top, under the header, bottom.
@@ -825,7 +837,7 @@ def edit_table(edit, table_id: str) -> None:
                             "folder, so it cannot be edited.")
         return
     dlg = TableEditorDialog(table, caption_markup(edit, "table", table_id),
-                            store.auto_label(table_id), edit)
+                            store.auto_label(table_id), edit, pictures=store.cell_pictures())
     if not dlg.exec():
         return
     new = dlg.result_table()
@@ -846,7 +858,7 @@ def new_table(edit, block=None) -> None:
     if store is None or not store.editable or edit.isReadOnly():
         return
     table = table_from_block(block, edit) if block else Table.new()
-    dlg = TableEditorDialog(table, "", "", edit, new=True)
+    dlg = TableEditorDialog(table, "", "", edit, new=True, pictures=store.cell_pictures())
     if not dlg.exec():
         return
     if block is None:   # (from the toolbar; a paste is still being handled otherwise)

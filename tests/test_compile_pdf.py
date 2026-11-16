@@ -217,3 +217,33 @@ def test_tall_table_runs_over_pages_without_overprinting(sample, style):
     assert len(where) == 20
     assert len(set(where.values())) == 20          # no two rows in the same place
     assert pages_with_header >= 2                  # the header is repeated
+
+
+def test_pictures_in_table_cells(sample):
+    """A reaction scheme in a merged cell across the top of a table, and ligands drawn
+    with their names under them, compile (core/tables.py: a cell's picture)."""
+    from rdkit import Chem
+    from rdkit.Chem.Draw import rdMolDraw2D
+    from si_assistant.core.tables import Cell, Table
+    p, parts = sample
+    owner = p.text_owner(parts["notes"].id)
+
+    def drawing(smiles: str) -> str:
+        d = rdMolDraw2D.MolDraw2DSVG(260, 180)
+        d.DrawMolecule(Chem.MolFromSmiles(smiles))
+        d.FinishDrawing()
+        return p.add_table_picture(owner, data=d.GetDrawingText().encode(), ext=".svg")
+
+    t = Table.new(3, 2)
+    t.rows[0] = [Cell("", colspan=2, image=drawing("c1ccncc1.OB(O)c1ccccc1")), None]
+    t.rows[1] = [Cell("LIGANDNAMEA", image=drawing("P(c1ccccc1)(c1ccccc1)CCP(c1ccccc1)c1ccccc1")),
+                 Cell("LIGANDNAMEB", image=drawing("CC(C)P(C(C)C)c1ccccc1"), image_width=2.5)]
+    t.rows[2] = [Cell("91%"), Cell("45%")]
+    t.header_rows = 1
+    table_id = p.add_table(owner, t)
+    p.write_section_text(parts["notes"], p.read_section_text(parts["notes"])
+                         + f"\n!table{{{table_id}}} Ligands with pictures")
+    result = compile_sample(p)
+    assert result.warnings == []
+    text = squash("".join(page.extract_text() or "" for page in PdfReader(str(result.pdf)).pages))
+    assert "LIGANDNAMEA" in text and "LIGANDNAMEB" in text and "Ligandswithpictures" in text
