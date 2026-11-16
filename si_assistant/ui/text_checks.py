@@ -35,6 +35,7 @@ from ..core.spelling import Speller, add_word, read_words
 
 PERSONAL_FILE = "my_dictionary.txt"
 FORMULA_KEY = "editor/chemical_formula"
+MARKS_KEY = "editor/show_formatting_marks"   # ¶ toggle: off unless switched on
 SPELLING_COLOUR = "#e0403c"     # (both readable on light and dark backgrounds)
 FORMATTING_COLOUR = "#2f8cf0"
 # Typing one of these after a word ends the word (the "Chemical formula" toggle then looks
@@ -65,12 +66,14 @@ class TextChecks(QObject):
 
     changed = Signal()               # a dictionary changed: underline everything again
     formula_changed = Signal(bool)   # the Chemical formula toggle was switched
+    marks_changed = Signal(bool)     # the Show formatting marks (¶) toggle was switched
 
     def __init__(self):
         super().__init__()
         self.speller = Speller()
         self.project = None
         self._formula: bool | None = None
+        self._marks: bool | None = None
         # The highlighters to underline again when a dictionary changes. They are kept in
         # a list (not connected to `changed` one by one): a connection to a highlighter is
         # not always dropped when its text box is deleted, and calling a deleted one fails.
@@ -152,6 +155,23 @@ class TextChecks(QObject):
             self._formula = bool(on)
             _settings().setValue(FORMULA_KEY, bool(on))
             self.formula_changed.emit(bool(on))
+
+
+    @property
+    def marks_on(self) -> bool:
+        """Show formatting marks (¶ at each paragraph end, · for spaces, → for tabs) in
+        every text box; off unless switched on on this computer. Only how the text boxes
+        look: nothing is stored in the project or printed."""
+        if self._marks is None:
+            value = _settings().value(MARKS_KEY, False)
+            self._marks = value if isinstance(value, bool) else str(value).lower() == "true"
+        return self._marks
+
+    def set_marks_on(self, on: bool) -> None:
+        if bool(on) != self.marks_on:
+            self._marks = bool(on)
+            _settings().setValue(MARKS_KEY, bool(on))
+            self.marks_changed.emit(bool(on))
 
 
 _hub: TextChecks | None = None

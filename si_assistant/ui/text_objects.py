@@ -125,6 +125,17 @@ class ObjectStore:
             self.project.set_figure_width(self.owner, figure_id, width_cm)
         self._saved()
 
+    def figure_caption_size(self, figure_id: str) -> float | None:
+        """The caption size typed for a figure, in pt (None = the document's)."""
+        from ..core.formatting import clean_size
+        return clean_size(self.figures().get(figure_id, {}).get("caption_size"))
+
+    def set_figure_caption_size(self, figure_id: str, size_pt: float | None) -> None:
+        with self.project.undo_step(
+                f"Change the caption size of {self.label('figure', figure_id)[0]}"):
+            self.project.set_figure_caption_size(self.owner, figure_id, size_pt)
+        self._saved()
+
     def adding(self, label: str):
         """One undo step for figures or tables put into the text: the text's next autosave
         (with their new paragraphs) joins it, so undo takes both away together."""
@@ -655,6 +666,8 @@ def object_menu(edit, kind: str, item_id: str) -> QMenu:
     if kind == "figure":
         act = menu.addAction("Printed size…", lambda: edit_width(edit, item_id))
         act.setEnabled(not ro)
+        act = menu.addAction("Caption size…", lambda: edit_caption_size(edit, item_id))
+        act.setEnabled(not ro)
         bare = store is not None and store.figure_uncaptioned(item_id)
         act = menu.addAction("Print without number and caption",
                              lambda: set_captioned(edit, item_id, bare))
@@ -739,6 +752,45 @@ def edit_width(edit, figure_id: str) -> None:
         return
     try:
         store.set_figure_width(figure_id, width)
+    except (ProjectError, OSError) as e:
+        QMessageBox.warning(edit, "Could not save the size", str(e))
+        return
+    edit.refresh_objects()
+
+
+def parse_pt(text: str) -> float | None:
+    """A text size typed in pt ("9", "9.5", "9,5 pt"); None if empty. Raises ValueError."""
+    from ..core.formatting import SIZE_RANGE
+    text = text.strip().lower().removesuffix("pt").strip().replace(",", ".")
+    if not text:
+        return None
+    value = float(text)
+    if not SIZE_RANGE[0] <= value <= SIZE_RANGE[1]:
+        raise ValueError(text)
+    return value
+
+
+def edit_caption_size(edit, figure_id: str) -> None:
+    """Right-click ▸ Caption size…: this figure's caption size in pt. Empty = the
+    document's caption size (Project settings ▸ Text and tables)."""
+    store = edit.objects
+    current = store.figure_caption_size(figure_id)
+    text, ok = QInputDialog.getText(
+        edit, "Caption size",
+        "Size of this figure's caption, in pt (e.g. 9).\n"
+        "Leave it empty to use the caption size of the whole document\n"
+        "(Project settings ▸ Text and tables).",
+        text=f"{current:g}" if current else "")
+    if not ok:
+        return
+    try:
+        size = parse_pt(text)
+    except ValueError:
+        QMessageBox.warning(edit, "Caption size",
+                            f"“{text}” is not a text size in pt between 4 and 30 (e.g. 9).")
+        return
+    try:
+        store.set_figure_caption_size(figure_id, size)
     except (ProjectError, OSError) as e:
         QMessageBox.warning(edit, "Could not save the size", str(e))
         return

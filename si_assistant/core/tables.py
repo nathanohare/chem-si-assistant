@@ -14,6 +14,15 @@ A table is a paragraph "!table{t-1a2b3c} Caption" in the text; its cells are sto
      "breakable": true}                 optional: may run over a page break even when it
                                         would fit on the next page (see `breakable` below)
 
+Formatting (Project settings ▸ Text and tables gives the defaults; each is stored only
+when set, so older tables read and print unchanged):
+
+    cell "size": 9                       this cell's text size in pt
+    "widths": [null, 2.5, null]          each column's width in cm (null = fits its text)
+    "fit_width": true                    shrink the whole table to the text width if wider
+    "caption_size": 9                    this table's caption size in pt
+    "notes_size": 8                      its footnotes' size in pt
+
 A cell may also hold a picture, printed above its text: a structure or scheme pasted from
 ChemDraw, or a picture file (e.g. a ligand drawn with its name under it, or a reaction
 scheme in a merged cell across the top of an optimisation table):
@@ -34,6 +43,8 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, field
 from typing import Any
+
+from .formatting import clean_size
 
 ALIGNS = ("left", "center", "right")
 DEFAULT_ALIGN = "center"
@@ -56,6 +67,7 @@ class Cell:
     align: str = ""         # "" = the column's alignment
     image: str = ""         # a picture printed above the text ("" = none), e.g. "images/x.svg"
     image_width: float | None = None   # its printed width in cm (None = its own size)
+    size: float | None = None   # its text size in pt (None = the table's default)
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {"text": self.text}
@@ -69,6 +81,8 @@ class Cell:
             out["image"] = self.image
             if self.image_width:
                 out["image_width"] = self.image_width
+        if self.size is not None:
+            out["size"] = self.size
         return out
 
     def is_blank(self) -> bool:
@@ -87,7 +101,8 @@ class Cell:
         image = image.strip() if isinstance(image, str) else ""
         return cls("" if text is None else str(text), _span(data.get("colspan"), MAX_COLS),
                    _span(data.get("rowspan"), MAX_ROWS), align if align in ALIGNS else "",
-                   image, _width(data.get("image_width")) if image else None)
+                   image, _width(data.get("image_width")) if image else None,
+                   clean_size(data.get("size")))
 
 
 def _span(value: Any, limit: int) -> int:
@@ -123,6 +138,11 @@ class Table:
     # fit where it is; only a table taller than a page then runs over (header repeated).
     # True = may start at the foot of a page and continue on the next.
     breakable: bool = False
+    # Formatting (None / False = the defaults of Project settings ▸ Text and tables).
+    widths: list[float | None] = field(default_factory=list)   # cm per column; None = auto
+    fit_width: bool = False             # shrink to the text width if wider
+    caption_size: float | None = None   # pt
+    notes_size: float | None = None     # pt
 
     # ------------------------------------------------------------------ making and storing
 
@@ -146,7 +166,10 @@ class Table:
             header = 1
         notes = [str(n) for n in _list(data.get("footnotes")) if n is not None and str(n).strip()]
         table = cls(rows, columns, header, notes, str(data.get("label", "") or "").strip(),
-                    str(data.get("id", "") or ""), data.get("breakable") is True)
+                    str(data.get("id", "") or ""), data.get("breakable") is True,
+                    [_width(w) for w in _list(data.get("widths"))[:MAX_COLS]],
+                    data.get("fit_width") is True, clean_size(data.get("caption_size")),
+                    clean_size(data.get("notes_size")))
         table.normalize()
         return table
 
@@ -158,6 +181,14 @@ class Table:
                "footnotes": [n for n in self.footnotes if n.strip()]}
         if self.breakable:
             out["breakable"] = True
+        if any(w is not None for w in self.widths):
+            out["widths"] = list(self.widths)
+        if self.fit_width:
+            out["fit_width"] = True
+        if self.caption_size is not None:
+            out["caption_size"] = self.caption_size
+        if self.notes_size is not None:
+            out["notes_size"] = self.notes_size
         return out
 
     def copy(self) -> "Table":
@@ -179,6 +210,7 @@ class Table:
         position holds a cell. The header row count is kept within the table."""
         n_cols = max([len(self.columns)] + [len(r) for r in self.rows] + [0])
         self.columns = (self.columns + [DEFAULT_ALIGN] * n_cols)[:n_cols]
+        self.widths = (list(self.widths) + [None] * n_cols)[:n_cols]
         for row in self.rows:
             row.extend([None] * (n_cols - len(row)))
         n_rows = len(self.rows)
@@ -273,7 +305,9 @@ class Table:
                     continue
             row.insert(index, Cell())
         align = self.columns[index - 1] if 0 < index <= self.n_cols else DEFAULT_ALIGN
+        self.widths = (list(self.widths) + [None] * self.n_cols)[:self.n_cols]
         self.columns.insert(index, align)
+        self.widths.insert(index, None)
         self.normalize()
 
     def delete_rows(self, indices) -> None:
@@ -311,6 +345,8 @@ class Table:
             for row in self.rows:
                 del row[index]
             del self.columns[index]
+            if index < len(self.widths):
+                del self.widths[index]
         self.normalize()
 
     # ------------------------------------------------------------------ merging
@@ -345,7 +381,8 @@ class Table:
             for c in range(c0, c1 + 1):
                 self.rows[r][c] = None
         self.rows[r0][c0] = Cell(" ".join(texts), c1 - c0 + 1, r1 - r0 + 1,
-                                 first.align if first is not None else "", *picture)
+                                 first.align if first is not None else "", *picture,
+                                 first.size if first is not None else None)
         self.normalize()
         return True
 
@@ -359,7 +396,7 @@ class Table:
         for dr in range(cell.rowspan):
             for dc in range(cell.colspan):
                 if dr or dc:
-                    self.rows[ar + dr][ac + dc] = Cell(align=cell.align)
+                    self.rows[ar + dr][ac + dc] = Cell(align=cell.align, size=cell.size)
         cell.rowspan = cell.colspan = 1
         self.normalize()
         return True
@@ -393,6 +430,7 @@ class Table:
             for row in self.rows:
                 row.extend(Cell() for _ in range(extra))
             self.columns += [self.columns[-1] if self.columns else DEFAULT_ALIGN] * extra
+            self.normalize()   # (widths for the new columns)
         for rr in range(r, r + height):
             for cc in range(c, c + width):
                 self.split(rr, cc)

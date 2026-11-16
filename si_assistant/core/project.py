@@ -40,6 +40,7 @@ from . import lock as lockmod
 from . import ms_reports
 from . import references as refs
 from . import spectra as spectra_mod
+from . import formatting
 from . import undo
 from .compound_ids import IdReport, SectionIds, check_ids
 from . import fileio
@@ -3618,6 +3619,71 @@ class Project:
         else:
             entry[UNCAPTIONED_KEY] = True
         self._set_figure_entry(owner, figure_id, entry)
+
+    def set_figure_caption_size(self, owner: TextOwner, figure_id: str,
+                                size_pt: float | None) -> None:
+        """Print this figure's caption at `size_pt` (None = the document's caption size,
+        Project settings ▸ Text and tables)."""
+        entry = self.figures(owner).get(figure_id)
+        if entry is None:
+            raise ProjectError("This figure's picture is no longer in the project.")
+        size = formatting.clean_size(size_pt)
+        if size is None:
+            entry.pop("caption_size", None)
+        else:
+            entry["caption_size"] = size
+        self._set_figure_entry(owner, figure_id, entry)
+
+    def clear_caption_sizes(self) -> int:
+        """Project settings ▸ Text and tables ▸ "apply to every caption": every table,
+        figure and scheme given a caption size of its own goes back to the document's.
+        Returns how many were changed."""
+        from . import scheme_editor as se
+        changed = 0
+        for owner in self.text_owners():
+            for table_id in self.table_ids(owner):
+                table = self.read_table(owner, table_id)
+                if table is not None and table.caption_size is not None:
+                    table.caption_size = None
+                    self.write_table(owner, table)
+                    changed += 1
+            for figure_id, entry in self.figures(owner).items():
+                if "caption_size" in entry:
+                    entry.pop("caption_size")
+                    self._set_figure_entry(owner, figure_id, entry)
+                    changed += 1
+        for scheme in self.all_schemes():
+            data = scheme.data.get(se.EDITOR_KEY)
+            layout = data.get("layout") if isinstance(data, dict) else None
+            if isinstance(layout, dict) and "caption_size_pt" in layout:
+                layout.pop("caption_size_pt")
+                if not layout:
+                    data.pop("layout")
+                self.save_scheme(scheme)
+                changed += 1
+        defaults = self.settings.get(se.PROJECT_KEY)
+        if isinstance(defaults, dict):
+            defaults.pop("caption_size_pt", None)
+        return changed
+
+    def clear_table_sizes(self) -> int:
+        """Project settings ▸ Text and tables ▸ "apply to every table": text sizes set for
+        single cells and footnote sizes set for single tables are removed, so every table
+        follows the document's defaults. Returns how many tables were changed."""
+        changed = 0
+        for owner in self.text_owners():
+            for table_id in self.table_ids(owner):
+                table = self.read_table(owner, table_id)
+                if table is None:
+                    continue
+                sized = [cell for _r, _c, cell in table.cells() if cell.size is not None]
+                if sized or table.notes_size is not None:
+                    for cell in sized:
+                        cell.size = None
+                    table.notes_size = None
+                    self.write_table(owner, table)
+                    changed += 1
+        return changed
 
     def _set_figure_entry(self, owner: TextOwner, figure_id: str, entry: dict | None) -> None:
         data = self._owner_data(owner)
