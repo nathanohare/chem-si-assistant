@@ -597,6 +597,15 @@ class PageTab(QWidget):
                       "Example: <i>Page {page} of {pages}</i> prints “Page S2 of S20”.")
         hint.setWordWrap(True)
         hint.setStyleSheet("color: palette(placeholder-text);")
+        self.author_style = QComboBox()
+        for key, text in page.AUTHOR_STYLES.items():
+            self.author_style.addItem(text, key)
+        self.author_style.setCurrentIndex(max(0, self.author_style.findData(v["author_style"])))
+        self.author_style.setToolTip(
+            "How {authors} is written. “First author et al.” gives e.g. “O'Hare et al.” "
+            "(“O'Hare and Smith” for two authors). If the surname comes out wrong, type the "
+            "text into the header yourself instead of {authors}.")
+        self.author_style.currentIndexChanged.connect(self.update_example)
         style_footer = QPushButton("Use the journal style's footer")
         style_footer.setToolTip("ACS and RSC: page number centred. Wiley: on the right.")
         style_footer.clicked.connect(self._use_style_footer)
@@ -654,6 +663,9 @@ class PageTab(QWidget):
         layout.addLayout(grid)
         layout.addWidget(hint)
         row = QHBoxLayout()
+        row.addWidget(QLabel("{authors} shows:"))
+        row.addWidget(self.author_style)
+        row.addSpacing(12)
         row.addWidget(style_footer)
         row.addStretch()
         layout.addLayout(row)
@@ -680,7 +692,8 @@ class PageTab(QWidget):
                 "number_style": self.number_style.currentData(),
                 "number_size": 0.0 if self.same_size.isChecked() else self.size.value(),
                 "number_bold": self.bold.isChecked(),
-                "number_on_cover": self.on_cover.isChecked()}
+                "number_on_cover": self.on_cover.isChecked(),
+                "author_style": self.author_style.currentData()}
 
     def update_example(self) -> None:
         self.example.setText(self._page.example(self._context(), self.values()))
