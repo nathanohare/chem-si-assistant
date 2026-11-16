@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core.chem_names import name_runs
 from ..core import chem, checks, ms_reports, procedures
 from ..core import fields as F
 from ..core.labels import is_inline_figure
@@ -373,8 +374,9 @@ def citation_sentence(project, compound, key: str = "references") -> list[Run]:
 
 def compound_title(project, compound, display_id: str) -> list[Run]:
     name = compound.name
-    if name:
-        return [R(f"{name} (", bold=True), R(display_id, bold=True), R(").", bold=True)]
+    if name:   # (italic N-, tert-, (R)-… as by convention: core/chem_names.py)
+        return [*name_runs(name, bold=True), R(" (", bold=True), R(display_id, bold=True),
+                R(").", bold=True)]
     return [R(f"Compound {display_id}.", bold=True)]
 
 

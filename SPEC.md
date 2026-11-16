@@ -1240,6 +1240,23 @@ Nathan asked for the program to look like his other program, Chem Illustrator (n
 - Its icons' style: 24 × 24 line drawings in the text colour (1.6 wide, round ends) for the toolbar and the tree, drawn again when the computer switches between light and dark.
 - Its font, IBM Plex Sans, when the computer has it; otherwise the computer's own interface font (as Chem Illustrator does). Sizes are unchanged (View ▸ Interface size still applies).
 
+## 13x. Italic prefixes in compound names (Lauren, 2026-11-15)
+
+1. **Compound names print their conventional italics.** When compiling, the name in a
+   compound's title is italicised where chemistry convention (IUPAC) wants it: heteroatom
+   locants before a hyphen (*N*-, *N*,*N*-, *N*′-, *O*-, *S*-, *P*-), *tert*-, *sec*-,
+   *cis*/*trans*, stereodescriptors in brackets ((*E*)-, (*Z*)-, (*R*)-, (*S*)-,
+   (2*E*,4*Z*)-, (1*R*,2*S*)-, (*R**)-: only the letters), and *o*-/*m*-/*p*- before a
+   hyphen. Nothing is changed in the stored name; only the printed title. The rules look
+   at the characters around each prefix, so words such as "Transfer", "SNAr", "1H-indole"
+   or "N1-benzyl" stay upright.
+2. **Overridable (§2.7).** A name containing an asterisk (other than the * of a relative
+   configuration, (*R**,*S**)) is printed exactly as typed instead, with `*…*` as italics as
+   in other texts, and nothing in it is italicised automatically. `\*` is a literal
+   asterisk.
+3. *As built:* `core/chem_names.py` (`italic_spans`, `name_runs`); `compile/blocks.py`
+   `compound_title`. Tests: `tests/test_chem_names.py`.
+
 ## 14. Glossary
 
 - **SI** — Supporting/Supplemental Information.
