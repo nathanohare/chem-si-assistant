@@ -40,12 +40,13 @@ from ..core import scheme_editor
 from ..core import spectra as spectra_mod
 from ..core.markup import Paragraph, Run, mention_kind, parse
 from ..core.project import (BUILD_DIR, GENERAL_OWNER, SPECTRA_SECTION, Compound, Project,
-                            SchemePage, Section, TextOwner, figure_width_cm)
+                            SchemePage, Section, TextOwner, figure_uncaptioned,
+                            figure_width_cm)
 from ..core.tables import Table
 from ..core.references import to_hayagriva
 from .blocks import CompoundBlock, compound_block, gp_sentence
 from .reaction_scheme import editor_scheme
-from .text import (aligned_object, format_chemistry, format_nmr, leave_alone,
+from .text import (BROKEN_MENTION, aligned_object, format_chemistry, format_nmr, leave_alone,
                    paragraphs_to_typst, resolve_links, runs_to_typst, typst_label, typst_string)
 
 STYLES_DIR = resources.resource("styles")
@@ -564,12 +565,16 @@ class Builder:
         self.link_back = self.nmr_links and bool(links.get("link_back"))
         self.link_style = str(links.get("link_style", "plain"))
         self.placed_labels: set[str] = set()   # Typst labels put in (each only once)
+        self._unnumbered_mentioned = 0   # mentions of figures printed without a number
 
     # ------------------------------------------------------------------ links
 
     def mention_text(self, item_id: str) -> str | None:
         """A compound's current ID, or a figure's, table's or scheme's label."""
         if mention_kind(item_id) != "compound":
+            if item_id in self.labels.unnumbered:
+                self._unnumbered_mentioned += 1
+                return BROKEN_MENTION
             return self.labels.label(item_id)
         try:
             self.project.compound(item_id)
@@ -580,7 +585,12 @@ class Builder:
     def links(self, runs: list[Run], where: str) -> list[Run]:
         """Mentions → current IDs, citations checked (SPEC §7.5, §9.5)."""
         problems: list[str] = []
+        self._unnumbered_mentioned = 0
         out = resolve_links(runs, self.mention_text, self.ref_ids, problems)
+        if self._unnumbered_mentioned:
+            problems.append("A mention points to a figure printed without a number or "
+                            "caption (printed as “??”): give the figure its number back "
+                            "(right-click it) or take the mention out.")
         for p in dict.fromkeys(problems):
             self.warnings.append(f"{where}: {p}")
         if any(r.ref for r in out):
@@ -971,10 +981,12 @@ class Builder:
                     out.append(aligned_object(self.table(owner, p.table, label, p.runs, where),
                                               p.stored_align))
                     continue
-                path, width_cm = None, None
+                path, width_cm, bare = None, None, False
                 if p.figure and owner is not None:
                     path = self.project.figure_path(owner, p.figure)
-                    width_cm = figure_width_cm(self.project.figures(owner).get(p.figure, {}))
+                    entry = self.project.figures(owner).get(p.figure, {})
+                    width_cm = figure_width_cm(entry)
+                    bare = figure_uncaptioned(entry)
                     if path is None:
                         self.warnings.append(f"{where}: a figure's picture is no longer in the "
                                              "project; left out.")
@@ -987,7 +999,11 @@ class Builder:
                                             9.0), natural=False)
                 else:
                     img = self.image(path, (TEXT_WIDTH_IN, 7.0))
-                if img:
+                if img and bare:   # just the picture: no number, no caption (issue #3)
+                    where_to = p.stored_align if p.stored_align in ("left", "right") else "center"
+                    out.append(f"#block(width: 100%, breakable: false, "
+                               f"align({where_to}, {img[0]}))")
+                elif img:
                     out.append(aligned_object(self.inline_figure(img[0], p.runs, label),
                                               p.stored_align))
             else:

@@ -3607,6 +3607,18 @@ class Project:
             entry["width"] = round(float(width_cm), 2)
         self._set_figure_entry(owner, figure_id, entry)
 
+    def set_figure_captioned(self, owner: TextOwner, figure_id: str, captioned: bool) -> None:
+        """Print a figure with its number and caption (the usual), or without either: just
+        the picture, not counted when the figures are numbered (issue #3)."""
+        entry = self.figures(owner).get(figure_id)
+        if entry is None:
+            raise ProjectError("This figure's picture is no longer in the project.")
+        if captioned:
+            entry.pop(UNCAPTIONED_KEY, None)
+        else:
+            entry[UNCAPTIONED_KEY] = True
+        self._set_figure_entry(owner, figure_id, entry)
+
     def _set_figure_entry(self, owner: TextOwner, figure_id: str, entry: dict | None) -> None:
         data = self._owner_data(owner)
         figures = data.get("figures") if isinstance(data.get("figures"), dict) else {}
@@ -3667,6 +3679,8 @@ class Project:
                                self.figure_source(owner, figure_id))
         self.add_figure(owner, source, data, ext, vector, vector_ext,
                         entry.get("label", ""), figure_id, figure_width_cm(entry))
+        if figure_uncaptioned(entry):   # (a new picture keeps "no number or caption")
+            self.set_figure_captioned(owner, figure_id, False)
 
     def remove_figure(self, owner: TextOwner, figure_id: str, caption: str = "") -> TrashEntry | None:
         """Send a figure's picture (and ChemDraw original) to the Trash. The editor takes its
@@ -4047,6 +4061,16 @@ def picture_source_path(picture: Path | None) -> Path | None:
         if candidate != picture and candidate.exists():
             return candidate
     return None
+
+
+# A figure printed without its number and caption (issue #3): "uncaptioned": true in its
+# entry in the owner's JSON ("figures": {id: {...}}).
+UNCAPTIONED_KEY = "uncaptioned"
+
+
+def figure_uncaptioned(entry) -> bool:
+    """Whether a figure entry says to print the picture without a number or caption."""
+    return isinstance(entry, dict) and entry.get(UNCAPTIONED_KEY) is True
 
 
 def figure_width_cm(entry: dict) -> float | None:
