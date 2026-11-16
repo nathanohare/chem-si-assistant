@@ -319,3 +319,23 @@ def test_a_book_reference():
 
 def test_xml_text():
     assert xml_text("a\x00b\x1fc\td\ne") == "abc\td\ne"
+
+
+def test_header_authors_as_first_author_et_al(sample):
+    """Project settings ▸ Page: {authors} as "First author et al." in the Word header
+    too; the file's own author property keeps every name."""
+    from si_assistant.core import page as page_setup
+    p, _parts = sample
+    s = dict(p.settings)
+    s["authors"] = [{"name": "Nathan P. O'Hare"}, {"name": "Jane Smith"}, {"name": "Ian Brown"}]
+    values = page_setup.page_settings(s)
+    values["header"] = {"left": "{authors}", "center": "", "right": ""}
+    values["author_style"] = "et_al"
+    page_setup.store_page_settings(s, values)
+    p.settings.clear()
+    p.settings.update(s)
+    _path, _warnings, doc = export(p)
+    header = "".join(t.text or "" for t in doc.sections[-1].header._element.iter(
+        "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"))
+    assert "O'Hare et al." in header and "Jane Smith" not in header
+    assert doc.core_properties.author == "Nathan P. O'Hare, Jane Smith, Ian Brown"

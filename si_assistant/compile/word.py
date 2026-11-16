@@ -580,7 +580,7 @@ class WordWriter:
         settings.insert_element_before(update, *_SETTINGS_AFTER_UPDATE)
         core = doc.core_properties
         core.title = str(self.project.settings.get("title") or "")
-        core.author = page_setup.author_names(self.project.settings)
+        core.author = page_setup.author_names(self.project.settings, "full")
         from .. import APP_NAME, __version__
         core.comments = f"Made with {APP_NAME} {__version__}"
         core.last_modified_by = APP_NAME

@@ -13,6 +13,9 @@ program's update check shows.)
   spectra pages are pictures drawn exactly as in the PDF. Page numbers S1, S2…, the header
   and footer, and the Text and tables settings are kept. Word fills in the table of
   contents' page numbers when it opens the file.
+- **"et al." in the page header.** Project settings ▸ Page ▸ **{authors} shows**: all
+  names (as before) or **First author et al.**, e.g. "O'Hare et al." ("O'Hare and Smith"
+  for two authors).
 - **HRMS ion labels for salts.** Project settings ▸ Output ▸ **HRMS ion for salts** can
   print a salt's ion as **[M−Br]⁺** (M = the whole salt) instead of [M]⁺ (M = the cation).
   The counter-ion is recognised from the structure ([M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺,
