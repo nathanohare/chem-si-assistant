@@ -15,12 +15,23 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
 from ..compile.document import CompileOptions, build
 from ..compile.qt_images import content_box, convert_to_png, image_info, ink_map
 from ..compile.run import CompileError, CompileResult, partial_pdf, place_pdf, typeset_pdf
+from ..compile.word import finish_docx, prepare_docx
 from ..core import front
 from ..core import ms_reports
 from ..core.project import SPECTRA_SECTION, Project
 
 
 KEY_ROLE = Qt.ItemDataRole.UserRole
+
+# What Compile SI makes (SPEC §13z), remembered as "compile_format" in project.json.
+OUTPUT_FORMATS = {"pdf": "PDF (build/SI.pdf)",
+                  "docx": "Word document (build/SI.docx)",
+                  "both": "PDF and Word document"}
+
+
+def output_format(settings: dict) -> str:
+    value = settings.get("compile_format", "pdf")
+    return value if value in OUTPUT_FORMATS else "pdf"
 
 
 class ExportTree(QTreeWidget):
@@ -171,7 +182,17 @@ class CompileDialog(QDialog):
         self.format_text = QCheckBox("Format chemistry text automatically (CDCl3 → CDCl₃, "
                                      "1H NMR → ¹H NMR, italic J, en-dashes)")
         self.format_text.setChecked(options.format_text)
-        self.open_pdf = QCheckBox("Open the PDF when it's ready")
+        self.output = QComboBox()
+        for key, text in OUTPUT_FORMATS.items():
+            self.output.addItem(text, key)
+        self.output.setCurrentIndex(list(OUTPUT_FORMATS).index(output_format(project.settings)))
+        output_note = QLabel("The Word document has the same content as the PDF, as editable "
+                             "text and tables; structures, schemes and spectra pages are "
+                             "pictures. Word fills in the table of contents' page numbers "
+                             "when it opens the file.")
+        output_note.setWordWrap(True)
+        output_note.setStyleSheet("color: palette(placeholder-text);")
+        self.open_pdf = QCheckBox("Open the file when it's ready")
         self.open_pdf.setChecked(True)
 
         form = QFormLayout()
@@ -180,6 +201,12 @@ class CompileDialog(QDialog):
             structures.addWidget(w)
         holder = QWidget()
         holder.setLayout(structures)
+        output = QVBoxLayout()
+        output.addWidget(self.output)
+        output.addWidget(output_note)
+        output_holder = QWidget()
+        output_holder.setLayout(output)
+        form.addRow("Save as:", output_holder)
         form.addRow("Structures:", holder)
         form.addRow("Spectra:", spectra_note)
         form.addRow(self.format_text)
@@ -199,8 +226,8 @@ class CompileDialog(QDialog):
                                      "out its sub-sections and its compounds' spectra):"), 1)
         include_row.addWidget(all_btn)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("The SI is saved as <b>build/SI.pdf</b> in the project folder "
-                                "(with SI.typ, the source, next to it)."))
+        layout.addWidget(QLabel("The SI is saved in the project's <b>build</b> folder (a PDF "
+                                "with SI.typ, its source, next to it)."))
         layout.addLayout(form)
         layout.addWidget(self.flow)
         layout.addLayout(include_row)
@@ -214,10 +241,18 @@ class CompileDialog(QDialog):
             format_text=self.format_text.isChecked(),
             excluded=frozenset(self.export.excluded()))
 
+    def output_format(self) -> str:
+        """"pdf", "docx" or "both"."""
+        return self.output.currentData() or "pdf"
+
     def remember(self) -> None:
         o = self.options()
         self.project.settings.update({
             "compile_structures": o.structures, "format_text": o.format_text})
+        if self.output_format() == "pdf":   # (the default: not stored)
+            self.project.settings.pop("compile_format", None)
+        else:
+            self.project.settings["compile_format"] = self.output_format()
         front.store_excluded(self.project.settings, o.excluded)
         self.flow.apply(self.project.settings)
         if not self.project.read_only:
@@ -308,9 +343,36 @@ def run_compile(parent: QWidget, project: Project, options: CompileOptions,
     return None
 
 
+def run_word_compile(parent: QWidget, project: Project, options: CompileOptions,
+                     name: str = "SI") -> CompileResult | None:
+    """The SI as a Word document (build/<name>.docx), like run_compile: built here (it reads
+    the project and uses Qt for pictures), its pictures drawn and the file written in a
+    worker thread. Problems are shown to the user, never raised. The result's `pdf` is the
+    .docx file (and `typ` is None)."""
+    if project.read_only:
+        QMessageBox.warning(parent, "Could not compile", "This project is open read-only, so "
+                            "the SI cannot be saved into its build folder.")
+        return None
+    QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    try:
+        built = prepare_docx(project, options, image_info, convert_to_png, crop=content_box,
+                             ink=ink_map)
+        path, warnings = in_background(lambda: finish_docx(built, name))
+        return CompileResult(path, None, warnings)
+    except CompileError as e:
+        QMessageBox.warning(parent, "Could not make the Word document", str(e))
+    except OSError as e:
+        QMessageBox.warning(parent, "Could not make the Word document",
+                            f"A file could not be read or written:\n\n{e}")
+    finally:
+        QGuiApplication.restoreOverrideCursor()
+    return None
+
+
 def show_warnings(parent: QWidget, result: CompileResult, title: str) -> None:
     if result.warnings:
-        QMessageBox.information(parent, title, "The PDF was made, with these notes:\n\n• "
+        what = "Word document" if result.pdf.suffix.lower() == ".docx" else "PDF"
+        QMessageBox.information(parent, title, f"The {what} was made, with these notes:\n\n• "
                                 + "\n• ".join(result.warnings))
 
 

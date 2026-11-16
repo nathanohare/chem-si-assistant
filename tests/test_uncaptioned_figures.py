@@ -94,3 +94,17 @@ def test_a_new_picture_keeps_the_setting(setup, tmp_path):
     p.set_figure_captioned(owner, f1, False)
     p.replace_figure_picture(owner, f1, source=picture(tmp_path / "new.png"))
     assert p.figures(owner)[f1]["uncaptioned"] is True
+
+
+def test_word_export_prints_just_the_picture(setup):
+    """The Word SI (SPEC §13z) leaves the number and caption off as the PDF does."""
+    from docx import Document
+    from si_assistant.compile.word import compile_docx
+    p, _notes, owner, (f1, f2, f3) = setup
+    p.set_figure_captioned(owner, f2, False)
+    path, warnings = compile_docx(p, CompileOptions.from_settings(p.settings), image_info,
+                                  convert_to_png)
+    text = "\n".join(par.text for par in Document(str(path)).paragraphs)
+    assert "First" in text and "Third" in text and "Second" not in text
+    assert "Figure S2" in text and "Figure S3" not in text
+    assert warnings == []

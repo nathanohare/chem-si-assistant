@@ -6,6 +6,13 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Word export.** Compile SI ▸ **Save as** makes the SI as a **Word document**
+  (build/SI.docx), or as both a PDF and a Word document. The Word file has the same
+  content as the PDF: text, headings (Word's Heading styles), compound data, tables (Word
+  tables with merged cells and rules) and references are editable; structures, schemes and
+  spectra pages are pictures drawn exactly as in the PDF. Page numbers S1, S2…, the header
+  and footer, and the Text and tables settings are kept. Word fills in the table of
+  contents' page numbers when it opens the file.
 - **Page flow.** Headings no longer stay behind at the bottom of a page with only a line of
   what follows: **Keep headings with** (2 lines by default) moves them on. A short bold or
   italic line typed as a sub-heading is kept with what follows too. New settings in the

@@ -16,8 +16,8 @@ from .document import CompileError, CompileOptions, build   # (CompileError: als
 
 @dataclass
 class CompileResult:
-    pdf: Path
-    typ: Path
+    pdf: Path          # the file made (for the Word export: the .docx)
+    typ: Path | None   # its Typst source (None for the Word export)
     warnings: list[str] = field(default_factory=list)
 
 

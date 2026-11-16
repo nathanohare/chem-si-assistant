@@ -266,3 +266,54 @@ def test_settings_box_round_trip(qapp):
     out = {}
     box.apply(out)
     assert out == s
+
+
+def test_word_export_follows_the_page_flow(qapp, tmp_path):
+    """The Word SI (SPEC §13z) uses Word's own controls: widow/orphan control, "keep with
+    next" and "keep lines together" for a kept compound, "page break before" for one on a
+    new page, and a line break for data on a new line."""
+    from docx import Document
+    from docx.oxml.ns import qn
+    from si_assistant.compile import word
+    from si_assistant.compile.qt_images import convert_to_png, image_info
+    from tests.sample_project import build_sample
+    p, parts = build_sample(tmp_path)
+    try:
+        def export():
+            path, _w = word.compile_docx(p, CompileOptions.from_settings(p.settings),
+                                         image_info, convert_to_png)
+            return Document(str(path))
+
+        def block(doc, compound):
+            """The paragraphs of a compound: its title to its data (the ¹H NMR)."""
+            paras = doc.paragraphs
+            first = next(i for i, q in enumerate(paras) if q.style.name == word.COMPOUND_TITLE
+                         and q.text.startswith(compound.name))
+            last = next(i for i, q in enumerate(paras) if i > first and "NMR (" in q.text)
+            return paras[first:last + 1]
+
+        doc = export()
+        c2 = block(doc, parts["c2"])
+        assert doc.styles["Normal"].paragraph_format.widow_control is True
+        assert not c2[-2].paragraph_format.keep_with_next
+        assert not c2[0].paragraph_format.page_break_before
+        n_paragraphs = len(c2)
+
+        page_flow.store_flow_settings(p.settings, page_flow.Flow(
+            widows="off", keep_compounds=True, data_spacing="line"))
+        page_flow.set_item_flow(parts["c2"].data, True, "default")
+        doc = export()
+        c2 = block(doc, parts["c2"])
+        assert doc.styles["Normal"].paragraph_format.widow_control is False
+        assert c2[0].paragraph_format.page_break_before
+        assert all(q.paragraph_format.keep_with_next for q in c2[:-1])
+        assert all(q.paragraph_format.keep_together for q in c2)
+        # Data on a new line of the procedure's paragraph: one paragraph fewer, a break.
+        assert len(c2) == n_paragraphs - 1
+        assert any(q._p.findall(".//" + qn("w:br")) for q in c2[1:])
+        # This compound may split even though compounds are kept together.
+        page_flow.set_item_flow(parts["c2"].data, False, "split")
+        c2 = block(export(), parts["c2"])
+        assert not any(q.paragraph_format.keep_together for q in c2)
+    finally:
+        p.close()

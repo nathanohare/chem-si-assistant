@@ -1311,13 +1311,88 @@ which the program does not have, is a separate future task).
    and View ▸ Show formatting marks: Qt's own marks for paragraph ends, line breaks,
    spaces and tabs. Off by default; one switch for every text box, remembered on the
    computer (like the H₂ toggle), never stored in the project or printed.
-5. *Not yet:* per-paragraph spacing in the text editor, column widths by dragging in the
-   table editor's grid, and Word (.docx) export.
+5. *Not yet:* per-paragraph spacing in the text editor and column widths by dragging in
+   the table editor's grid. (Word export: §13z, which honours all of the above.)
 6. *As built:* `core/formatting.py`, `core/tables.py`, `compile/document.py`,
    `compile/reaction_scheme.py`, `ui/format_widgets.py`, `ui/table_editor.py`,
    `ui/dialogs.py` (TextTablesTab), `ui/text_objects.py`, `ui/rich_text.py`,
    `ui/text_checks.py`. Tests: `tests/test_formatting.py` (including PDFs checked for the
    printed sizes, and a 12-column table that stays on one line when shrunk to fit).
+
+## 13z. Word export (Nathan, 2026-11-16)
+
+Nathan asked for the SI as a Word document as well as the PDF, so it can be edited or
+sent to a journal that wants Word.
+
+1. **Where:** Compile SI ▸ **Save as:** PDF (the default), Word document, or both. The
+   Word file is **build/SI.docx** (a numbered name when SI.docx is open in Word, as for
+   the PDF). The choice is remembered as `"compile_format": "docx" | "both"` in
+   project.json (not stored for PDF). Previews and the live preview stay PDF only.
+2. **Same content, same rules.** `compile/word.py` walks the project with the PDF's
+   `Builder` (compile/document.py) for every decision: what is included (the Compile
+   window's ticks), order, IDs, labels, mentions, links, the compound blocks' text and
+   every compile note. So the Word SI and the PDF always say the same thing. That
+   includes figures printed without a number or caption (issue #3) and the structure's
+   place on spectra, "auto" included (issue #1), and the page flow (§13k.2b) through
+   Word's own controls: widow/orphan control (Word has no "strong" level, so Normal and
+   Strong both switch it on), "keep with next" for headings and short bold/italic lines,
+   "keep with next" + "keep lines together" (and rows that don't split) for a compound or
+   section kept on one page, and "page break before" for one on a new page. A new compile
+   feature is added to both.
+3. **Editable text:** cover, General Information, custom sections, general procedures,
+   compound blocks, captions, table cells and footnotes, HRMS text listings and the
+   References are Word text with bold, italic, underline, super- and subscripts. Section
+   headings use Word's own **Heading 1–9** styles (navigation pane), numbered as in the
+   PDF (journal style, outline, 1.1.1 or none; the numbers are typed into the heading,
+   not Word list numbering). Headings that the PDF leaves out of the table of contents
+   use look-alike styles "SI Heading N (not listed)"; compound titles use "SI Compound
+   Title"; captions "SI Figure/Table/Scheme Caption" (label in bold, the journal's
+   separator: ACS ".", Wiley ":", RSC none).
+4. **Tables** are Word tables: merged cells, rules above, under the header rows and at
+   the bottom, header rows repeated on each page, kept on one page unless "May run over
+   a page break", column alignment, the footnotes in a last row across the table (so
+   they start at its left edge and stay with it). Column widths typed in the table
+   editor are used (shrunk to the text width with "Shrink to fit"); the others are
+   estimated from their text (Word refits them; LibreOffice uses them as they are).
+5. **Pictures:** PNG, JPEG and GIF go in unchanged. Anything Word can't show from
+   Python (the program's structure drawings and pasted ChemDraw pictures as SVG/PDF,
+   schemes made with the scheme editor, X-ray drawings, PDF pages) is drawn by **Typst**
+   — the same engine and style as the PDF, so it looks identical — into PNG at 300 ppi.
+   Each **spectra page** is one picture of the whole page as laid out in the PDF
+   (header line, structure + ID box, crop, frames, 1/2/4 per page); landscape pages get
+   a landscape Word section. PDF pages of Attachment sections and HRMS reports are
+   pictures too. A picture Typst can't draw is left out with a note.
+6. **Formatting** (§13y): line spacing (as a multiple of single), space before/after
+   paragraphs, caption size, table cell / header / footnote sizes, bold header rows,
+   and every per-table, per-cell and per-caption size. Fonts, sizes, paper and margins
+   follow the journal style (`word.LOOKS`, matched to styles/*.typ).
+7. **Page numbers and header/footer** (Project settings ▸ Page): Word PAGE/NUMPAGES
+   fields after the prefix ("S"), in 1/i/I, size and bold as set, left/centre/right
+   parts with {title}, {authors}, {date}; no header or footer on the cover unless
+   chosen.
+8. **Table of contents:** written entry by entry (Word's own TOC field can't put "S"
+   before page numbers), each entry a link to its heading with its page number as a
+   PAGEREF field; the file asks Word to update its fields when opened, which fills in the
+   numbers. Lists of figures, tables and schemes the same way. A heading added in Word
+   later is not added to it.
+9. **Citations and references:** numbered in order of first citation, as superscripts
+   (Wiley: superscript [n]); the References list (RSC "Notes and references") is
+   formatted by the program in the journal's pattern (ACS: "Surname, I.; … Title.
+   *Journal* **Year**, *Vol* (issue), pages. DOI: …"; RSC and Angewandte/Wiley: initials
+   first, no article title). The PDF uses Typst's CSL styles, so small differences in
+   unusual references are possible.
+10. **Links:** with Spectra section ▸ "NMR links", the ¹H NMR, ¹³C NMR… of a peak report
+    link to the page of that spectrum (a Word bookmark there); a link whose spectrum is
+    not printed becomes plain text, as in the PDF.
+11. *As built:* `compile/word.py` (python-docx, MIT, with lxml BSD-3-Clause),
+    `compile/document.py` (`spectra_page_list`, `compound_notes`, shared with the PDF),
+    `compile/reaction_scheme.py` (`code(labelled=False)`, `caption()`),
+    `ui/compile_ui.py` (Save as, `run_word_compile`), `ui/main_window.py`,
+    `selftest.py` ("word" check), packaging (python-docx's template). Tests:
+    `tests/test_word_export.py`, `tests/test_ui_compile.py`.
+12. *Not yet:* structures as editable ChemDraw objects (they are pictures), spectra
+    header lines as text (they are part of the page picture), and Word's own list
+    numbering for headings.
 
 ## 14. Glossary
 

@@ -163,6 +163,7 @@ def test_data_files_cover_what_the_program_reads():
     ("PySide6/Qt6Svg.dll", True),
     ("PySide6/plugins/imageformats/qsvg.dll", True),
     ("spellchecker/resources/en.json.gz", True),
+    ("docx/templates/default.docx", True),
 ])
 def test_unused_qt_files_are_left_out(dest, kept):
     assert B.keep_in_bundle(dest) == kept
@@ -306,10 +307,11 @@ def test_self_test_writes_a_report(monkeypatch, tmp_path):
     report = tmp_path / "r.json"
     code = selftest.run(report)
     data = json.loads(report.read_text(encoding="utf-8"))
-    # ("pdf": edit-restricted PDFs open; "example": the shipped example project opens.)
+    # ("pdf": edit-restricted PDFs open; "word": a Word file can be written; "example": the
+    # shipped example project opens.)
     assert set(data["checks"]) == {"files", "python", "spelling", "rdkit", "typst", "pdf",
-                                   "qt", "example"}
-    for name in ("files", "python", "spelling", "rdkit", "typst", "pdf", "example"):
+                                   "word", "qt", "example"}
+    for name in ("files", "python", "spelling", "rdkit", "typst", "pdf", "word", "example"):
         assert data["checks"][name]["ok"], data["checks"][name]
     assert code == (0 if data["ok"] else 1)
     assert data["frozen"] is False and __version__ in data["program"]

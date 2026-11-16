@@ -229,3 +229,23 @@ def test_dragging_an_auto_box_then_choosing_a_place(sample):
                 if i["file"] == "2_1H.pdf")
     assert "x" not in item["pages"]["1"] and item["pages"]["1"]["struct_place"] == "above"
     panel.deleteLater()
+
+
+def test_word_export_places_the_structure_as_the_pdf_does(sample):
+    """The Word SI (SPEC §13z) draws its spectra pages with the same placement."""
+    from si_assistant.compile.word import prepare_docx
+    p, _parts = sample
+    p.set_spectra_defaults({**p.spectra_defaults(), "struct_place": "auto"})
+    options = CompileOptions.from_settings(p.settings)
+
+    def pages(built):
+        return [pic.page for pic in built.writer.pictures if "si-spectra-page" in (pic.page or "")]
+
+    built = prepare_docx(p, options, image_info, convert_to_png, crop=content_box, ink=ink_map)
+    assert built.warnings == [] and pages(built)
+    assert all("pos: (" in pg and "spot:" not in pg for pg in pages(built))
+    full = lambda path, page: np.ones((50, 60), bool)    # noqa: E731 (ink everywhere)
+    (p.folder / "build" / S.InkCache.FILE).unlink()      # (else the measured ink is reused)
+    built = prepare_docx(p, options, image_info, convert_to_png, crop=content_box, ink=full)
+    assert all('spot: "above"' in pg for pg in pages(built))
+    assert len(built.warnings) == 1 and "no blank space" in built.warnings[0]
