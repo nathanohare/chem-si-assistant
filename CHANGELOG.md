@@ -6,6 +6,13 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Page flow.** Headings no longer stay behind at the bottom of a page with only a line of
+  what follows: **Keep headings with** (2 lines by default) moves them on. A short bold or
+  italic line typed as a sub-heading is kept with what follows too. New settings in the
+  Compile window and Project settings ▸ Page: how hard to avoid single lines at page edges,
+  keeping each compound on one page, and whether a compound's data start a new paragraph,
+  a new line with no extra space, or run on after the procedure. Each section and compound
+  has a **Page breaks** button: start on a new page, keep together, or allow splitting.
 - **Heading numbers.** Project settings ▸ Output ▸ **Heading numbers**: as the journal
   style does, an **outline** (sections 1, 2, 3; the next level A, B, C; then a, b, c),
   1, 1.1, 1.1.1, or none, in any style. The outline and 1.1.1 also number the headings

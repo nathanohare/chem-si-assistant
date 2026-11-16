@@ -981,6 +981,32 @@ In the Compile SI window you choose:
 The PDF is saved as **build/SI.pdf** in the project folder. If that file is open in a PDF
 viewer that locks it, the new one gets a numbered name instead.
 
+### Page flow: how text is split over pages
+
+The **Page flow** settings are in the Compile SI window and in **Project Settings ▸ Page**
+(both change the same settings):
+- **Keep headings with:** a heading moves to the next page unless this many lines of what
+  follows it fit under it (2 lines by default; Off lets a heading keep just one line).
+- **Avoid single lines at page edges:** Off, Normal or Strong. Strong tries harder not to
+  leave a paragraph's first line alone at the bottom of a page, or its last line alone at
+  the top of the next.
+- **Keep a short bold or italic line with what follows, like a heading:** a line such as
+  *Solvent Effect on Reaction Yield* that you typed in italics as a sub-heading is not
+  left alone at the bottom of a page. Lines ending in "." or ":" are ordinary text.
+- **Keep each compound on one page:** a compound (title, structure, procedure, data) that
+  fits on a page moves to the next page whole instead of being split. This leaves more
+  empty space at the bottom of some pages. A compound longer than a page still splits.
+- **Data after the procedure:** where a compound's data ("Colorless oil (57.4 mg, 94%).
+  ¹H NMR …") start: a **new paragraph** with the usual paragraph space (as before), a
+  **new line with no extra space**, or in the **same paragraph**.
+
+For a single section or compound, use its **Page breaks** button (a section's is beside
+its name; a compound's is in its header, next to *Collapse all*):
+- **Start on a new page**;
+- **Keep together**: a compound can follow the project setting, be kept on one page, or be
+  allowed to split even when the project keeps compounds together; a section can be kept
+  on one page (when it fits).
+
 The **journal style** (ACS, Wiley or RSC) is chosen in **Project Settings ▸ Output**.
 **Heading numbers**, next to it, numbers the headings: as the journal style does (none in
 ACS; 1, 1.1 for sections in Wiley and RSC), as an **outline** (sections 1, 2, 3; the next

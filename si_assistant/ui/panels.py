@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QFileDialog, QFormLayout, QFrame, QHBoxLayout, QL
                                QLineEdit, QMessageBox, QPushButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from ..core.project import (FILE_SECTION_EXTENSIONS, Project, ProjectError, Section)
+from ..core.project import (FILE_SECTION_EXTENSIONS, SPECTRA_SECTION, Project, ProjectError,
+                            Section)
 from .rich_text import RichTextEditor
 from .structure_widgets import PasteFrame, PasteTargetMixin  # noqa: F401 (PasteFrame: here before)
 
@@ -44,6 +45,12 @@ class SectionPanel(QWidget):
         top = QHBoxLayout()
         top.addWidget(self.name_edit, 1)
         top.addWidget(kind)
+        if section.type != SPECTRA_SECTION:   # (the spectra always start a page of their own)
+            from .page_flow_ui import PageFlowButton
+            self.page_flow = PageFlowButton(project, lambda: self.section.data,
+                                            lambda: project.save_section(self.section),
+                                            lambda: f"“{self.section.name}”", compound=False)
+            top.addWidget(self.page_flow)
         self.layout_.addLayout(top)
 
     def _commit_name(self) -> None:

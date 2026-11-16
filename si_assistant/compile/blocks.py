@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..core.chem_names import name_runs
-from ..core import chem, checks, ms_reports, procedures
+from ..core import chem, checks, ms_reports, page_flow, procedures
 from ..core import fields as F
 from ..core.labels import is_inline_figure
 from ..core.markup import CITE, NORMAL, SUB, SUPER, Paragraph, Run, parse
@@ -381,10 +381,12 @@ def compound_title(project, compound, display_id: str) -> list[Run]:
 
 
 def generated_paragraphs(project, compound, use_helpers: bool = True,
-                         nmr_link=None) -> list[Paragraph]:
+                         nmr_link=None, data_spacing: str = "paragraph") -> list[Paragraph]:
     """The text the program writes for this compound (procedure, then the data).
     `nmr_link(nucleus)`: the label of the compound's spectrum to link each peak report's
-    "¹H NMR" to, or "" (see nmr_sentence)."""
+    "¹H NMR" to, or "" (see nmr_sentence). `data_spacing` (core/page_flow.py): the data
+    as a paragraph of its own ("paragraph"), on a new line of the paragraph before it
+    ("line") or run on after it ("run_on")."""
     paragraphs: list[Paragraph] = []
     data: list[Run] = []
     did_state = False
@@ -435,7 +437,13 @@ def generated_paragraphs(project, compound, use_helpers: bool = True,
         if defn.kind == "parts":
             data += _with_space(_parts_sentence(project, compound, defn, use_helpers))
     if data:
-        paragraphs.append(Paragraph(data[:-1] if data[-1].text == " " else data))
+        data = data[:-1] if data[-1].text == " " else data
+        if paragraphs and data_spacing in ("line", "run_on"):
+            last = paragraphs.pop()
+            gap = R("\n") if data_spacing == "line" else R(" ")
+            paragraphs.append(Paragraph(last.runs + [gap] + data))
+        else:
+            paragraphs.append(Paragraph(data))
     return paragraphs
 
 
@@ -468,5 +476,6 @@ def compound_block(project, compound, display_id: str, use_helpers: bool = True,
         # (follows the journal style: an alignment typed into the file is ignored)
         paragraphs = [Paragraph(p.runs, p.heading) for p in parse(custom) if p.runs]
     else:
-        paragraphs = generated_paragraphs(project, compound, use_helpers, nmr_link)
+        spacing = page_flow.flow_settings(project.settings).data_spacing
+        paragraphs = generated_paragraphs(project, compound, use_helpers, nmr_link, spacing)
     return CompoundBlock(title, paragraphs, inline_figures(project, compound), bool(custom))
