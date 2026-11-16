@@ -316,9 +316,18 @@ def _merge(runs: list[Run]) -> list[Run]:
 
 def charge_runs(display: str) -> list[Run]:
     """An adduct like "[M+H]+", "[M−H]−" or "[M]+." with the charge as superscript. It
-    reads the same labels as chem.adduct_display and prints the radical the same way (•)."""
+    reads the same labels as chem.adduct_display and prints the radical the same way (•).
+    Atom counts in the brackets are subscripted ([M+NH4]⁺ -> NH₄, [M−BF4]⁺ -> BF₄); a
+    number of molecules or pieces is not ([2M+Na]⁺, [M+2H]²⁺, [M−2Br]²⁺)."""
     m = re.match(r"^(\[.*\])(\d*[+\-−][•·.]?)$", display.strip())
     if not m:
         return [Run(display)]
     charge = m.group(2).replace("-", "−").replace(".", "•").replace("·", "•")
-    return [Run(m.group(1).replace("-", "−")), Run(charge, valign=SUPER)]
+    body: list[Run] = []
+    for i, part in enumerate(_ATOM_COUNT.split(m.group(1).replace("-", "−"))):
+        if part:
+            body.append(Run(part, valign=SUB) if i % 2 else Run(part))
+    return body + [Run(charge, valign=SUPER)]
+
+
+_ATOM_COUNT = re.compile(r"(?<=[A-Za-z)])(\d+)")   # (the digits after an element or ")")

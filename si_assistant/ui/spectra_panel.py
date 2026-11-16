@@ -114,6 +114,12 @@ class SpectraSample(QWidget):
         # is shown larger and fills more of its space.
         shape = 0.5 if v["auto_crop"] else 0.773
         room = QRectF(slot.left(), top, slot.width(), slot.bottom() - top)
+        place = v.get("struct_place", "on") if v.get("struct_box", True) else "on"
+        label_w, label_h = page_w * 1.5 / 8.5 * v["struct_scale"], page_w * 1.3 / 8.5 * v["struct_scale"]
+        if place == "above":   # (the box takes room of its own: the spectrum is smaller)
+            room.setTop(room.top() + min(label_h, room.height() * 0.45))
+        elif place == "beside":
+            room.setRight(room.right() - min(label_w, room.width() * 0.45))
         sw = min(room.width(), room.height() / shape)
         spec = QRectF(0, 0, sw, sw * shape)
         spec.moveTopLeft(QPointF(room.center().x() - sw / 2, room.top()))
@@ -131,9 +137,10 @@ class SpectraSample(QWidget):
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(spec)
         if v.get("struct_box", True):
-            self._label(p, spec, page_w)
+            self._label(p, spec, page_w, place, slot)
 
-    def _label(self, p: QPainter, spec: QRectF, page_w: float) -> None:
+    def _label(self, p: QPainter, spec: QRectF, page_w: float, place: str = "on",
+               slot: QRectF | None = None) -> None:
         v = self.values
         scale = v["struct_scale"]
         bw = page_w * 1.5 / 8.5 * scale
@@ -142,6 +149,10 @@ class SpectraSample(QWidget):
         inset = page_w * 0.4 / 21.6
         x = spec.left() + inset if v["corner"].endswith("left") else spec.right() - inset - bw
         y = spec.top() + inset if v["corner"].startswith("top") else spec.bottom() - inset - bh
+        if place == "above":
+            x, y = spec.center().x() - bw / 2, spec.top() - bh - 1
+        elif place == "beside":
+            x, y = spec.right() + 1, spec.top()
         box = QRectF(x, y, bw, bh)
         p.setBrush(QColor(v["struct_bg"]))
         p.setPen(QPen(QColor(v["struct_frame_color"]), 1) if v["struct_frame"]
@@ -232,13 +243,39 @@ class SpectraSectionPanel(SectionPanel):
         self.struct_box.setToolTip("Untick to print the spectra without them. Single spectra "
                                    "can still show or hide them on their compound's spectra "
                                    "page.")
+        self.place = QComboBox()
+        for key, text in S.PLACES.items():
+            self.place.addItem(text, key)
+        self.place.setCurrentIndex(max(0, self.place.findData(v["struct_place"])))
+        self.place.setToolTip(
+            "On the spectrum (in a corner): over the spectrum, in the corner below.\n"
+            "In blank space (auto): over the spectrum wherever it covers only white paper, "
+            "as near the corner below as it can; if there is no such space it goes above "
+            "the spectrum.\n"
+            "Above / beside the spectrum: next to it, never over it (the spectrum is made "
+            "a little smaller to leave room).\n"
+            "On a compound's spectra page each spectrum can be set differently, or its "
+            "structure dragged anywhere.")
         self.corner = QComboBox()
         for key, text in S.CORNERS.items():
             self.corner.addItem(text, key)
         self.corner.setCurrentIndex(max(0, self.corner.findData(v["corner"])))
         self.corner.setToolTip("Where the structure and ID go on each spectrum (inside the "
-                               "plot, 0.4 cm from its edges). On a compound's spectra page "
-                               "they can be dragged anywhere.")
+                               "plot, 0.4 cm from its edges); with “in blank space (auto)”, "
+                               "the corner tried first. On a compound's spectra page they can "
+                               "be dragged anywhere.")
+        self.auto_shrink = QCheckBox("Make the structure smaller to fit, down to")
+        self.auto_shrink.setChecked(v["auto_shrink"])
+        self.auto_shrink.setToolTip("Auto placement only: when the structure doesn't fit in "
+                                    "any blank space at its size, try it smaller, step by step, "
+                                    "but no smaller than this.")
+        self.auto_min = QSpinBox()
+        self.auto_min.setRange(round(S.SCALE_RANGE[0] * 100), round(S.SCALE_RANGE[1] * 100))
+        self.auto_min.setSingleStep(10)
+        self.auto_min.setSuffix(" %")
+        self.auto_min.setValue(round(v["auto_min_scale"] * 100))
+        self.auto_min.setToolTip("The smallest structure size auto placement may use (as "
+                                 "“Structure size”: 100 % = its normal size)")
         self.scale = QSpinBox()
         self.scale.setRange(round(S.SCALE_RANGE[0] * 100), round(S.SCALE_RANGE[1] * 100))
         self.scale.setSingleStep(10)
@@ -280,7 +317,9 @@ class SpectraSectionPanel(SectionPanel):
         label_box = QGroupBox("Structure and compound ID on each spectrum")
         lform = QFormLayout(label_box)
         lform.addRow(self.struct_box)
-        lform.addRow("Position:", self.corner)
+        lform.addRow("Position:", self.place)
+        lform.addRow("Corner:", self.corner)
+        lform.addRow("", self._row(self.auto_shrink, self.auto_min))
         lform.addRow("Structure size:", self.scale)
         lform.addRow("ID text:", self._row(self.same_size, self.id_size, self.id_bold))
         lform.addRow("Frame:", self._row(self.struct_frame, self.struct_colour, self.struct_width))
@@ -386,18 +425,18 @@ class SpectraSectionPanel(SectionPanel):
         self._timer.setInterval(SAVE_DELAY_MS)
         self._timer.timeout.connect(self._save)
         self._unsaved = False   # a save failed: tried again on flush or the next change
-        for box in (self.per_page, self.orientation, self.corner, self.link_style):
+        for box in (self.per_page, self.orientation, self.place, self.corner, self.link_style):
             box.currentIndexChanged.connect(self._changed)
         for check in (self.header_line, self.spectrum_frame, self.auto_crop, self.same_size,
                       self.id_bold, self.struct_frame, self.caption, self.struct_box,
-                      self.nmr_links, self.link_back, self.hrms_reports):
+                      self.nmr_links, self.link_back, self.hrms_reports, self.auto_shrink):
             check.toggled.connect(self._changed)
         for spin in (self.scale, self.id_size, self.spectrum_width, self.struct_width,
-                     self.caption_size):
+                     self.caption_size, self.auto_min):
             spin.valueChanged.connect(self._changed)
         for button in (self.spectrum_colour, self.struct_colour, self.background):
             button.changed.connect(self._changed)
-        for w in (self.per_page, self.orientation, self.header_line, self.spectrum_frame,
+        for w in (self.place, self.auto_shrink, self.auto_min, self.per_page, self.orientation, self.header_line, self.spectrum_frame,
                   self.struct_box,
                   self.spectrum_colour, self.spectrum_width, self.auto_crop, self.corner,
                   self.scale, self.same_size, self.id_size, self.id_bold, self.struct_frame,
@@ -440,6 +479,9 @@ class SpectraSectionPanel(SectionPanel):
             "header_line": self.header_line.isChecked(),
             "struct_box": self.struct_box.isChecked(),
             "corner": self.corner.currentData(),
+            "struct_place": self.place.currentData(),
+            "auto_shrink": self.auto_shrink.isChecked(),
+            "auto_min_scale": round(self.auto_min.value() / 100, 2),
             "struct_frame": self.struct_frame.isChecked(),
             "struct_frame_color": self.struct_colour.colour(),
             "struct_frame_width": round(self.struct_width.value(), 2),
@@ -465,9 +507,14 @@ class SpectraSectionPanel(SectionPanel):
         for w in (self.link_style, self.link_back):   # (only matter with links)
             w.setEnabled(not ro and linked)
         shown = self.struct_box.isChecked()
-        for w in (self.corner, self.scale, self.same_size, self.id_bold, self.struct_frame,
+        for w in (self.place, self.scale, self.same_size, self.id_bold, self.struct_frame,
                   self.background, self.caption):
             w.setEnabled(not ro and shown)
+        place = self.place.currentData()
+        self.corner.setEnabled(not ro and shown and place in ("on", "auto"))
+        self.auto_shrink.setEnabled(not ro and shown and place == "auto")
+        self.auto_min.setEnabled(not ro and shown and place == "auto"
+                                 and self.auto_shrink.isChecked())
         self.id_size.setEnabled(not ro and shown and not self.same_size.isChecked())
         self.caption_size.setEnabled(not ro and shown and self.caption.isChecked())
         for w in (self.spectrum_colour, self.spectrum_width):

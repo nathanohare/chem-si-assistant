@@ -177,7 +177,7 @@ def test_overrides_round_trip_and_reset(sample):
     panel = _panel(p, c2)
     from si_assistant.ui.spectra_page import ROWS
     assert all(panel.row_state(r) == "default" for r, _l, _k in ROWS)
-    panel.per_page.setCurrentIndex(panel.per_page.findData(2))
+    panel.per_page.setCurrentIndex(panel.per_page.findData(4))
     panel.orientation.setCurrentIndex(panel.orientation.findData("landscape"))
     panel.struct_frame.setChecked(True)
     panel.background.set_colour("#ffeecc")
@@ -187,11 +187,11 @@ def test_overrides_round_trip_and_reset(sample):
     panel.caption.setChecked(True)
     panel.flush()
     item = _spectra_item(Project.open(p.folder).compound(c2.id), "2_1H.pdf")
-    assert item["pages"]["1"] == {"per_page": 2, "orientation": "landscape",
+    assert item["pages"]["1"] == {"per_page": 4, "orientation": "landscape",
                                   "struct_frame": True, "struct_bg": "#ffeecc",
                                   "id_size": 9.0, "caption": True}
     eff = S.effective(p.spectra_defaults(), item, "1")
-    assert eff["per_page"] == 2 and eff["header_line"] is True     # the rest: defaults
+    assert eff["per_page"] == 4 and eff["header_line"] is True     # the rest: defaults
     assert panel.row_state("per_page") == "changed" and panel.row_state("auto_crop") == "default"
     assert panel.canvas.caption.startswith("¹H NMR (CDCl₃")
     # Put one back by hand: it follows the default again (not stored).
@@ -200,7 +200,7 @@ def test_overrides_round_trip_and_reset(sample):
     assert "caption" not in _spectra_item(c2, "2_1H.pdf")["pages"]["1"]
     panel.reset_row("per_page")
     assert "per_page" not in _spectra_item(c2, "2_1H.pdf")["pages"]["1"]
-    assert panel.per_page.currentData() == 1
+    assert panel.per_page.currentData() == S.NEW_PROJECT_PER_PAGE
     panel.reset_spectrum()
     item = _spectra_item(Project.open(p.folder).compound(c2.id), "2_1H.pdf")
     assert "pages" not in item and "layout" not in item
@@ -393,7 +393,7 @@ def test_the_live_preview_compiles_a_spectra_page(window):
     win.select("spectra_page", c2_id)
     pane = win.preview_pane
     pane._start()
-    assert pane.doc.pageCount() == 3                       # one page per spectrum
+    assert pane.doc.pageCount() == 2                       # three spectra, two on a page
     assert pane.status.text().startswith("Up to date")
     before = pane.compiles
     win.panel.canvas.box_moved.emit(0.6, 0.6)              # saved: compiled again

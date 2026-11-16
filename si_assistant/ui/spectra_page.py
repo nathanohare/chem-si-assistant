@@ -165,9 +165,48 @@ class SpectrumCanvas(QWidget):
         self._start_scale = 1.0
         self._start_dist = 1.0
         self._hover = False
+        self._resolved: tuple | None = None   # (key, values) for resolved()
+        self.moved_scale: float | None = None  # the size an auto-placed box was dragged at
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(560, 420)
+
+    # ------------------------------------------------------------------ auto placement
+
+    def resolved(self) -> dict:
+        """The settings as the spectrum prints: "auto" (issue #1) worked out to a place on
+        blank paper (x, y and perhaps a smaller structure), or "above" when there is none,
+        as compile/document.Builder.placed does. A box dragged by hand stays put."""
+        v = self.values
+        if (v.get("struct_place") != "auto" or ("x" in v and "y" in v) or self.image.isNull()
+                or not v.get("struct_box", True)):
+            return v
+        key = (self.image.cacheKey(), self.crop, self.slot_in, self.id_text, self.caption,
+               self.id_pt, tuple(sorted((k, str(x)) for k, x in v.items())),
+               id(self._structure))
+        if self._resolved is None or self._resolved[0] != key:
+            self._resolved = (key, self._auto_place(v))
+        return self._resolved[1]
+
+    def _auto_place(self, v: dict) -> dict:
+        import numpy as np
+        gray = self.image.convertToFormat(QImage.Format.Format_Grayscale8)
+        w, h, stride = gray.width(), gray.height(), gray.bytesPerLine()
+        arr = np.frombuffer(gray.constBits(), np.uint8, count=stride * h).reshape(h, stride)[:, :w]
+        ink = S.crop_ink(S.ink_map_of(arr), self.crop)
+        shown = S.shown_size_in(self.slot_in, self.aspect(), self.crop,
+                                header=bool(v.get("header_line")))
+
+        def box_at(scale: float) -> tuple[float, float]:
+            bw, bh = self.box_size_pt(scale)
+            return bw / 72, bh / 72
+
+        spot = S.auto_place(ink, shown, box_at, float(v.get("struct_scale", 1.0)),
+                            v.get("corner", "top-left"), bool(v.get("auto_shrink")),
+                            float(v.get("auto_min_scale", 0.5)))
+        if spot is None:
+            return {**v, "struct_place": "above", "auto_failed": True}
+        return {**v, "x": spot[0], "y": spot[1], "struct_scale": spot[2], "auto_placed": True}
 
     def set_structure(self, source) -> None:
         """source: as structure_source() returns."""
@@ -192,21 +231,38 @@ class SpectrumCanvas(QWidget):
             return None
         return self.image.height() / self.image.width()
 
+    def place(self) -> str:
+        """"on", "above" or "beside": where the box is drawn ("auto" resolved)."""
+        v = self.resolved()
+        place = v.get("struct_place", "on")
+        if ("x" in v and "y" in v) or not self.box_size_pt()[0]:
+            return "on"
+        return place if place in S.OUTSIDE_PLACES else "on"
+
     def shown_in(self) -> tuple[float, float]:
         """The printed size (inches) of the part of the spectrum that is shown: as large as
-        fits in the slot below the header line (as the styles' si-spectrum does)."""
+        fits in the slot below the header line, leaving room for the box above or beside
+        it (as the styles' si-spectrum does)."""
+        bw, bh = self.box_size_pt()
         return S.shown_size_in(self.slot_in, self.aspect(), self.crop,
-                               header=bool(self.values.get("header_line")))
+                               header=bool(self.values.get("header_line")),
+                               place=self.place(), box_in=(bw / 72, bh / 72))
 
     def spectrum_rect(self) -> tuple[QRectF, float]:
         """(where the shown spectrum is drawn, pixels per printed inch)."""
         w_in, h_in = self.shown_in()
         head_in = S.HEADER_IN if self.values.get("header_line") else 0.0
+        place = self.place()
+        bw, bh = (x / 72 for x in self.box_size_pt())
+        extra_w = bw + S.GAP_IN if place == "beside" else 0.0
+        extra_h = bh + S.GAP_IN if place == "above" else 0.0
         area = QRectF(self.rect()).adjusted(12, 12, -12, -12)
-        k = max(1e-3, min(area.width() / w_in, area.height() / (h_in + head_in)))
+        k = max(1e-3, min(area.width() / (w_in + extra_w),
+                          area.height() / (h_in + head_in + extra_h)))
         w, h = w_in * k, h_in * k
-        top = area.y() + (area.height() - h - head_in * k) / 2 + head_in * k
-        return QRectF(area.x() + (area.width() - w) / 2, top, w, h), k
+        top = area.y() + (area.height() - h - (head_in + extra_h) * k) / 2 + (head_in + extra_h) * k
+        left = area.x() + (area.width() - w - extra_w * k) / 2
+        return QRectF(left, top, w, h), k
 
     def _id_font(self, units: float) -> QFont:
         """The ID's font, `units` pixels per point."""
@@ -223,14 +279,18 @@ class SpectrumCanvas(QWidget):
         f.setPixelSize(max(1, round(self.caption_pt() * units)))
         return f
 
-    def _lines_pt(self) -> list[tuple[str, float, float]]:
+    def _lines_pt(self, scale: float | None = None) -> list[tuple[str, float, float]]:
         """The box's lines, top to bottom: (what, width pt, height pt). None when the
-        structure + ID are left off this spectrum."""
+        structure + ID are left off this spectrum. `scale`: the structure's size (default:
+        as it prints)."""
         out = []
         if not self.values.get("struct_box", True):
             return out
+        if scale is None:
+            scale = (self.resolved() if self.values.get("struct_place") == "auto"
+                     else self.values).get("struct_scale", 1.0)
         if self._structure is not None:
-            w, h = S.structure_size_in(self._structure[2], self.values.get("struct_scale", 1.0))
+            w, h = S.structure_size_in(self._structure[2], scale)
             out.append(("structure", w * 72, h * 72))
         units = 10.0   # measure at 10 pixels per point, for precision
         slack = 1.06   # (small screen fonts are rounded up to whole pixels)
@@ -244,9 +304,9 @@ class SpectrumCanvas(QWidget):
                         self.caption_pt() * 1.25))
         return out
 
-    def box_size_pt(self) -> tuple[float, float]:
+    def box_size_pt(self, scale: float | None = None) -> tuple[float, float]:
         """The structure + ID box's printed size, in points (with its padding)."""
-        lines = self._lines_pt()
+        lines = self._lines_pt(scale)
         if not lines:
             return 0.0, 0.0
         gap = 0.4 * self.id_pt
@@ -261,7 +321,13 @@ class SpectrumCanvas(QWidget):
         if not w_pt:
             return QRectF()
         w, h = w_pt / 72 * k, h_pt / 72 * k
-        v = self.values
+        v = self.resolved()
+        place = self.place()
+        gap = S.GAP_IN * k
+        if place == "above":
+            return QRectF(spec.center().x() - w / 2, spec.y() - gap - h, w, h)
+        if place == "beside":
+            return QRectF(spec.right() + gap, spec.y(), w, h)
         if "x" in v and "y" in v:
             cx, cy = spec.x() + v["x"] * spec.width(), spec.y() + v["y"] * spec.height()
             return QRectF(cx - w / 2, cy - h / 2, w, h)
@@ -297,12 +363,15 @@ class SpectrumCanvas(QWidget):
         spec, k = self.spectrum_rect()
         v = self.values
         if v.get("header_line") and self.header:
+            under = spec
+            if self.place() == "above":   # (the header is above the box)
+                under = spec.translated(0, -(self.box_size_pt()[1] / 72 + S.GAP_IN) * k)
             f = QFont(self.font())
             f.setPixelSize(max(1, round(11 * k / 72)))
             f.setBold(True)
             p.setFont(f)
             p.setPen(QColor("black"))
-            head = QRectF(spec.x() - 200, spec.y() - S.HEADER_IN * k, spec.width() + 400,
+            head = QRectF(under.x() - 200, under.y() - S.HEADER_IN * k, under.width() + 400,
                           S.HEADER_IN * k)
             p.drawText(head, Qt.AlignmentFlag.AlignCenter, self.header)
         l, t, r, b = self.crop or (0.0, 0.0, 1.0, 1.0)
@@ -370,7 +439,7 @@ class SpectrumCanvas(QWidget):
         """Start resizing from a corner handle at `pos`: the box keeps its centre when it
         was dragged to a place of its own, or else its corner nearest the spectrum's."""
         box = self.box_rect()
-        v = self.values
+        v = self.resolved()
         if "x" in v and "y" in v:
             self._anchor = box.center()
         else:
@@ -385,6 +454,11 @@ class SpectrumCanvas(QWidget):
 
     def start_move(self, pos: QPointF) -> None:
         self._grab = pos - self.box_rect().center()
+        # A box placed by "auto" at a smaller size keeps that size where it is dragged.
+        v = self.resolved()
+        self.moved_scale = v["struct_scale"] if v.get("auto_placed") else None
+        if self.moved_scale is not None:
+            self.values["struct_scale"] = self.moved_scale
         self._mode = "move"
         self._moved = False
 
@@ -416,9 +490,10 @@ class SpectrumCanvas(QWidget):
         self.update()
 
     def _interactive(self) -> bool:
-        """The box can be dragged or resized only while it is drawn: the page can be
-        changed and a spectrum is shown (not a "missing" or "could not be opened" note)."""
-        return self.editable and not self.image.isNull()
+        """The box can be dragged or resized only while it is drawn on the spectrum: the
+        page can be changed and a spectrum is shown (not a "missing" or "could not be
+        opened" note), and the box is not above or beside it."""
+        return self.editable and not self.image.isNull() and self.place() == "on"
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
         pos = event.position()
@@ -471,7 +546,8 @@ ROWS = (
                                            "spectrum_frame_width")),
     ("auto_crop", "Auto-crop:", ("auto_crop",)),
     ("struct_box", "Structure + ID:", ("struct_box",)),
-    ("position", "Structure position:", ("corner", "x", "y")),
+    ("position", "Structure position:", ("struct_place", "corner", "x", "y")),
+    ("auto_fit", "Shrink to fit (auto):", ("auto_shrink", "auto_min_scale")),
     ("struct_scale", "Structure size:", ("struct_scale",)),
     ("id", "ID text:", ("id_size", "id_bold")),
     ("struct_frame", "Frame around them:", ("struct_frame", "struct_frame_color",
@@ -736,11 +812,27 @@ class SpectraPagePanel(QWidget):
         self.struct_box = QCheckBox("Shown on this spectrum")
         self.struct_box.setToolTip("Untick to print this spectrum without the structure and ID "
                                    "(e.g. a crowded HPLC trace)")
+        self.place = QComboBox()
+        for key, text in S.PLACES.items():
+            self.place.addItem(text, key)
+        self.place.setToolTip("On the spectrum in a corner; on the spectrum wherever it "
+                              "covers only blank paper (auto: the corner is tried first, and "
+                              "if there is no room it goes above); or above or beside the "
+                              "spectrum, never over it")
+        self.place.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
         self.corner = QComboBox()
         for key, text in S.CORNERS.items():
             self.corner.addItem(text, key)
-        self.corner.setToolTip("A corner of the spectrum, or where the box was dragged")
+        self.corner.setToolTip("A corner of the spectrum (for auto: the one tried first), or "
+                               "where the box was dragged")
         self.corner.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self.auto_shrink = QCheckBox("Down to")
+        self.auto_shrink.setToolTip("Auto: when the structure doesn't fit any blank space at "
+                                    "its size, try it smaller, but no smaller than this")
+        self.auto_min = QSpinBox()
+        self.auto_min.setRange(round(S.SCALE_RANGE[0] * 100), round(S.SCALE_RANGE[1] * 100))
+        self.auto_min.setSingleStep(10)
+        self.auto_min.setSuffix(" %")
         self.scale = QSpinBox()
         self.scale.setRange(round(S.SCALE_RANGE[0] * 100), round(S.SCALE_RANGE[1] * 100))
         self.scale.setSingleStep(10)
@@ -773,7 +865,8 @@ class SpectraPagePanel(QWidget):
             "header_line": (self.header_line,),
             "spectrum_frame": (self.spectrum_frame, self.spectrum_colour, self.spectrum_width),
             "auto_crop": (self.auto_crop,), "struct_box": (self.struct_box,),
-            "position": (self.corner,),
+            "position": (self.place, self.corner),
+            "auto_fit": (self.auto_shrink, self.auto_min),
             "struct_scale": (self.scale,), "id": (self.same_size, self.id_size, self.id_bold),
             "struct_frame": (self.struct_frame, self.struct_colour, self.struct_width),
             "struct_bg": (self.background,), "caption": (self.caption, self.caption_size)}
@@ -852,13 +945,14 @@ class SpectraPagePanel(QWidget):
         self.text_note.setStyleSheet("color: palette(placeholder-text);")
         form.addWidget(self.text_note, 2, 0, 1, 2)
 
-        for box in (self.per_page, self.orientation, self.corner):
+        for box in (self.per_page, self.orientation, self.place, self.corner):
             box.currentIndexChanged.connect(self._changed)
         for check in (self.header_line, self.spectrum_frame, self.auto_crop, self.same_size,
-                      self.id_bold, self.struct_frame, self.caption, self.struct_box):
+                      self.id_bold, self.struct_frame, self.caption, self.struct_box,
+                      self.auto_shrink):
             check.toggled.connect(self._changed)
         for spin in (self.scale, self.id_size, self.spectrum_width, self.struct_width,
-                     self.caption_size):
+                     self.caption_size, self.auto_min):
             spin.valueChanged.connect(self._changed)
         for button in (self.spectrum_colour, self.struct_colour, self.background):
             button.changed.connect(self._changed)
@@ -1154,6 +1248,9 @@ class SpectraPagePanel(QWidget):
             self.corner.removeItem(index)
         self.corner.setCurrentIndex(self.corner.findData(DRAGGED) if dragged
                                     else max(0, self.corner.findData(v["corner"])))
+        self.place.setCurrentIndex(max(0, self.place.findData(v["struct_place"])))
+        self.auto_shrink.setChecked(v["auto_shrink"])
+        self.auto_min.setValue(round(v["auto_min_scale"] * 100))
         self.scale.setValue(round(v["struct_scale"] * 100))
         self.same_size.setChecked(v["id_size"] <= 0)
         self.id_size.setValue(v["id_size"] if v["id_size"] > 0
@@ -1178,6 +1275,9 @@ class SpectraPagePanel(QWidget):
             "header_line": self.header_line.isChecked(),
             "struct_box": self.struct_box.isChecked(),
             "corner": corner,
+            "struct_place": self.place.currentData(),
+            "auto_shrink": self.auto_shrink.isChecked(),
+            "auto_min_scale": round(self.auto_min.value() / 100, 2),
             "struct_frame": self.struct_frame.isChecked(),
             "struct_frame_color": self.struct_colour.colour(),
             "struct_frame_width": round(self.struct_width.value(), 2),
@@ -1242,9 +1342,15 @@ class SpectraPagePanel(QWidget):
             reset.setEnabled(not self.read_only and any(k in own for k in keys))
         ro = self.read_only
         shown = self.struct_box.isChecked()   # (the box's settings matter only when shown)
-        for w in (self.corner, self.scale, self.same_size, self.id_bold, self.struct_frame,
+        for w in (self.place, self.scale, self.same_size, self.id_bold, self.struct_frame,
                   self.background, self.caption):
             w.setEnabled(not ro and shown)
+        place = self.place.currentData()
+        dragged = self.corner.currentData() == DRAGGED
+        self.corner.setEnabled(not ro and shown and (place in ("on", "auto") or dragged))
+        self.auto_shrink.setEnabled(not ro and shown and place == "auto" and not dragged)
+        self.auto_min.setEnabled(not ro and shown and place == "auto" and not dragged
+                                 and self.auto_shrink.isChecked())
         self.id_size.setEnabled(not ro and shown and not self.same_size.isChecked())
         self.caption_size.setEnabled(not ro and shown and self.caption.isChecked())
         for w in (self.spectrum_colour, self.spectrum_width):
@@ -1285,9 +1391,18 @@ class SpectraPagePanel(QWidget):
         canvas.caption = pretty(S.caption_text(self.compound, sp.item)) if v["caption"] else ""
         canvas.id_pt = v["id_size"] or S.STYLE_TEXT_PT.get(self.style_name, 11.0)
         canvas.update()
-        where = ("dragged to " + f"{v['x'] * 100:.0f} % across, {v['y'] * 100:.0f} % down"
-                 if "x" in v and "y" in v else S.CORNERS[v["corner"]].lower() + " corner")
-        box = (f"structure {where}, {v['struct_scale'] * 100:.0f} %" if v["struct_box"]
+        shown = canvas.resolved()
+        if "x" in v and "y" in v:
+            where = f"dragged to {v['x'] * 100:.0f} % across, {v['y'] * 100:.0f} % down"
+        elif shown.get("auto_placed"):
+            where = "in blank space (auto)"
+        elif shown.get("auto_failed"):
+            where = "above the spectrum (auto: no blank space big enough)"
+        elif v["struct_place"] in S.OUTSIDE_PLACES:
+            where = f"{v['struct_place']} the spectrum"
+        else:
+            where = S.CORNERS[v["corner"]].lower() + " corner"
+        box = (f"structure {where}, {shown['struct_scale'] * 100:.0f} %" if v["struct_box"]
                else "no structure or ID")
         self.note.setText(
             f"Drawn in its printed proportions: {v['per_page']} per page, {v['orientation']}"
@@ -1326,7 +1441,13 @@ class SpectraPagePanel(QWidget):
     def _changed(self, *_args) -> None:
         if self._loading or self.current is None:
             return
-        if self.sender() is self.corner and self.corner.currentData() != DRAGGED:
+        if self.sender() is self.place and self.corner.currentData() == DRAGGED:
+            # A position chosen: the box no longer stays where it was dragged.
+            self._loading = True
+            self.corner.setCurrentIndex(max(0, self.corner.findData(
+                {**self.inherited(), **self.own()}["corner"])))
+            self._loading = False
+        if self.sender() in (self.corner, self.place) and self.corner.currentData() != DRAGGED:
             index = self.corner.findData(DRAGGED)   # a corner chosen: no longer dragged
             if index >= 0:
                 self._loading = True
@@ -1404,6 +1525,8 @@ class SpectraPagePanel(QWidget):
         self.flush()
         page = self._page_own()
         page.update({"x": x, "y": y})
+        if self.canvas.moved_scale is not None:   # (auto had made it smaller: kept)
+            page["struct_scale"] = self.canvas.moved_scale
         if self._write(page, "page"):
             self._load_controls()
             self._after_save("Structure moved")

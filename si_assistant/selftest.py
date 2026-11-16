@@ -225,7 +225,7 @@ def _module_shipped(name: str) -> bool:
 
 def _compile(folder: Path) -> str:
     from .compile.document import CompileOptions
-    from .compile.qt_images import content_box, convert_to_png, image_info
+    from .compile.qt_images import content_box, convert_to_png, image_info, ink_map
     from .compile.run import compile_pdf
     from .core import lock as lockmod
     from .core.project import Project
@@ -234,7 +234,8 @@ def _compile(folder: Path) -> str:
     project = Project.open(folder, read_only=True)
     try:
         options = CompileOptions.from_settings(project.settings)
-        result = compile_pdf(project, options, image_info, convert_to_png, crop=content_box)
+        result = compile_pdf(project, options, image_info, convert_to_png, crop=content_box,
+                             ink=ink_map)
     finally:
         project.close()
     from pypdf import PdfReader

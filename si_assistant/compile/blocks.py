@@ -179,14 +179,21 @@ def hrms_sentence(project, compound) -> list[Run]:
     found = checks.parse_number(found_text)
     ion = F.part_text(value.get("ionization")).strip()
     adduct = F.part_text(value.get("adduct")).strip() or "[M+H]+"
-    runs = [R("HRMS", bold=True)] + ([R(f" ({ion})")] if ion else []) + \
-           [R(" "), R("m/z", italic=True), R(": ")] + charge_runs(adduct)
+    unreadable = False
     try:
-        sp = checks.hrms_species(project.read_structure(compound, strict=True), value)
+        mol = project.read_structure(compound, strict=True)
+    except OSError:
+        # (structure.mol can't be read just now; the compile's notes say so)
+        mol, unreadable = None, True
+    # (The label printed may differ from the adduct, e.g. [M−Br]⁺ for a salt: SPEC §13f.3.)
+    label = checks.printed_ion_label(project, mol, value)
+    runs = [R("HRMS", bold=True)] + ([R(f" ({ion})")] if ion else []) + \
+           [R(" "), R("m/z", italic=True), R(": ")] + charge_runs(label)
+    try:
+        sp = None if unreadable else checks.hrms_species(mol, value)
         result = checks.hrms_calc(sp.info, adduct, found_text,
                                   ms_reports.tolerance(project)) if sp else None
-    except (chem.ChemError, OSError):
-        # (OSError: structure.mol can't be read just now; the compile's notes say so)
+    except chem.ChemError:
         result = None
     if result is not None:
         peak = result.matched if (result.matched is not None and not result.out_of_tolerance) \

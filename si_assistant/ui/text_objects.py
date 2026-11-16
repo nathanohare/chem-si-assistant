@@ -27,7 +27,8 @@ from ..compile.qt_images import image_info, read_image
 from ..core import markup
 from ..core.labels import compute
 from ..core.markup import Paragraph, Run
-from ..core.project import FIGURE_EXTENSIONS, Project, ProjectError, figure_width_cm
+from ..core.project import (FIGURE_EXTENSIONS, Project, ProjectError, figure_uncaptioned,
+                            figure_width_cm)
 from ..core.tables import Table, block_from_text
 from . import rich_text
 from .rich_text import DUPLICATE_COLOUR, OBJECT_ID
@@ -105,6 +106,19 @@ class ObjectStore:
     def figure_width(self, figure_id: str) -> float | None:
         """The printed width typed for a figure, in cm (None = the picture's own size)."""
         return figure_width_cm(self.figures().get(figure_id, {}))
+
+    def figure_uncaptioned(self, figure_id: str) -> bool:
+        """Printed without its number and caption (issue #3)."""
+        return figure_uncaptioned(self.figures().get(figure_id))
+
+    def set_figure_captioned(self, figure_id: str, captioned: bool) -> None:
+        what = self.label("figure", figure_id)[0] if not self.figure_uncaptioned(figure_id) \
+            else "a figure"
+        step = (f"Print {what} with its number and caption" if captioned
+                else f"Print {what} without number or caption")
+        with self.project.undo_step(step):
+            self.project.set_figure_captioned(self.owner, figure_id, captioned)
+        self._saved()
 
     def set_figure_width(self, figure_id: str, width_cm: float | None) -> None:
         with self.project.undo_step(f"Change the size of {self.label('figure', figure_id)[0]}"):
@@ -229,7 +243,8 @@ class ObjectStore:
             vector = self.project.figure_source(self.owner, item_id)
             return {"kind": "figure", "file": str(path), "label": self.figure_label(item_id),
                     "vector": str(vector) if vector is not None else "",
-                    "width": self.figure_width(item_id) or 0}
+                    "width": self.figure_width(item_id) or 0,
+                    "uncaptioned": self.figure_uncaptioned(item_id)}
         table = self.table(item_id)
         return {"kind": "table", "table": table.to_json()} if table is not None else None
 
@@ -262,6 +277,8 @@ class ObjectStore:
                     vector=vector if vector is not None and vector.is_file() else None,
                     label=str(info.get("label", "")), figure_id=keep,
                     width=figure_width_cm(info))
+                if figure_uncaptioned(info):   # (printed without number or caption)
+                    self.project.set_figure_captioned(self.owner, new, False)
             else:
                 table = Table.from_json(info.get("table"))
                 table.id = keep
@@ -446,6 +463,8 @@ class FigureObject(QPyTextObject):
             painter.drawImage(picture, image)
         label, duplicate = store.label("figure", figure_id) if store is not None else ("Figure",
                                                                                          False)
+        if store is not None and store.figure_uncaptioned(figure_id):
+            label, duplicate = "No number or caption (printed as the picture only)", False
         label_rect, label_align = _label_box(rect, picture.bottom() + LABEL_GAP,
                                              rect.bottom() - picture.bottom() - LABEL_GAP, align)
         _draw_label(painter, label_rect, label, duplicate, _label_font(self.edit), label_align,
@@ -649,6 +668,14 @@ def object_menu(edit, kind: str, item_id: str) -> QMenu:
         act.setEnabled(not ro)
         act = menu.addAction("Caption size…", lambda: edit_caption_size(edit, item_id))
         act.setEnabled(not ro)
+        bare = store is not None and store.figure_uncaptioned(item_id)
+        act = menu.addAction("Print without number and caption",
+                             lambda: set_captioned(edit, item_id, bare))
+        act.setCheckable(True)
+        act.setChecked(bare)
+        act.setToolTip("Print just the picture: no “Figure S…” label and no caption, and the "
+                       "other figures are numbered as if it were not there")
+        act.setEnabled(not ro)
         act = menu.addAction("Replace picture with a file…", lambda: replace_with_file(edit,
                                                                                        item_id))
         act.setEnabled(not ro)
@@ -660,6 +687,16 @@ def object_menu(edit, kind: str, item_id: str) -> QMenu:
     act = menu.addAction(f"Remove {what}", lambda: remove_object(edit, kind, item_id))
     act.setEnabled(not ro)
     return menu
+
+
+def set_captioned(edit, figure_id: str, captioned: bool) -> None:
+    """The menu's "Print without number and caption" was ticked or unticked."""
+    try:
+        edit.objects.set_figure_captioned(figure_id, captioned)
+    except (ProjectError, OSError) as e:
+        QMessageBox.warning(edit, "Could not save", str(e))
+        return
+    edit.refresh_objects()
 
 
 def edit_label(edit, kind: str, item_id: str) -> None:
@@ -987,7 +1024,13 @@ def html_with_tables(edit, doc) -> list[Paragraph] | None:
 
 
 def table_block_from_mime(source) -> list | None:
-    """A table copied from Word or Excel (HTML table, or tab-separated text), or None."""
+    """A table copied from the table editor (with its formatting), Word or Excel (HTML
+    table, or tab-separated text), or None."""
+    from .table_editor import CELLS_MIME, block_from_cells_json
+    if source.hasFormat(CELLS_MIME):
+        block = block_from_cells_json(source.data(CELLS_MIME))
+        if block:
+            return block
     if source.hasHtml() and "<table" in source.html().lower():
         from .table_editor import block_from_html
         block = block_from_html(source.html())

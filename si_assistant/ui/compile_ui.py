@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QComboBox, QDialog, QDia
                                QVBoxLayout, QWidget)
 
 from ..compile.document import CompileOptions, build
-from ..compile.qt_images import content_box, convert_to_png, image_info
+from ..compile.qt_images import content_box, convert_to_png, image_info, ink_map
 from ..compile.run import CompileError, CompileResult, partial_pdf, place_pdf, typeset_pdf
 from ..core import front
 from ..core import ms_reports
@@ -286,7 +286,7 @@ def run_compile(parent: QWidget, project: Project, options: CompileOptions,
     QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
     try:
         built = build(project, options, image_info, convert_to_png, name=name,
-                      crop=content_box)
+                      crop=content_box, ink=ink_map)
         warnings = in_background(lambda: typeset_pdf(built.typ_path, project.folder, name,
                                                      list(built.warnings)))
         if project.read_only:
