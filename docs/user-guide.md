@@ -982,6 +982,11 @@ The PDF is saved as **build/SI.pdf** in the project folder. If that file is open
 viewer that locks it, the new one gets a numbered name instead.
 
 The **journal style** (ACS, Wiley or RSC) is chosen in **Project Settings ▸ Output**.
+**Heading numbers**, next to it, numbers the headings: as the journal style does (none in
+ACS; 1, 1.1 for sections in Wiley and RSC), as an **outline** (sections 1, 2, 3; the next
+level A, B, C; then a, b, c), as 1, 1.1, 1.1.1, or not at all. With the outline or 1.1.1,
+the headings you type in a section's text and the General Information heading are
+numbered too; compound titles and general procedures never are.
 Other tabs there set:
 - structure drawings (bond length, fonts…);
 - page headers and footers;

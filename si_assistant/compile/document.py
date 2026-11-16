@@ -28,7 +28,7 @@ from datetime import date
 from pathlib import Path
 
 from .. import resources
-from ..core import chem
+from ..core import chem, headings
 from ..core import drawing_scale
 from ..core import fields as F
 from ..core import front
@@ -911,12 +911,15 @@ class Builder:
         if not text.strip():
             return ""
         title = front.general_heading(self.project.settings).strip()
-        numbered = front.general_numbered(self.project.settings)   # (unnumbered by default)
+        # (unnumbered by default; numbered like a section in an outline: Heading numbers)
+        outline = headings.numbers_text_headings(self.project.settings)
+        numbered = front.general_numbered(self.project.settings) or outline
         out = [self.heading(level, [Run(title)], numbered=numbered)] if title else []
         out.append(self.rich_text(parse(text), title or "General Information",
                                   self.project.front_folder, heading_offset=level,
                                   outlined_levels=level + 1 if self.toc_rank >= 2 else 0,
-                                  owner=self.project.text_owner(GENERAL_OWNER)))
+                                  owner=self.project.text_owner(GENERAL_OWNER),
+                                  numbered_headings=outline))
         return "\n\n".join(x for x in out if x)
 
     def heading(self, level: int, runs: list[Run], outlined: bool = True,
@@ -934,7 +937,7 @@ class Builder:
 
     def rich_text(self, paragraphs: list[Paragraph], where: str, folder: Path | None = None,
                   heading_offset: int = 1, outlined_levels: int = 2,
-                  owner: TextOwner | None = None) -> str:
+                  owner: TextOwner | None = None, numbered_headings: bool = False) -> str:
         """Stored text → Typst: links resolved, formatting helpers, figures and tables
         (with the labels of `owner`'s items, SPEC §13k.5)."""
         paragraphs = self.link_paragraphs(paragraphs, where)
@@ -945,7 +948,8 @@ class Builder:
         for p in paragraphs + [None]:
             if p is None or p.is_object:
                 if run_of_text:
-                    out.append(paragraphs_to_typst(run_of_text, heading_offset, outlined_levels))
+                    out.append(paragraphs_to_typst(run_of_text, heading_offset, outlined_levels,
+                                                   numbered_headings))
                     run_of_text = []
                 if p is None:
                     continue
@@ -1096,7 +1100,9 @@ class Builder:
         return self.rich_text(parse(self.project.read_section_text(section)), section.name,
                               section.folder, heading_offset=level,
                               outlined_levels=level + 1 if self.toc_rank >= 2 else 0,
-                              owner=self.project.text_owner(section.id))
+                              owner=self.project.text_owner(section.id),
+                              numbered_headings=headings.numbers_text_headings(
+                                  self.project.settings))
 
     def file_section(self, section: Section, level: int = 1) -> str:
         out = []
@@ -1690,7 +1696,8 @@ class Builder:
         p = self.project
         parts = ['#import "style.typ": *',
                  f"#show: si-doc.with(title: {typst_string(str(p.settings.get('title') or ''))}, "
-                 f"{self.page_args()})"]
+                 f"{self.page_args()})",
+                 headings.typst_set_rule(p.settings)]   # (Project settings ▸ Heading numbers)
         if self.nmr_links:
             parts.append(link_definition(self.link_style))
         if self.options.only is None:

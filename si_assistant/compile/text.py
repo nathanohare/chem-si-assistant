@@ -143,10 +143,11 @@ def resolve_links(runs: list[Run], mention_text, known_refs: set[str] | None,
 
 
 def paragraphs_to_typst(paragraphs: list[Paragraph], heading_offset: int = 1,
-                        outlined_levels: int = 2) -> str:
+                        outlined_levels: int = 2, numbered: bool = False) -> str:
     """Paragraphs become Typst paragraphs; headings shift down by `heading_offset`
     (inside a section titled at level 1, "# Heading" becomes level 2). Headings typed in
-    a text are never numbered: only real sections are (1, 1.1, 1.1.1 in numbered styles).
+    a text are not numbered (only real sections are: 1, 1.1, 1.1.1 in numbered styles)
+    unless `numbered` (Heading numbers ▸ Outline or Numbers: core/headings.py).
     Those at level `outlined_levels` or above are listed in the table of contents."""
     out = []
     for p in paragraphs:
@@ -156,7 +157,8 @@ def paragraphs_to_typst(paragraphs: list[Paragraph], heading_offset: int = 1,
         if p.heading:
             level = p.heading + heading_offset
             outlined = "true" if level <= outlined_levels else "false"
-            body = f"#heading(level: {level}, outlined: {outlined}, numbering: none)[{body}]"
+            numbering = "" if numbered else ", numbering: none"
+            body = f"#heading(level: {level}, outlined: {outlined}{numbering})[{body}]"
         out.append(aligned_paragraph(body, p.stored_align))
     return "\n\n".join(out)
 

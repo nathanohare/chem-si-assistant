@@ -6,6 +6,10 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Heading numbers.** Project settings ▸ Output ▸ **Heading numbers**: as the journal
+  style does, an **outline** (sections 1, 2, 3; the next level A, B, C; then a, b, c),
+  1, 1.1, 1.1.1, or none, in any style. The outline and 1.1.1 also number the headings
+  typed in a section's text and the General Information heading.
 - **Cover page spacing.** Front matter ▸ Cover page has a **Spacing** box: Normal, More
   or Much more space between the heading, title, authors, affiliations and emails.
 - **Italic prefixes in compound names.** The compiled SI prints the conventional italics in

@@ -20,6 +20,14 @@
   }
 }
 
+// Heading numbers as an outline (Project settings ▸ Heading numbers ▸ Outline):
+// 1. / A. / a. / i. by level; only the heading's own number is shown.
+#let si-outline-numbering(..n) = {
+  let k = n.pos()
+  let formats = ("1.", "A.", "a.", "i.")
+  numbering(formats.at(calc.min(k.len(), formats.len()) - 1), k.last())
+}
+
 // `header`/`footer`: none (this style's default: no header, page number centred) or a
 // function as for si-page-line. Page numbers are `number-prefix` + 1/i/I.
 #let si-doc(title: "", header: none, footer: none, number-prefix: "S", number-style: "1",
@@ -50,7 +58,7 @@
   // Deeper headings (typed inside the text of a sub-sub-section, or of a compound).
   show heading: it => if it.level <= 3 { it } else {
     block(above: 1em, below: 0.5em, sticky: true,
-      text(size: 10.5pt, weight: "regular", style: "italic", it.body)) }
+      text(size: 10.5pt, weight: "regular", style: "italic", { num(it); it.body })) }
   show outline.entry.where(level: 1): set text(weight: "bold")
   body
 }

@@ -19,6 +19,14 @@
   }
 }
 
+// Heading numbers as an outline (Project settings ▸ Heading numbers ▸ Outline):
+// 1. / A. / a. / i. by level; only the heading's own number is shown.
+#let si-outline-numbering(..n) = {
+  let k = n.pos()
+  let formats = ("1.", "A.", "a.", "i.")
+  numbering(formats.at(calc.min(k.len(), formats.len()) - 1), k.last())
+}
+
 // `header`/`footer`: none (this style's default: no header, page number centred) or a
 // function as for si-page-line. Page numbers are `number-prefix` + 1/i/I.
 #let si-doc(title: "", header: none, footer: none, number-prefix: "S", number-style: "1",
@@ -35,22 +43,24 @@
   set figure.caption(separator: [. ])
   show figure.caption: set text(size: 10pt)
   show heading: set text(font: si-font)
+  let num(it) = if it.numbering != none { counter(heading).display(it.numbering); h(0.4em) }
   show heading.where(level: 1): it => block(above: 1.6em, below: 0.9em, sticky: true,
-    text(size: 13pt, weight: "bold", it.body))
+    text(size: 13pt, weight: "bold", { num(it); it.body }))
   show heading.where(level: 2): it => block(above: 1.2em, below: 0.6em, sticky: true,
-    text(size: 11.5pt, weight: "bold", it.body))
+    text(size: 11.5pt, weight: "bold", { num(it); it.body }))
   show heading.where(level: 3): it => block(above: 1.1em, below: 0.5em, sticky: true,
-    text(size: 11pt, weight: "bold", style: "italic", it.body))
+    text(size: 11pt, weight: "bold", style: "italic", { num(it); it.body }))
   // Deeper headings (typed inside the text of a sub-sub-section, or of a compound).
   show heading: it => if it.level <= 3 { it } else {
     block(above: 1em, below: 0.5em, sticky: true,
-      text(size: 11pt, weight: "regular", style: "italic", it.body)) }
+      text(size: 11pt, weight: "regular", style: "italic", { num(it); it.body })) }
   show outline.entry.where(level: 1): set text(weight: "bold")
   body
 }
 
 // Sections are headings of level 1, 2 and 3 (1, 1.1, 1.1.1); general procedures and
-// headings typed in a text are one level below their section and never numbered.
+// headings typed in a text are one level below their section and not numbered (unless
+// Project settings ▸ Heading numbers chooses an outline or 1.1.1 for the text headings).
 
 // A compound title ("Ethyl … (3g)."): a bold line kept with the structure. It is a
 // heading one level below its section, so the table of contents can list it, but it is
