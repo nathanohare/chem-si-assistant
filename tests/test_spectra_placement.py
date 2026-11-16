@@ -153,3 +153,79 @@ def test_auto_placement_does_not_cover_ink(sample, tmp_path):
     rows, cols = ink.shape
     r, c = int(y * rows), int(x * cols)
     assert not ink[max(0, r - 2):r + 3, max(0, c - 2):c + 3].any()
+
+
+# ---------------------------------------------------------------------- the pages
+
+def test_the_section_page_has_the_new_settings(sample):
+    from si_assistant.ui.spectra_panel import SpectraSectionPanel
+    p, parts = sample
+    panel = SpectraSectionPanel(p, parts["spectra"])
+    assert not panel.auto_shrink.isEnabled()                  # only for auto
+    panel.place.setCurrentIndex(panel.place.findData("auto"))
+    assert panel.auto_shrink.isEnabled() and not panel.auto_min.isEnabled()
+    panel.auto_shrink.setChecked(True)
+    panel.auto_min.setValue(40)
+    assert panel.auto_min.isEnabled() and panel.corner.isEnabled()
+    panel.place.setCurrentIndex(panel.place.findData("beside"))
+    assert not panel.corner.isEnabled()
+    panel.flush()
+    d = p.spectra_defaults()
+    assert (d["struct_place"], d["auto_shrink"], d["auto_min_scale"]) == ("beside", True, 0.4)
+    panel.deleteLater()
+
+
+def test_the_spectrum_page_draws_each_place(sample):
+    from si_assistant.ui.spectra_page import SpectraPagePanel
+    p, parts = sample
+    panel = SpectraPagePanel(p, parts["c2"])
+    canvas = panel.canvas
+    canvas.resize(600, 450)
+    on_spec, _k = canvas.spectrum_rect()
+    panel.place.setCurrentIndex(panel.place.findData("above"))
+    spec, _k = canvas.spectrum_rect()
+    box = canvas.box_rect()
+    assert box.bottom() <= spec.top() and spec.height() < on_spec.height()
+    assert not canvas._interactive()                          # not dragged there
+    panel.place.setCurrentIndex(panel.place.findData("beside"))
+    spec, _k = canvas.spectrum_rect()
+    assert canvas.box_rect().left() >= spec.right()
+    panel.place.setCurrentIndex(panel.place.findData("auto"))
+    shown = canvas.resolved()
+    assert shown.get("auto_placed") and canvas._interactive()
+    assert "blank space" in panel.note.text()
+    panel.flush()
+    item = next(i for i in Project_open(p).compound(parts["c2"].id).values["spectra"]
+                if i["file"] == "2_1H.pdf")
+    assert item["pages"]["1"] == {"struct_place": "auto"}
+    panel.deleteLater()
+
+
+def Project_open(p):   # noqa: N802 (a fresh read of the files)
+    from si_assistant.core.project import Project
+    return Project.open(p.folder)
+
+
+def test_dragging_an_auto_box_then_choosing_a_place(sample):
+    from PySide6.QtCore import QPointF
+    from si_assistant.ui.spectra_page import SpectraPagePanel
+    p, parts = sample
+    p.set_spectra_defaults({**p.spectra_defaults(), "struct_place": "auto"})
+    panel = SpectraPagePanel(p, parts["c2"])
+    canvas = panel.canvas
+    canvas.resize(600, 450)
+    spec, _k = canvas.spectrum_rect()
+    canvas.start_move(canvas.box_rect().center())
+    canvas.drag_to(QPointF(spec.x() + 0.6 * spec.width(), spec.y() + 0.5 * spec.height()))
+    canvas.finish()
+    assert panel.corner.currentData() == "dragged"
+    item = next(i for i in Project_open(p).compound(parts["c2"].id).values["spectra"]
+                if i["file"] == "2_1H.pdf")
+    assert item["pages"]["1"]["x"] == pytest.approx(0.6, abs=1e-3)
+    # Choosing a position again drops the dragged place.
+    panel.place.setCurrentIndex(panel.place.findData("above"))
+    panel.flush()
+    item = next(i for i in Project_open(p).compound(parts["c2"].id).values["spectra"]
+                if i["file"] == "2_1H.pdf")
+    assert "x" not in item["pages"]["1"] and item["pages"]["1"]["struct_place"] == "above"
+    panel.deleteLater()
