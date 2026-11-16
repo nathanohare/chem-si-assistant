@@ -6,6 +6,16 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Table and text formatting.** The table editor sets the **text size of selected
+  cells**, **column widths** (or "Fit columns to their text"), **Shrink to fit the page
+  width** for wide tables, and the table's **caption and footnote sizes**. Project settings
+  ▸ **Text and tables** sets the defaults for the whole SI: line spacing, space before and
+  after paragraphs, caption size, and the size of table cells, header rows (optionally
+  bold) and footnotes, with an option to apply them to every caption or table. A figure's
+  caption size is on its right-click menu; a scheme's in its Layout…. Projects that don't
+  use these print exactly as before.
+- **Show formatting marks.** A **¶** button in every text box (and View ▸ Show
+  formatting marks) shows paragraph marks, line breaks, spaces and tabs. Off by default.
 - **Heading numbers.** Project settings ▸ Output ▸ **Heading numbers**: as the journal
   style does, an **outline** (sections 1, 2, 3; the next level A, B, C; then a, b, c),
   1, 1.1, 1.1.1, or none, in any style. The outline and 1.1.1 also number the headings

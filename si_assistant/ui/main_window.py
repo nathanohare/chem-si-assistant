@@ -748,6 +748,18 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         view_menu.setToolTipsVisible(True)   # (its items explain themselves in tooltips)
         view_menu.addActions([self.act_live, self.act_warnings])
+        # Show formatting marks (¶) in every text box: the same switch as the ¶ button of
+        # the text boxes' toolbars (ui/text_checks.py), remembered on this computer.
+        from . import text_checks
+        hub = text_checks.checks()
+        self.act_marks = act("Show formatting marks (¶)", hub.set_marks_on,
+                             tip="Show ¶ at the end of each paragraph, ↵ at line breaks, · "
+                                 "for spaces and → for tabs in the text boxes (never "
+                                 "printed)")
+        self.act_marks.setCheckable(True)
+        self.act_marks.setChecked(hub.marks_on)
+        hub.marks_changed.connect(self._marks_switched)
+        view_menu.addAction(self.act_marks)
         view_menu.addSeparator()
         # (SPEC §13l.2) A preference of this computer, applied when the program starts.
         self.size_menu = view_menu.addMenu("Interface size")
@@ -879,6 +891,13 @@ class MainWindow(QMainWindow):
         return {str(self.project.folder): "<project folder>"} if self.project is not None else {}
 
     # ------------------------------------------------------------------ interface size (§13l.2)
+
+    def _marks_switched(self, on: bool) -> None:
+        """The ¶ button of a text box was switched: keep the View menu in step."""
+        if self.act_marks.isChecked() != on:
+            self.act_marks.blockSignals(True)
+            self.act_marks.setChecked(on)
+            self.act_marks.blockSignals(False)
 
     def choose_interface_size(self, percent: int) -> None:
         """View ▸ Interface size: saved on this computer, used from the next start; offers
