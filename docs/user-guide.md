@@ -315,7 +315,13 @@ Text boxes have a small toolbar:
 In custom sections and General Information there are also **Figure…** and **Table…**.
 You can also simply paste a picture, a ChemDraw drawing or a table copied from Word or
 Excel. Type the caption on the line under it. Right-click a figure or table to change it
-(edit table, label, printed size, replace picture…).
+(edit table, label, printed size, replace picture…). To print a figure as just the picture,
+with no "Figure S…" number and no caption (the other figures are then numbered without
+it), right-click it and tick **Print without number and caption**.
+
+In the table editor, a formula typed in a cell is subscripted when you move on with Enter
+or Tab, or click another cell (with **H₂** on). Copying cells (Ctrl+C on the grid) keeps
+their subscripts, bold and italics when you paste them into a table again.
 
 A table cell can also hold a picture, printed above the cell's text: for example a list of
 ligands, each drawn with its name under it, or a reaction scheme in a merged cell across
@@ -716,10 +722,15 @@ Each spectrum can have its own header and caption ("empty = automatic").
 
 The Spectra section prints every compound's spectra, compound by compound. Its page sets
 the defaults for all spectra:
-- spectra per page and orientation;
+- spectra per page (two for a new project) and orientation;
 - a header line and a frame;
 - **auto-crop** of white margins;
-- the structure and compound number drawn on each spectrum (position, size, frame…), and
+- where the structure and compound number go: **on the spectrum** in a corner, **on the
+  spectrum in blank space (auto)**, which finds a place where they cover nothing of the
+  spectrum (tick **Make the structure smaller to fit, down to …%** to let it shrink the
+  structure when there is no room; if nothing fits they go above the spectrum and the
+  Compile window says so), or **above** or **beside** the spectrum, which never cover it;
+- the structure and compound number's size, frame…, and
   the caption under them (e.g. "¹H NMR (CDCl₃, 500 MHz)") with its **size** (9 pt unless
   changed; one spectrum can have its own on its compound's spectra page);
 - **links**: each NMR report in the compound data can link to its spectrum in the PDF, and
