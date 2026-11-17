@@ -16,8 +16,8 @@ from .document import CompileError, CompileOptions, build   # (CompileError: als
 
 @dataclass
 class CompileResult:
-    pdf: Path
-    typ: Path
+    pdf: Path          # the file made (for the Word export: the .docx)
+    typ: Path | None   # its Typst source (None for the Word export)
     warnings: list[str] = field(default_factory=list)
 
 
@@ -248,14 +248,14 @@ def _pypdf_names(reader, creator: str, producer: str) -> bytes:
 
 
 def compile_pdf(project: Project, options: CompileOptions, image_info, converter=None,
-                name: str = "SI", crop=None) -> CompileResult:
+                name: str = "SI", crop=None, ink=None) -> CompileResult:
     """Build build/<name>.typ and compile it to build/<name>.pdf.
 
     The PDF is written to a temporary file first and then renamed, so a viewer that has
     the old SI.pdf open can't leave a half-written file. If the old file is locked
     (e.g. open in Acrobat on Windows) the new PDF gets a numbered name instead.
     """
-    result = build(project, options, image_info, converter, name=name, crop=crop)
+    result = build(project, options, image_info, converter, name=name, crop=crop, ink=ink)
     return finish_pdf(result.typ_path, project.folder, name, list(result.warnings))
 
 

@@ -12,16 +12,18 @@ was changed: Escape pressed twice must not throw a table away).
 from __future__ import annotations
 
 import html
+from dataclasses import replace
+import json
 
 from pathlib import Path
 from typing import Callable
 
-from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEvent, QMimeData, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import (QAction, QColor, QGuiApplication, QImage, QKeySequence, QTextCursor,
                            QTextDocument)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox,
                                QDoubleSpinBox, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMessageBox, QSpinBox, QStyle,
+                               QLineEdit, QMessageBox, QPushButton, QSpinBox, QStyle,
                                QStyledItemDelegate, QStyleOptionViewItem, QTableWidget,
                                QTableWidgetItem, QToolBar, QVBoxLayout, QWidget)
 
@@ -29,12 +31,15 @@ from ..core import markup
 from ..core.markup import SUB, SUPER, Paragraph, mention_kind
 from ..core.tables import Cell, Table
 from . import rich_text
+from .format_widgets import optional_box, set_value, size_box, value_of
 from .rich_text import RichTextEditor, document_to_paragraphs
 from .structure_widgets import paste_key
 
 TEXT_ROLE = Qt.ItemDataRole.UserRole          # the cell's stored text
 ALIGN_ROLE = Qt.ItemDataRole.UserRole + 1     # "left" / "center" / "right"
 IMAGE_ROLE = Qt.ItemDataRole.UserRole + 2     # the cell's picture ("images/x.svg") or ""
+SIZE_ROLE = Qt.ItemDataRole.UserRole + 3      # the cell's own text size in pt, or None
+GRID_PT = 10.0                                # the printed size the grid's font stands for
 THUMB_HEIGHT = 90                             # pixels: a cell's picture in the grid
 ALIGN_NAMES = {"left": "Left", "center": "Centre", "right": "Right"}
 
@@ -79,7 +84,11 @@ class CellDelegate(QStyledItemDelegate):
 
     def _doc(self, index, width: float) -> QTextDocument:
         doc = QTextDocument()
-        doc.setDefaultFont(self.dialog.grid.font())
+        font = self.dialog.grid.font()
+        size = index.data(SIZE_ROLE)
+        if size and font.pointSizeF() > 0:   # a cell given its own size looks bigger/smaller
+            font.setPointSizeF(font.pointSizeF() * float(size) / GRID_PT)
+        doc.setDefaultFont(font)
         align = index.data(ALIGN_ROLE) or "center"
         css = {"left": "left", "right": "right"}.get(align, "center")
         doc.setHtml(f"<div align='{css}'>{markup_html(index.data(TEXT_ROLE) or '')}</div>")
@@ -128,6 +137,54 @@ class CellDelegate(QStyledItemDelegate):
 
 
 # ---------------------------------------------------------------------- pasting from Word/Excel
+
+# Cells copied in the table editor, with their stored text (formatting, links) and merges.
+CELLS_MIME = "application/x-si-assistant-cells"
+
+
+def cells_json(block: list[list[Cell | None]], n_rows: int, n_cols: int) -> bytes:
+    """A block of cells (None = covered by a merged cell) for the clipboard. Merges are cut
+    to the block; pictures are left out (they belong to the table's own folder)."""
+    rows = []
+    for r, row in enumerate(block):
+        out = []
+        for c, cell in enumerate(row):
+            if cell is None:
+                out.append(None)
+                continue
+            copy = replace(cell, colspan=min(cell.colspan, n_cols - c),
+                           rowspan=min(cell.rowspan, n_rows - r), image="", image_width=None)
+            out.append(copy.to_json())
+        rows.append(out)
+    return json.dumps(rows).encode("utf-8")
+
+
+def block_from_cells_json(data: bytes) -> list[list[Cell | None]] | None:
+    """The cells put on the clipboard by cells_json, or None if they can't be read."""
+    try:
+        rows = json.loads(bytes(data).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(rows, list) or not rows or not all(isinstance(r, list) for r in rows):
+        return None
+    block = [[None if x is None else Cell.from_json(x) for x in row] for row in rows]
+    return block if any(c is not None for row in block for c in row) else None
+
+
+def block_html(block: list[list[Cell | None]]) -> str:
+    """A block of cells as an HTML table (for Word, Excel), keeping sub/superscripts."""
+    rows = []
+    for row in block:
+        tds = []
+        for cell in row:
+            if cell is None:
+                continue
+            span = ((f" colspan='{cell.colspan}'" if cell.colspan > 1 else "")
+                    + (f" rowspan='{cell.rowspan}'" if cell.rowspan > 1 else ""))
+            tds.append(f"<td{span}>{markup_html(cell.text)}</td>")
+        rows.append("<tr>" + "".join(tds) + "</tr>")
+    return "<table>" + "".join(rows) + "</table>"
+
 
 def block_from_html(source: str) -> list[list[Cell | None]] | None:
     """The first table in some HTML (as Word and Excel put on the clipboard) as a block of
@@ -192,6 +249,7 @@ class TableEditorDialog(QDialog):
         if not self._table.n_cols:
             self._table.insert_column(0)
         self._loading = False
+        self._editing: tuple[int, int] | None = None   # the cell in the box under the grid
 
         intro = QLabel("Click a cell and type (its text is edited in the box under the grid, "
                        "with bold, italic, sub/superscript and @ mentions). Select several "
@@ -244,7 +302,7 @@ class TableEditorDialog(QDialog):
             act = QAction(text, self)
             act.setToolTip(tip)
             act.setData(tip)   # (the tip back, when _update_actions changes it)
-            act.triggered.connect(slot)
+            act.triggered.connect(self._finishing_word(slot))
             if key in ALIGN_NAMES:   # (shows the selected cell's alignment)
                 act.setCheckable(True)
             self.toolbar.addAction(act)
@@ -309,8 +367,55 @@ class TableEditorDialog(QDialog):
             "rows are repeated there).")
         self._new = new
 
+        # ---- Formatting (SPEC §13y): the selected cells' text size, the selected columns'
+        # width, shrinking to the page width, and the caption's and footnotes' sizes. Every
+        # "Default" follows Project settings ▸ Text and tables.
+        self.size_box = size_box(
+            "Default", "Text size of the selected cells. “Default” uses Project settings ▸ "
+            "Text and tables (header rows have their own default there).")
+        self.size_box.valueChanged.connect(self._size_changed)
+        self.width_box = optional_box(
+            0.5, 30, 0.1, 1, " cm", "Automatic",
+            "Width of the selected columns in the printed table. “Automatic” makes a "
+            "column as wide as its text needs (sharing the page width with the others); a "
+            "width typed here wraps longer text inside it.")
+        self.width_box.valueChanged.connect(self._width_changed)
+        self.autofit_btn = QPushButton("Fit columns to their text")
+        self.autofit_btn.setToolTip("Set every column back to “Automatic”: each as wide as "
+                                    "its text needs.")
+        self.autofit_btn.clicked.connect(self._autofit)
+        self.autofit_btn.setAutoDefault(False)   # (Enter moves on in the grid, never this)
+        self.fit_box = QCheckBox("Shrink to fit the page width")
+        self.fit_box.setChecked(self._table.fit_width)
+        self.fit_box.setToolTip(
+            "If the table is wider than the text on the page, print all of it (text and "
+            "columns) smaller so every cell stays on one line, instead of wrapping cells.")
+        self.caption_size = size_box("Default", "Size of this table's caption. “Default” "
+                                     "uses Project settings ▸ Text and tables.")
+        set_value(self.caption_size, self._table.caption_size)
+        self.notes_size = size_box("Default", "Size of this table's footnotes. “Default” "
+                                   "uses Project settings ▸ Text and tables.")
+        set_value(self.notes_size, self._table.notes_size)
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel("Text size:"))
+        fmt_row.addWidget(self.size_box)
+        fmt_row.addSpacing(12)
+        fmt_row.addWidget(QLabel("Column width:"))
+        fmt_row.addWidget(self.width_box)
+        fmt_row.addWidget(self.autofit_btn)
+        fmt_row.addSpacing(12)
+        fmt_row.addWidget(self.fit_box)
+        fmt_row.addStretch()
+
         form = QFormLayout()
         form.addRow("Caption:", self.caption_edit)
+        sizes = QHBoxLayout()
+        sizes.addWidget(self.caption_size)
+        sizes.addSpacing(20)
+        sizes.addWidget(QLabel("Footnote size:"))
+        sizes.addWidget(self.notes_size)
+        sizes.addStretch()
+        form.addRow("Caption size:", sizes)
         notes_label = QLabel("Footnotes:\n(one per line)")
         self.notes_edit.setToolTip("One footnote per line, printed under the table. Mark them "
                                    "with superscript letters, e.g. ᵃ Isolated yield (and the "
@@ -334,6 +439,7 @@ class TableEditorDialog(QDialog):
         layout.addWidget(intro)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.grid, 1)
+        layout.addLayout(fmt_row)
         layout.addLayout(cell_row)
         layout.addWidget(self.cell_edit)
         layout.addLayout(form)
@@ -349,6 +455,9 @@ class TableEditorDialog(QDialog):
     def _fill_grid(self, select: tuple[int, int] | None = None) -> None:
         t = self._table
         t.normalize()
+        # (Rows or columns may have moved: the cell being typed in is chosen again below.)
+        self._editing = None
+        self.cell_edit.edit.forget_word()
         self._loading = True
         self.grid.clearSpans()
         self.grid.setRowCount(t.n_rows)
@@ -357,7 +466,9 @@ class TableEditorDialog(QDialog):
         self.grid.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.Stretch if t.n_cols <= 6 else QHeaderView.ResizeMode.Interactive)
         self.grid.setHorizontalHeaderLabels(
-            [f"{_column_name(c)} ({ALIGN_NAMES[t.columns[c]].lower()})" for c in range(t.n_cols)])
+            [f"{_column_name(c)} ({ALIGN_NAMES[t.columns[c]].lower()}"
+             + (f", {t.widths[c]:g} cm)" if t.widths[c] is not None else ")")
+             for c in range(t.n_cols)])
         self.grid.setVerticalHeaderLabels(
             [("Header" if r < t.header_rows else str(r - t.header_rows + 1))
              for r in range(t.n_rows)])
@@ -371,6 +482,7 @@ class TableEditorDialog(QDialog):
                     item.setData(TEXT_ROLE, cell.text)
                     item.setData(ALIGN_ROLE, cell.align or t.columns[c])
                     item.setData(IMAGE_ROLE, cell.image)
+                    item.setData(SIZE_ROLE, cell.size)
                     if r < t.header_rows:
                         item.setBackground(header_fill)
                 self.grid.setItem(r, c, item)
@@ -389,6 +501,14 @@ class TableEditorDialog(QDialog):
             self._current_changed(*t.anchor(r, c), -1, -1)
         self._update_actions()
 
+    def _finishing_word(self, slot):
+        """`slot`, after ending the word just typed in the cell (as a space would), so a
+        formula typed last is subscripted before rows or columns move."""
+        def run(*_args):
+            self.cell_edit.edit.finish_word()
+            slot()
+        return run
+
     def _current(self) -> tuple[int, int]:
         r, c = self.grid.currentRow(), self.grid.currentColumn()
         if r < 0 or c < 0:
@@ -406,10 +526,18 @@ class TableEditorDialog(QDialog):
     def _current_changed(self, row: int, col: int, _pr: int, _pc: int) -> None:
         if self._loading or row < 0 or col < 0:
             return
+        # A formula typed last in the cell being left is subscripted (into that cell).
+        self.cell_edit.edit.finish_word()
         r, c = self._table.anchor(row, col)
+        self._editing = (r, c)
         cell = self._table.rows[r][c]
         self.cell_label.setText(f"<b>Cell {_column_name(c)}{r + 1}</b>"
-                                + (" (header row)" if r < self._table.header_rows else ""))
+                                + (" (header row)" if r < self._table.header_rows else "")
+                                + (f" · {cell.size:g} pt" if cell is not None
+                                   and cell.size is not None else ""))
+        set_value(self.size_box, cell.size if cell is not None else None)
+        set_value(self.width_box, self._table.widths[c] if c < len(self._table.widths)
+                  else None)
         self.cell_edit.blockSignals(True)
         self.cell_edit.set_markup(cell.text if cell is not None else "")
         self.cell_edit.blockSignals(False)
@@ -427,7 +555,9 @@ class TableEditorDialog(QDialog):
     def _cell_text_changed(self) -> None:
         if self._loading:
             return
-        r, c = self._current()
+        r, c = self._editing or self._current()
+        if r >= self._table.n_rows or c >= self._table.n_cols:
+            return
         cell = self._table.rows[r][c]
         if cell is None:
             return
@@ -520,6 +650,54 @@ class TableEditorDialog(QDialog):
         current = self._current()
         self._fill_grid(current)
         self.grid.setRangeSelected(_range(r0, c0, r1, c1), True)
+
+    def _size_changed(self, _value: float) -> None:
+        """The text size box: every selected cell gets that size (or the default)."""
+        size = value_of(self.size_box)
+        r0, c0, r1, c1 = self._selected_rect()
+        done = set()
+        for r in range(r0, r1 + 1):
+            for c in range(c0, c1 + 1):
+                ar, ac = self._table.anchor(r, c)
+                if (ar, ac) in done:
+                    continue
+                done.add((ar, ac))
+                self._table.rows[ar][ac].size = size
+                item = self.grid.item(ar, ac)
+                if item is not None:
+                    item.setData(SIZE_ROLE, size)
+        cr, cc = self._current()
+        cell = self._table.rows[cr][cc]
+        self.cell_label.setText(f"<b>Cell {_column_name(cc)}{cr + 1}</b>"
+                                + (" (header row)" if cr < self._table.header_rows else "")
+                                + (f" · {size:g} pt" if size is not None and cell is not None
+                                   else ""))
+        self.grid.resizeRowsToContents()
+
+    def _width_changed(self, _value: float) -> None:
+        """The column width box: every selected column gets that width (or automatic)."""
+        width = value_of(self.width_box)
+        _r0, c0, _r1, c1 = self._selected_rect()
+        self._table.normalize()
+        for c in range(c0, c1 + 1):
+            self._table.widths[c] = width
+        self._refresh_headers()
+
+    def _autofit(self) -> None:
+        self._table.widths = [None] * self._table.n_cols
+        set_value(self.width_box, None)
+        self._refresh_headers()
+
+    def _refresh_headers(self) -> None:
+        t = self._table
+        for c in range(t.n_cols):
+            item = self.grid.horizontalHeaderItem(c)
+            text = (f"{_column_name(c)} ({ALIGN_NAMES[t.columns[c]].lower()}"
+                    + (f", {t.widths[c]:g} cm)" if t.widths[c] is not None else ")"))
+            if item is None:
+                self.grid.setHorizontalHeaderItem(c, QTableWidgetItem(text))
+            else:
+                item.setText(text)
 
     def _header_changed(self, value: int) -> None:
         if self._loading:
@@ -624,16 +802,25 @@ class TableEditorDialog(QDialog):
             return False
 
     def _copy_cells(self) -> None:
+        """Copy the selected cells with their formatting (subscripts, bold, links…): pasted
+        back into a table they keep it; Word and Excel get an HTML table, other programs
+        tab-separated text."""
         r0, c0, r1, c1 = self._selected_rect()
-        lines = []
+        lines, block = [], []
         for r in range(r0, r1 + 1):
-            cells = []
+            cells, row = [], []
             for c in range(c0, c1 + 1):
                 cell = self._table.rows[r][c]
                 cells.append(" ".join(p.plain_text for p in markup.parse(cell.text))
                              if cell is not None else "")
+                row.append(cell)
             lines.append("\t".join(cells))
-        QGuiApplication.clipboard().setText("\n".join(lines))
+            block.append(row)
+        data = QMimeData()
+        data.setText("\n".join(lines))
+        data.setHtml(block_html(block))
+        data.setData(CELLS_MIME, cells_json(block, r1 - r0 + 1, c1 - c0 + 1))
+        QGuiApplication.clipboard().setMimeData(data)
 
     def _clear_cells(self) -> None:
         r0, c0, r1, c1 = self._selected_rect()
@@ -689,9 +876,11 @@ class TableEditorDialog(QDialog):
         elif obj is self.cell_edit.edit:
             if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and not (
                     mods & Qt.KeyboardModifier.ShiftModifier):
+                self.cell_edit.edit.finish_word()
                 self._move(1, 0)   # Enter: the cell below (Shift+Enter: a new line)
                 return True
             if key == Qt.Key.Key_Tab:
+                self.cell_edit.edit.finish_word()
                 self._move(0, 1)
                 return True
             if key == Qt.Key.Key_Escape:
@@ -711,6 +900,10 @@ class TableEditorDialog(QDialog):
             return True
         return self._new and not self._table.is_empty()
 
+    def accept(self) -> None:
+        self.cell_edit.edit.finish_word()   # ("K2CO3" typed last, then OK)
+        super().accept()
+
     def reject(self) -> None:
         if self.has_changes() and QMessageBox.question(
                 self, "Discard changes?",
@@ -724,6 +917,9 @@ class TableEditorDialog(QDialog):
         t = self._table.copy()
         t.label = self.label_edit.text().strip()
         t.breakable = self.split_box.isChecked()
+        t.fit_width = self.fit_box.isChecked()
+        t.caption_size = value_of(self.caption_size)
+        t.notes_size = value_of(self.notes_size)
         t.header_rows = self.header_rows.value()
         t.footnotes = [line for line in self.notes_edit.markup().split("\n") if line.strip()]
         t.normalize()

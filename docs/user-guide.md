@@ -308,6 +308,10 @@ Text boxes have a small toolbar:
 - alignment;
 - **αβγ…** for symbols;
 - **H₂**, which subscripts chemical formulas as you type (on by default);
+- **¶** (Ctrl+Shift+8, also View ▸ Show formatting marks), which shows the normally
+  hidden marks: ¶ at the end of each paragraph, ↵ at line breaks, · for spaces and → for
+  tabs. They are never printed. Off by default; the choice applies to every text box and
+  is remembered on your computer.
 - **@ Mention** (or type `@`), which refers to a compound, scheme, figure or table. The
   number updates itself if things are renumbered.
 - **Cite** (see [References and citations](#references-and-citations)).
@@ -315,7 +319,13 @@ Text boxes have a small toolbar:
 In custom sections and General Information there are also **Figure…** and **Table…**.
 You can also simply paste a picture, a ChemDraw drawing or a table copied from Word or
 Excel. Type the caption on the line under it. Right-click a figure or table to change it
-(edit table, label, printed size, replace picture…).
+(edit table, label, printed size, replace picture…). To print a figure as just the picture,
+with no "Figure S…" number and no caption (the other figures are then numbered without
+it), right-click it and tick **Print without number and caption**.
+
+In the table editor, a formula typed in a cell is subscripted when you move on with Enter
+or Tab, or click another cell (with **H₂** on). Copying cells (Ctrl+C on the grid) keeps
+their subscripts, bold and italics when you paste them into a table again.
 
 A table cell can also hold a picture, printed above the cell's text: for example a list of
 ligands, each drawn with its name under it, or a reaction scheme in a merged cell across
@@ -324,6 +334,32 @@ the top of an optimisation table (so the scheme and the results print together u
 press Ctrl+V on the grid) after copying a structure in ChemDraw, or **Picture…** for a
 picture file. **Picture width** sets how wide it prints (“own size” prints it as drawn);
 **Remove picture** takes it out again.
+
+#### Table and text formatting
+
+If a table's cells wrap onto several lines, or a caption or the text spacing is not as you
+want it, these settings change it. Every one of them is shown in the live preview and the
+compiled PDF, is saved in the project, and starts at "Default" / "As the style", so
+nothing changes until you set it.
+
+- **In the table editor** (double-click a table):
+  - **Text size** sets the size of the selected cells (select several, or a whole row or
+    column, first). "Default" uses the project's table size.
+  - **Column width** sets the printed width of the selected columns in cm; "Automatic"
+    makes a column as wide as its text needs. **Fit columns to their text** sets every
+    column back to Automatic.
+  - **Shrink to fit the page width**: a table wider than the page is printed smaller as a
+    whole (text and columns), so no cell has to wrap. This is the quickest fix for a wide
+    optimisation table.
+  - **Caption size** and **Footnote size** for this table.
+- **Right-click a figure ▸ Caption size…** for one figure's caption; a scheme's
+  **Layout… ▸ Caption size** for one scheme.
+- **Project settings ▸ Text and tables** sets the defaults for the whole SI: line spacing,
+  space before and after paragraphs, the caption size, and the size of table cells, of
+  header rows (with **Header rows in bold**) and of table footnotes. Tick **Also for
+  captions given a size of their own** (or the same for tables) to apply the new default
+  everywhere, clearing sizes set for single captions, cells or footnotes. Edit ▸ Undo
+  takes it back.
 
 You don't have to format chemistry by hand. "1H NMR", "CDCl3" and "J = 7.2 Hz" are fine as
 typed; the compiled SI formats them (¹H NMR, CDCl₃, *J*). A blue underline marks formatting
@@ -666,6 +702,19 @@ piece that is M. Automatic takes the largest piece that is not a common counter-
 BF₄⁻, PF₆⁻, OTf⁻, OTs⁻, BArF⁻, Na⁺, K⁺, NBu₄⁺…) and shows which one it took. A typed M formula
 (✎) may carry a charge, e.g. "C10H16N+".
 
+**How a salt's ion is printed:** with its cation as M, a pyridinium bromide is printed as
+[M]⁺ by default. To print it the way M = the whole salt is written, as **[M−Br]⁺**, choose
+Project settings ▸ Output ▸ **HRMS ion for salts** ▸ "[M−Br]⁺". The counter-ion is
+recognised from the structure: [M−Br]⁺, [M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺ for a dibromide,
+[M−Na]⁻ for a sodium salt; a less common one is written as its formula. This only changes
+the label: the m/z is the cation's either way. It applies when the adduct is [M]⁺ or [M]⁻
+(the usual one for a charged M); other adducts are printed as they are.
+
+**Printed as:** a label typed in a compound's HRMS **Printed as** box is printed instead of
+the automatic one, for that compound only (e.g. "[M−Br]+" in a project left on [M]⁺, or a
+label of your own). Leave it empty for the automatic label, which the box shows in grey. The
+m/z is still calculated from M and the adduct.
+
 **Which value is used:** of all the m/z values in all the files, those within your HRMS
 tolerance (Project settings ▸ Output) of a calculated isotope peak of the chosen ion. A
 value the report itself marks as measured ("Meas. m/z", "found") beats an unmarked one; the
@@ -716,10 +765,15 @@ Each spectrum can have its own header and caption ("empty = automatic").
 
 The Spectra section prints every compound's spectra, compound by compound. Its page sets
 the defaults for all spectra:
-- spectra per page and orientation;
+- spectra per page (two for a new project) and orientation;
 - a header line and a frame;
 - **auto-crop** of white margins;
-- the structure and compound number drawn on each spectrum (position, size, frame…), and
+- where the structure and compound number go: **on the spectrum** in a corner, **on the
+  spectrum in blank space (auto)**, which finds a place where they cover nothing of the
+  spectrum (tick **Make the structure smaller to fit, down to …%** to let it shrink the
+  structure when there is no room; if nothing fits they go above the spectrum and the
+  Compile window says so), or **above** or **beside** the spectrum, which never cover it;
+- the structure and compound number's size, frame…, and
   the caption under them (e.g. "¹H NMR (CDCl₃, 500 MHz)") with its **size** (9 pt unless
   changed; one spectrum can have its own on its compound's spectra page);
 - **links**: each NMR report in the compound data can link to its spectrum in the PDF, and
@@ -974,12 +1028,64 @@ In the Compile SI window you choose:
 - the structures: "ChemDraw pictures where available; program drawings otherwise" (the
   default) or "Program drawings for every compound";
 - whether chemistry text is formatted automatically;
-- whether to open the PDF when it's ready;
+- what to save: a **PDF**, a **Word document**, or both (see below);
+- whether to open the file when it's ready;
 - which parts to include. Untick a section to leave it out, together with its
   sub-sections and its compounds' spectra.
 
 The PDF is saved as **build/SI.pdf** in the project folder. If that file is open in a PDF
 viewer that locks it, the new one gets a numbered name instead.
+
+### The SI as a Word document
+
+Choose **Save as: Word document** (or **PDF and Word document**) in the Compile SI window to
+get **build/SI.docx**, for a journal that asks for Word or to make last changes by hand.
+It has the same content and order as the PDF:
+
+- Text, headings, compound data, captions, tables and references are ordinary Word text
+  you can edit. Section headings use Word's **Heading 1, 2, 3…** styles, so Word's
+  navigation pane shows them.
+- Tables are Word tables, with their merged cells, rules, sizes and column widths.
+- Structures, schemes, X-ray drawings and the spectra pages are **pictures**, drawn
+  exactly as in the PDF. Each spectra page is one picture (with its header line and
+  structure box); landscape spectra pages are landscape pages in Word too.
+- Page numbers (S1, S2…), the header and footer, and Project settings ▸ Text and tables
+  are kept.
+- When Word opens the file it asks whether to **update the fields**: answer **Yes**, so
+  the table of contents gets its page numbers. (Later, select everything with Ctrl+A and
+  press F9 to update them again after editing.) A heading you add in Word is not added to
+  the table of contents.
+- The References are formatted by the program in the journal's pattern; check unusual
+  references (books, web pages) once.
+
+The Word file is made from the project each time, so changes you make in Word are not
+read back: make lasting changes in the program and compile again.
+
+### Page flow: how text is split over pages
+
+The **Page flow** settings are in the Compile SI window and in **Project Settings ▸ Page**
+(both change the same settings):
+- **Keep headings with:** a heading moves to the next page unless this many lines of what
+  follows it fit under it (2 lines by default; Off lets a heading keep just one line).
+- **Avoid single lines at page edges:** Off, Normal or Strong. Strong tries harder not to
+  leave a paragraph's first line alone at the bottom of a page, or its last line alone at
+  the top of the next.
+- **Keep a short bold or italic line with what follows, like a heading:** a line such as
+  *Solvent Effect on Reaction Yield* that you typed in italics as a sub-heading is not
+  left alone at the bottom of a page. Lines ending in "." or ":" are ordinary text.
+- **Keep each compound on one page:** a compound (title, structure, procedure, data) that
+  fits on a page moves to the next page whole instead of being split. This leaves more
+  empty space at the bottom of some pages. A compound longer than a page still splits.
+- **Data after the procedure:** where a compound's data ("Colorless oil (57.4 mg, 94%).
+  ¹H NMR …") start: a **new paragraph** with the usual paragraph space (as before), a
+  **new line with no extra space**, or in the **same paragraph**.
+
+For a single section or compound, use its **Page breaks** button (a section's is beside
+its name; a compound's is in its header, next to *Collapse all*):
+- **Start on a new page**;
+- **Keep together**: a compound can follow the project setting, be kept on one page, or be
+  allowed to split even when the project keeps compounds together; a section can be kept
+  on one page (when it fits).
 
 The **journal style** (ACS, Wiley or RSC) is chosen in **Project Settings ▸ Output**.
 **Heading numbers**, next to it, numbers the headings: as the journal style does (none in
@@ -989,7 +1095,8 @@ the headings you type in a section's text and the General Information heading ar
 numbered too; compound titles and general procedures never are.
 Other tabs there set:
 - structure drawings (bond length, fonts…);
-- page headers and footers;
+- page headers and footers (the **{authors} shows** box there can shorten {authors} to
+  "O'Hare et al.");
 - figure, table and scheme labels;
 - the NMR impurity table;
 - your name.

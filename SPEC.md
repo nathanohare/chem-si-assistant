@@ -277,8 +277,8 @@ Fields that are empty or removed are simply omitted. Inline attachments are plac
 ### 9.3 Spectra appendix and labelling
 
 - Each spectrum gets a **header added by the program**: compound ID + experiment + conditions, e.g. **"3g — ¹H NMR (400 MHz, CDCl₃)"**. Conditions are taken from the matching peak report.
-- The **compound's structure image and ID** are placed on the spectrum (a corner chosen on the Spectra section's page, default top-left inside the plot area; or dragged anywhere on the compound's spectra page), satisfying the Org. Lett. requirement that spectra be labelled with structure and compound number.
-- Layout option: **one, two or four spectra per page**, portrait or landscape (Org. Lett. requires each spectrum to be at least half a page). All layout options are on the Spectra section (§13k.12).
+- The **compound's structure image and ID** are placed with each spectrum, satisfying the Org. Lett. requirement that spectra be labelled with structure and compound number: on the spectrum in a corner (default top-left inside the plot area), on the spectrum wherever it covers only blank paper (**auto**), **above** or **beside** the spectrum, or dragged anywhere on the compound's spectra page (§13k.12, 12.10).
+- Layout option: **one, two or four spectra per page**, portrait or landscape (Org. Lett. requires each spectrum to be at least half a page). New projects start with **two per page** (issue #1); older projects keep what they had. All layout options are on the Spectra section (§13k.12).
 - Spectra appear in the appendix in this order: compounds in tree order; within a compound, ¹H, ¹³C, ¹⁹F, other nuclei, 2D, then other files.
 - Uploaded multi-page PDFs are placed page by page.
 
@@ -396,6 +396,8 @@ Build and test in phases; each phase should produce something the author can ope
 
 1. If the structure has several pieces (e.g. a salt), the HRMS field offers **"M is:"** the whole structure or any piece. The default is the largest piece (e.g. the pyridinium cation); *since §13s.3, the largest piece that is not a common counter-ion.* Choosing a charged piece fills in [M]⁺/[M]⁻ as the adduct (still editable). A warning appears if an already-charged M is given an adduct that adds charge.
 2. **M formula** can be typed by hand (the neutral M formula, or with a typed charge such as "C10H16N+", §13s.4; the adduct is still applied). It overrides the structure and the piece choice, and is shown highlighted with ✎ and the formula subscripted.
+3. **The printed ion label** (Nate, 2026-11-16). Project settings ▸ Output ▸ **HRMS ion for salts**: "[M]⁺ — M is the charged piece" (the default, as before) or "[M−Br]⁺ — M is the whole salt". With the second, when M is a charged piece of the structure and the adduct is plain [M]ⁿ⁺/[M]ⁿ⁻, the label is written for M = the whole salt with the other pieces taken off: [M−Br]⁺, [M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺, [M−Na]⁻. Common counter-ions are written by their usual names (halides, BF4, PF6, SbF6, AsF6, ClO4, NO3, OTf, NTf2, OMs, OTs, CF3CO2, BArF, BPh4, Li, Na, K, Rb, Cs, NH4); any other piece by its formula. It is not used (the adduct is printed as it is) for a typed M formula, the whole structure chosen as M, an adduct that adds or removes atoms, a charge different from the piece's, two copies of M, or pieces that don't add up to a neutral salt. Only the label changes: the calculated m/z and "calcd for" formula are the charged piece's either way.
+4. **Printed as** (per compound, §2.7): a label typed in the HRMS field's "Printed as" box is printed instead of the automatic one (stored as `ion_label` in the HRMS value; empty = automatic, shown as the box's grey placeholder). The calculation still uses M and the adduct. Atom counts in a printed label are subscripted ([M+NH₄]⁺, [M−BF₄]⁺); numbers of molecules or pieces are not ([2M+Na]⁺, [M−2Br]²⁺).
 
 ## 13g. Compiling (Phase 5)
 
@@ -490,7 +492,7 @@ Build order: quick items (6, 9, 10, 7, 2a) → front matter and custom sections 
   - **Number ranges.** Not flagged: chains with more than one hyphen (CAS numbers 7647-01-0, dates 2024-10-04, ISBNs, notebook codes NPO-2-117), numbers stuck to a word before them (C2-3) and numbers followed by letters that are not a unit (6-31G, 6-311+G). Compiling NMR text uses the same rule.
   - **Deuterated solvents** written as names (DMSO-d6, acetone-d6, THF-d8, DMF-d7, MeOD-d4…; since the review of §13l in any capitals, e.g. Methanol-d4, Acetone-d6, dmso-d6, kept as written; chloroform-d gets an italic *d*) are fixed to an italic *d* with a subscript number; CDCl3, CD3OD, C6D6 and similar are fixed like formulas.
   - The underlines of a text box are forgotten when its page is closed, so a dictionary change only re-underlines the text boxes on show (it once also called every closed one, an error each, growing through the session).
-  - **Chemical formula toggle.** It is the "H₂" button on every text-box toolbar. One setting is shared by all boxes and stored on this computer. A word is subscripted when it is finished by a space, punctuation, Enter or Tab. Pasted text is left alone (compiling still formats it). Digits that are already subscripts stay as they are.
+  - **Chemical formula toggle.** It is the "H₂" button on every text-box toolbar. One setting is shared by all boxes and stored on this computer. A word is subscripted when it is finished by a space, punctuation, Enter or Tab, and also when the box is left with the word just typed (a click elsewhere, Tab to another box, OK; issue #2): in the table editor Enter and Tab move to the next cell, a toolbar button changes rows or columns, or another cell is clicked, so "K2CO3" typed alone in a cell is subscripted too. Only a word typed there and then: a cell's stored text is never changed by opening and leaving it. Pasted text is left alone (compiling still formats it). Digits that are already subscripts stay as they are.
 
 **2a. Header and footer** (Project settings ▸ Page).
 - Left, centre and right text for both header and footer, with fill-ins {page}, {pages}, {title}, {authors}, {date}.
@@ -505,8 +507,17 @@ Build order: quick items (6, 9, 10, 7, 2a) → front matter and custom sections 
   - An unchanged footer follows the journal style: ACS and RSC centre the number, Wiley puts it on the right. Only a changed footer is saved.
   - Size and bold apply to the {page}/{pages} numbers. The size is "Same as the text" (a tick box, the default) or its own size of 5–24 pt.
   - The cover page shows no header, footer or number unless "Show the page number (and header and footer) on the cover page" is ticked. It still counts as page S1.
-  - {date} is the compile date, e.g. "3 October 2026". {authors} is the author names separated by commas. Header/footer text gets the same formula formatting as other text (CDCl3 → CDCl₃).
+  - {date} is the compile date, e.g. "3 October 2026". {authors} is the author names separated by commas. A **"{authors} shows"** choice beside the header (stored as `page.author_style`) can shorten it to the first author's surname: "O'Hare et al." for three or more authors, "O'Hare and Smith" for two, "O'Hare" for one. The surname is the last word of the name, with particles such as van/der/de kept and Jr./III dropped; a name typed "O'Hare, N. P." gives the part before the comma. Default: all names, as before. Override: type the text into the header instead of {authors}. Header/footer text gets the same formula formatting as other text (CDCl3 → CDCl₃).
   - The tab shows a live example of page 2 of 20.
+
+**2b. Page flow** (Nathan, 2026-11-16: headings and single lines were left at the bottom of a page, e.g. a section heading with its one-line lead-in on S3 and an italic sub-heading line on S14; and a gap between a compound's procedure and its data on S20). Project settings ▸ Page ▸ Page flow, also shown in the Compile window (both change the same project settings, `"page_flow"` in project.json; `core/page_flow.py`):
+- **Keep headings with:** N lines (0–6, default 2; 0 = Off). A heading (section, sub-section, general procedure, compound title, heading typed in a text) moves to the next page unless it and N lines of what follows fit on the page. A short paragraph after it (a one-line lead-in) counts, so the heading no longer stays behind with just that line.
+- **Avoid single lines at page edges:** Off / Normal (default) / Strong: how hard the typesetter avoids a paragraph's first line alone at a page bottom (orphan) or its last line alone at the top (widow).
+- **Keep a short bold or italic line with what follows, like a heading** (on by default): a paragraph of at most 90 characters wholly in bold or wholly in italic, not ending in . : ; or , (a heading typed as text) is kept with N lines of what follows.
+- **Keep each compound on one page** (off by default): a compound entry that fits on a page is moved whole to the next page instead of being split; one longer than a page still splits.
+- **Data after the procedure:** New paragraph (with paragraph space; the default, as before) / New line, no extra space / Same paragraph (run on). Only for text the program writes; a compound's own SI text prints as typed.
+- **Each section and compound has a “Page breaks” button** (section: beside its name; compound: in its header): **Start on a new page**, and Keep together: for a compound “Use the project setting” / “Keep on one page” / “Allow splitting over pages”; for a section “May split over pages (normal)” / “Keep on one page”. Stored in its section.json / compound.json as `"page_flow": {"new_page": bool, "keep": "default" | "together" | "split"}`, only when not the default. Setting it is one undo step.
+- *As built:* Typst code after the journal style (`page_flow.typst_definitions`): `si-need(lines, before)` places an invisible unbreakable block as tall as `before` + `lines` lines + 2.4em of spacing and then moves back up by the same height, so nothing moves unless that space is not left on the page, when everything goes to the next page. Headings get it through `show heading`; bold/italic lines are given it by `paragraphs_to_typst(keep_lines=…)`. `si-together` measures its content and makes it unbreakable only when it fits on a page. Widows/orphans are Typst's `text.costs` (0%, 100%, 600%). Content holding a page break (a sub-section on a new page, a many-page attachment) is never kept together (Typst allows no page break there); a section holding the Spectra section is never kept together. “New line” puts a line break (not justified) between the procedure and the data. Superscript references were checked and do not change the line spacing; the S20 gap was the paragraph space.
 
 **3. Project dashboard.** Clicking the project (the top item of the tree) shows:
 - overall and per-section progress;
@@ -608,6 +619,8 @@ You can switch between chart types (bars, pie/donut) and change the status colou
   - Remove is undone with Edit ▸ Undo (Ctrl+Z once the text box has no typing left to undo; the text box's own typing history ends at the removal, because the file is already in the Trash): the picture or table and its paragraph come back together, in their place (§13k.11). After the project has been closed, the Trash restores it. Restoring puts it back at the end of the text, or, if its paragraph is still in the text with nothing behind it, back in that paragraph under the same ID. A figure or table whose picture or table file is missing is listed in the Warnings panel ("Figures, tables, schemes and texts").
   - **Table editor:** a grid, with the selected cell's text edited in a box under it (bold, italic, sub/superscript, symbols, @ mentions, citations); typing on a cell replaces it, Enter/Tab move on, Delete clears. Buttons add/delete rows and columns, merge/split cells, align cells (or whole columns), paste a table (HTML from Word/Excel, keeping merged cells and formatting, or tab-separated text; the table grows as needed). Below: caption, footnotes (one per line), number of header rows, label, and "May run over a page break". Cancel changes nothing; if anything was changed (or the table is new and already has text, e.g. pasted from Word), Cancel/Escape first asks "discard your changes?".
   - **Copy and paste:** cutting and pasting a figure or table moves it (same ID, so mentions stay right); copying makes a new copy with a new ID, also into another section.
+  - **Copying cells in the table editor (issue #2):** Ctrl+C on the grid copies the selected cells with their stored text (sub/superscripts, bold, italic, mentions), merges (cut to the selection) and alignment, as `application/x-si-assistant-cells` (JSON), plus an HTML table (Word, Excel keep the sub/superscripts) and tab-separated text. Pasting into a table editor, or into a custom section's text (a new table), uses the cells as copied. Cell pictures are left out (they belong to the table's own folder). Before, only plain text was copied, so pasting cells lost their subscripts.
+  - **Printed without number and caption (issue #3):** right-click a figure ▸ **Print without number and caption** (a tick). Only the picture prints (centred, or left/right as aligned; its width as set); it gets no "Figure S…" label and is not counted, so the other figures are numbered without a gap. Stored as `"uncaptioned": true` on the figure's entry in the owner's JSON; kept when the picture is replaced and when the figure is copied. Its caption stays in the text (not printed), so unticking brings it back. The editor shows "No number or caption (printed as the picture only)" under it. A mention of it prints "??" with a compile warning. (Grouping a figure with the table below it under one "Table S…" caption is done with a picture in a merged table cell, §13k.5 table cell pictures.)
   - **Printed:** figures as Typst figures (kind `si-figure`), tables as booktabs-style tables (rules above and below the header and at the bottom, no vertical lines) with the caption above and footnotes under the table, aligned with its left edge. A table is kept whole, moving to the next page if it does not fit where it is, unless it is taller than a page (measured by Typst, not counted in rows) or "May run over a page break" is ticked; then it continues on the next page with its header rows repeated. Formatting helpers apply to cells, captions and footnotes; mentions and citations in them work.
   - The TOC's "List of tables" lists these tables (fixed: it now targets Typst's table figures).
 
@@ -718,7 +731,8 @@ You can switch between chart types (bars, pie/donut) and change the status colou
   - 12.5 optional frame around each spectrum;
   - 12.8 auto-crop of white margins, scaling each spectrum to fill its slot (axes kept; only blank white is cut);
   - 12.9 optional caption under the structure, e.g. "¹H NMR (CDCl₃, 500 MHz)", taken from the peak report (NMR only);
-  - the existing header line above each spectrum ("2 — ¹H NMR (400 MHz, CDCl₃)"), on/off.
+  - the existing header line above each spectrum ("2 — ¹H NMR (400 MHz, CDCl₃)"), on/off;
+  - 12.10 where the structure + ID go (issue #1): **On the spectrum (in a corner)** (as before), **On the spectrum, in blank space (auto)**, **Above the spectrum** or **Beside the spectrum**, with the corner, and for auto an optional **Make the structure smaller to fit, down to …%**.
 - **Apply defaults to all spectra** asks first, because it also resets dragged positions.
 - **Per spectrum:** on its compound's sub-page, every default can be overridden (12.7), including orientation of that page. The structure + ID box can be dragged anywhere on the spectrum and resized with handles, as with scheme labels.
 - Each page of a multi-page PDF is a separate spectrum with its own position.
@@ -726,6 +740,8 @@ You can switch between chart types (bars, pie/donut) and change the status colou
   - **The section:** stored as a section of type `spectra` (shown as "Spectra"). It is added at the end of the tree when a project is opened for editing (so also right after a new project is made). An older project's "Spectra per page" and "Structure position on spectra" settings become its defaults and are removed from project.json. A project opened read-only that has none yet prints its spectra at the end, as before. Delete is greyed out for it (its tooltip, and a message if Delete is pressed anyway, say why), and a custom section holding it can't be deleted until it is moved out. It can be renamed (its name is its printed heading) and moved, also into custom sections.
   - **Defaults** are saved in its `section.json` as `"defaults": {per_page, orientation, header_line, struct_box, corner, struct_frame, struct_frame_color, struct_frame_width, struct_bg, id_size, id_bold, struct_scale, spectrum_frame, spectrum_frame_color, spectrum_frame_width, auto_crop, caption}`. The defaults reproduce the earlier appendix: 1 per page, portrait, header line on, top-left, white box, ID bold at the text size (`id_size` 0), structure at its natural size but at most 1.5 × 1.1 in (`struct_scale` 1.0), structure + ID shown (`struct_box` true), no frames, no crop, no caption. Frames have their own colour and line width. Unusable values in the file are ignored. **Structure size** (25–400 %) is a true scale: 100 % is the size above, 200 % prints the structure twice as large, 50 % half (it multiplies the 100 % size, so small and large structures change alike).
   - **Per spectrum** (for the next stage's sub-pages): `"layout": {…}` on the file's entry in compound.json overrides defaults for all its pages; `"pages": {"1": {…, "x", "y"}}` overrides one page and holds the dragged centre of the structure + ID box as fractions of the shown spectrum. Effective settings = defaults, then the file's, then the page's.
+  - **Structure position (12.10, issue #1):** stored as `"struct_place"`: `"on"` (default: in `corner`, or where dragged), `"auto"`, `"above"` or `"beside"`, with `"auto_shrink"` (false) and `"auto_min_scale"` (0.5, the same scale as Structure size, 25–400 %). *Above / beside:* the box gets room of its own (centred above the spectrum, under the header line; or to the right of it, at its top), and the spectrum is made smaller to leave it, so it never covers the spectrum (`si-spectrum(…, spot: "above" | "beside")` in the styles; `shown_size_in` for the drawing on the spectra page). *Auto:* each spectrum page is drawn (100 dpi) into an ink map about 240 cells on its long side; a cell with any pixel darker than 235/255 is ink (so thin lines and small labels count). The box's size is worked out from the structure's printed size, the ID and the caption (the spectra page measures the text with Qt, compiling estimates it from its length), plus 0.06 in of blank paper all round; of all the places on the shown spectrum (after auto-crop) where it covers no ink, the one nearest the chosen corner (0.4 cm in) wins, printed as a position (`pos:`, as a dragged box). With "Make the structure smaller to fit" the structure is tried at 90 % steps down to the minimum (never larger than its set size). If nothing fits, the box goes **above** the spectrum (never over ink), and one compile warning lists those spectra. Ink maps are remembered in `build/ink_cache.json` like the auto-crop boxes. A box dragged by hand stays where it was put (a dragged auto box keeps the size auto gave it); choosing a position again drops the dragged place. On the spectra page the box is drawn where it will print, and the note under the drawing says "in blank space (auto)" or "above the spectrum (auto: no blank space big enough)". Above/beside boxes can't be dragged.
+  - **Two per page for new projects (issue #1):** a new project's project.json starts with `"spectra_per_page": 2`, which becomes its Spectra section's default (as an older project's setting did). `DEFAULTS` keeps 1, so a project made before that, without the setting, keeps one spectrum per page. The bundled example keeps one per page (landscape).
   - **Apply defaults to all spectra…** (on the section's page) says how many spectrum files have settings of their own, asks first, then removes every `layout` and `pages` entry.
   - **The page** has the defaults in two groups (Pages; Structure and compound ID), a small sketch of one page (not to scale) that follows the choices at once, and the live preview on the right shows the first 8 spectra (with a note; only the preview of this section, or of a section holding it, is cut short: the table of contents preview lays out every spectrum so the page numbers after it are right, and measures nothing new for auto-crop there). Changes are saved straight away. In a narrow window the page scrolls sideways rather than hiding controls. Spectra per page / structure position were removed from Project settings and the Compile SI window (both now point to this page).
   - **Which spectra:** the Spectra field (¹H, ¹³C, ¹⁹F, other nuclei, other NMR, 2D, HPLC/SFC, IR, other) then Additional files set to "Spectra section", compound by compound in tree order (within a compound, the order can be set by hand on its spectra page, see below). Every one gets the structure + ID (HPLC/SFC traces too) unless "Structure + ID" is unticked for it; the automatic caption is for NMR spectra with a nucleus (¹H, ¹³C, ³¹P…): "¹H NMR (CDCl₃, 500 MHz)", nucleus then solvent then frequency from the matching peak report ("¹³C NMR" alone when the report doesn't say). For "Other NMR" the nucleus is the one in the file name (e.g. `3a_29Si.pdf`), or else the compound's only peak report for a nucleus without a type of its own (²⁹Si, ¹⁵N…); the header line uses it too. The solvent is recognised however the report writes it (CDCl₃ or CDCl3, chloroform-d, (CD₃)₂SO, DMSO-d₆, methanol-d4, benzene-d6, MeOD…) and printed as the report writes it, subscripted automatically (§13l.14; before that, in its usual form); the first one named wins.
@@ -1258,6 +1274,125 @@ Nathan asked for the program to look like his other program, Chem Illustrator (n
    asterisk.
 3. *As built:* `core/chem_names.py` (`italic_spans`, `name_runs`); `compile/blocks.py`
    `compound_title`. Tests: `tests/test_chem_names.py`.
+
+## 13y. Table and text formatting (Nathan, 2026-11-16)
+
+Nathan's request: the first tables of his SI wrapped their cells over several lines, with
+no way to change text size or column widths; captions and text spacing had few options;
+and he wanted Word's Show/Hide ¶. His choices: settings for selected cells, with a
+document-wide default (header rows with their own default); a caption default that can be
+applied to the whole document, with per-caption overrides; PDF output now (Word export,
+which the program does not have, is a separate future task).
+
+1. **Document defaults** (Project settings ▸ **Text and tables**, `core/formatting.py`):
+   line spacing (× the style's own: Typst `leading` = 1.3 em × n − 0.7 em, so 1 = the
+   styles' 0.6 em), space before and after paragraphs (pt; the gap between two paragraphs
+   is the after of one plus the before of the next, each half of the style's 1 em when
+   not set), caption size (figures, tables, schemes and an Attachment section's caption),
+   table cell size, header row size and **bold**, table footnote size. Stored as
+   `"formatting": {…}` in project.json, only the values set; nothing set = the style's own
+   and no Typst code is added, so existing projects print unchanged. They are Typst rules
+   placed after the style (`#set par(...)`, `#show figure.caption: set text(...)`), or
+   set rules inside the table and its cells, so a user's own copy of a style keeps working.
+2. **Per table** (table editor): text size of the selected cells (`"size"` on the cell),
+   column widths in cm (`"widths"`, null = automatic; "Fit columns to their text" clears
+   them), **Shrink to fit the page width** (`"fit_width"`: Typst measures the table at
+   its natural width and scales it, text and all, to the text width when wider), caption
+   size (`"caption_size"`) and footnote size (`"notes_size"`). A cell's own size wins over
+   the header and cell defaults. Merging keeps the first cell's size; widths follow
+   inserted and deleted columns.
+3. **Per caption:** a figure's right-click ▸ **Caption size…** (`"caption_size"` in its
+   figure entry); a scheme's Layout… ▸ **Caption size** (`caption_size_pt`, 0 = the
+   document's; hidden in Project settings ▸ Schemes, whose default is the document's).
+   "Also for captions given a size of their own" / "Also for cells and footnotes given a
+   size of their own" in the settings tab clears those (`Project.clear_caption_sizes`,
+   `clear_table_sizes`), as part of the settings' undo step.
+4. **Show formatting marks:** a **¶** toggle in every text box's toolbar (Ctrl+Shift+8)
+   and View ▸ Show formatting marks: Qt's own marks for paragraph ends, line breaks,
+   spaces and tabs. Off by default; one switch for every text box, remembered on the
+   computer (like the H₂ toggle), never stored in the project or printed.
+5. *Not yet:* per-paragraph spacing in the text editor and column widths by dragging in
+   the table editor's grid. (Word export: §13z, which honours all of the above.)
+6. *As built:* `core/formatting.py`, `core/tables.py`, `compile/document.py`,
+   `compile/reaction_scheme.py`, `ui/format_widgets.py`, `ui/table_editor.py`,
+   `ui/dialogs.py` (TextTablesTab), `ui/text_objects.py`, `ui/rich_text.py`,
+   `ui/text_checks.py`. Tests: `tests/test_formatting.py` (including PDFs checked for the
+   printed sizes, and a 12-column table that stays on one line when shrunk to fit).
+
+## 13z. Word export (Nathan, 2026-11-16)
+
+Nathan asked for the SI as a Word document as well as the PDF, so it can be edited or
+sent to a journal that wants Word.
+
+1. **Where:** Compile SI ▸ **Save as:** PDF (the default), Word document, or both. The
+   Word file is **build/SI.docx** (a numbered name when SI.docx is open in Word, as for
+   the PDF). The choice is remembered as `"compile_format": "docx" | "both"` in
+   project.json (not stored for PDF). Previews and the live preview stay PDF only.
+2. **Same content, same rules.** `compile/word.py` walks the project with the PDF's
+   `Builder` (compile/document.py) for every decision: what is included (the Compile
+   window's ticks), order, IDs, labels, mentions, links, the compound blocks' text and
+   every compile note. So the Word SI and the PDF always say the same thing. That
+   includes figures printed without a number or caption (issue #3) and the structure's
+   place on spectra, "auto" included (issue #1), and the page flow (§13k.2b) through
+   Word's own controls: widow/orphan control (Word has no "strong" level, so Normal and
+   Strong both switch it on), "keep with next" for headings and short bold/italic lines,
+   "keep with next" + "keep lines together" (and rows that don't split) for a compound or
+   section kept on one page, and "page break before" for one on a new page. A new compile
+   feature is added to both.
+3. **Editable text:** cover, General Information, custom sections, general procedures,
+   compound blocks, captions, table cells and footnotes, HRMS text listings and the
+   References are Word text with bold, italic, underline, super- and subscripts. Section
+   headings use Word's own **Heading 1–9** styles (navigation pane), numbered as in the
+   PDF (journal style, outline, 1.1.1 or none; the numbers are typed into the heading,
+   not Word list numbering). Headings that the PDF leaves out of the table of contents
+   use look-alike styles "SI Heading N (not listed)"; compound titles use "SI Compound
+   Title"; captions "SI Figure/Table/Scheme Caption" (label in bold, the journal's
+   separator: ACS ".", Wiley ":", RSC none).
+4. **Tables** are Word tables: merged cells, rules above, under the header rows and at
+   the bottom, header rows repeated on each page, kept on one page unless "May run over
+   a page break", column alignment, the footnotes in a last row across the table (so
+   they start at its left edge and stay with it). Column widths typed in the table
+   editor are used (shrunk to the text width with "Shrink to fit"); the others are
+   estimated from their text (Word refits them; LibreOffice uses them as they are).
+5. **Pictures:** PNG, JPEG and GIF go in unchanged. Anything Word can't show from
+   Python (the program's structure drawings and pasted ChemDraw pictures as SVG/PDF,
+   schemes made with the scheme editor, X-ray drawings, PDF pages) is drawn by **Typst**
+   — the same engine and style as the PDF, so it looks identical — into PNG at 300 ppi.
+   Each **spectra page** is one picture of the whole page as laid out in the PDF
+   (header line, structure + ID box, crop, frames, 1/2/4 per page); landscape pages get
+   a landscape Word section. PDF pages of Attachment sections and HRMS reports are
+   pictures too. A picture Typst can't draw is left out with a note.
+6. **Formatting** (§13y): line spacing (as a multiple of single), space before/after
+   paragraphs, caption size, table cell / header / footnote sizes, bold header rows,
+   and every per-table, per-cell and per-caption size. Fonts, sizes, paper and margins
+   follow the journal style (`word.LOOKS`, matched to styles/*.typ).
+7. **Page numbers and header/footer** (Project settings ▸ Page): Word PAGE/NUMPAGES
+   fields after the prefix ("S"), in 1/i/I, size and bold as set, left/centre/right
+   parts with {title}, {authors}, {date}; no header or footer on the cover unless
+   chosen.
+8. **Table of contents:** written entry by entry (Word's own TOC field can't put "S"
+   before page numbers), each entry a link to its heading with its page number as a
+   PAGEREF field; the file asks Word to update its fields when opened, which fills in the
+   numbers. Lists of figures, tables and schemes the same way. A heading added in Word
+   later is not added to it.
+9. **Citations and references:** numbered in order of first citation, as superscripts
+   (Wiley: superscript [n]); the References list (RSC "Notes and references") is
+   formatted by the program in the journal's pattern (ACS: "Surname, I.; … Title.
+   *Journal* **Year**, *Vol* (issue), pages. DOI: …"; RSC and Angewandte/Wiley: initials
+   first, no article title). The PDF uses Typst's CSL styles, so small differences in
+   unusual references are possible.
+10. **Links:** with Spectra section ▸ "NMR links", the ¹H NMR, ¹³C NMR… of a peak report
+    link to the page of that spectrum (a Word bookmark there); a link whose spectrum is
+    not printed becomes plain text, as in the PDF.
+11. *As built:* `compile/word.py` (python-docx, MIT, with lxml BSD-3-Clause),
+    `compile/document.py` (`spectra_page_list`, `compound_notes`, shared with the PDF),
+    `compile/reaction_scheme.py` (`code(labelled=False)`, `caption()`),
+    `ui/compile_ui.py` (Save as, `run_word_compile`), `ui/main_window.py`,
+    `selftest.py` ("word" check), packaging (python-docx's template). Tests:
+    `tests/test_word_export.py`, `tests/test_ui_compile.py`.
+12. *Not yet:* structures as editable ChemDraw objects (they are pictures), spectra
+    header lines as text (they are part of the page picture), and Word's own list
+    numbering for headings.
 
 ## 14. Glossary
 

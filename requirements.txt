@@ -11,6 +11,8 @@ cryptography>=42,<51  # lets pypdf open PDFs saved with edit restrictions (many 
                       # are kept, nothing is sent — Apache-2.0 OR BSD-3-Clause
                       # (brings cffi, MIT-0 / MIT, and pycparser, BSD-3-Clause)
 pyspellchecker>=0.8   # spelling check, English dictionary included (works offline) — MIT
+python-docx>=1.1,<2   # writing the SI as a Word document (.docx) — MIT
+                      # (brings lxml, BSD-3-Clause, and typing_extensions, PSF-2.0)
 numpy>=1.26           # (also installed with RDKit) scheme labels, trimming pictures — BSD-3-Clause
 # Development
 pytest>=8             # unit tests — MIT

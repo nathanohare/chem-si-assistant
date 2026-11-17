@@ -121,3 +121,38 @@ def test_example_line():
     assert "My SI | – | A. Chemist, B. Chemist" in text
     assert "Page SII of SXX" in text
     assert page.fill_in("{date}", s, 1, 1, today=date(2026, 10, 3)) == "3 October 2026"
+
+
+def test_surnames():
+    assert page.surname("Nathan P. O'Hare") == "O'Hare"
+    assert page.surname("Johannes D. van der Waals") == "van der Waals"
+    assert page.surname("Martin Luther King Jr.") == "King"
+    assert page.surname("O'Hare, N. P.") == "O'Hare"
+    assert page.surname("Robert Smith, III") == "Smith"
+    assert page.surname("Jane Doe*") == "Doe"
+    assert page.surname("Plato") == "Plato"
+
+
+def test_authors_et_al():
+    names = ["Nathan P. O'Hare", "Jane Smith", "Ian Brown"]
+    s = {"authors": [{"name": n} for n in names]}
+    assert page.author_names(s) == ", ".join(names)        # default unchanged
+    assert page.page_settings(s)["author_style"] == "full"
+    s["page"] = {"author_style": "et_al"}
+    assert page.author_names(s) == "O'Hare et al."
+    assert page.fill_in("SI of {authors}", s, 1, 1) == "SI of O'Hare et al."
+    assert page.author_names({**s, "authors": s["authors"][:2]}) == "O'Hare and Smith"
+    assert page.author_names({**s, "authors": s["authors"][:1]}) == "O'Hare"
+    assert page.author_names({"page": s["page"]}) == ""
+    s["page"] = {"author_style": "nonsense"}
+    assert page.author_names(s) == ", ".join(names)
+
+
+def test_author_style_is_stored_only_when_changed():
+    s = {}
+    v = page.page_settings(s)
+    page.store_page_settings(s, v)
+    assert "author_style" not in s["page"]
+    v["author_style"] = "et_al"
+    page.store_page_settings(s, v)
+    assert page.page_settings(s)["author_style"] == "et_al"

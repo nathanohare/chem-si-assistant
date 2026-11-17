@@ -677,6 +677,26 @@ def test_hrms_editor_with_a_hand_edited_tolerance(qapp, tmp_path):
     p.close()
 
 
+def test_hrms_editor_printed_ion_label(qapp, tmp_path):
+    # SPEC §13f.3: the "Printed as" box shows the automatic label, a typed one is saved
+    # and the calculation line says what is printed.
+    p, c = new_project(tmp_path / "proj")
+    p.set_structure(c, "C(c1ccccc1)[n+]1ccccc1.[Br-]")
+    c.values["hrms"] = {"adduct": "[M]+", "found": "170.0966"}
+    p.settings[checks.SALT_LABEL_KEY] = checks.SALT_LABEL_WHOLE
+    p.save_compound(c)
+    panel = panel_for(p, c)
+    editor = box(panel, "hrms").editor
+    assert editor.label_edit.placeholderText() == "auto: [M−Br]⁺"
+    assert "Printed in the SI as [M−Br]⁺" in editor.calc.text()
+    editor.label_edit.setText("[M−Br]+•")
+    editor.label_edit.textEdited.emit("[M−Br]+•")
+    panel.flush()
+    assert c.values["hrms"][checks.ION_LABEL_KEY] == "[M−Br]+•"
+    panel.deleteLater()
+    p.close()
+
+
 # ---------------------------------------------------------------------- late handoffs
 
 def test_has_unsaved_on_the_compound_page_and_general_procedures(qapp, tmp_path, monkeypatch):

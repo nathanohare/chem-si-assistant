@@ -30,7 +30,8 @@ from ..core.undo import UndoContext
 from . import (feedback_ui, help_ui, restart, rich_text, text_checks, theme, undo_keys,
                update_ui, wheel_guard)
 from ..compile.document import CompileOptions
-from .compile_ui import CompileDialog, PreviewWindow, open_file, run_compile, show_warnings
+from .compile_ui import (CompileDialog, PreviewWindow, open_file, run_compile,
+                         run_word_compile, show_warnings)
 from .compound_panel import CompoundPanel, make_read_only
 from .warnings_panel import WarningsPanel
 from .scheme_panel import SchemePanel
@@ -748,6 +749,18 @@ class MainWindow(QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         view_menu.setToolTipsVisible(True)   # (its items explain themselves in tooltips)
         view_menu.addActions([self.act_live, self.act_warnings])
+        # Show formatting marks (¶) in every text box: the same switch as the ¶ button of
+        # the text boxes' toolbars (ui/text_checks.py), remembered on this computer.
+        from . import text_checks
+        hub = text_checks.checks()
+        self.act_marks = act("Show formatting marks (¶)", hub.set_marks_on,
+                             tip="Show ¶ at the end of each paragraph, ↵ at line breaks, · "
+                                 "for spaces and → for tabs in the text boxes (never "
+                                 "printed)")
+        self.act_marks.setCheckable(True)
+        self.act_marks.setChecked(hub.marks_on)
+        hub.marks_changed.connect(self._marks_switched)
+        view_menu.addAction(self.act_marks)
         view_menu.addSeparator()
         # (SPEC §13l.2) A preference of this computer, applied when the program starts.
         self.size_menu = view_menu.addMenu("Interface size")
@@ -879,6 +892,13 @@ class MainWindow(QMainWindow):
         return {str(self.project.folder): "<project folder>"} if self.project is not None else {}
 
     # ------------------------------------------------------------------ interface size (§13l.2)
+
+    def _marks_switched(self, on: bool) -> None:
+        """The ¶ button of a text box was switched: keep the View menu in step."""
+        if self.act_marks.isChecked() != on:
+            self.act_marks.blockSignals(True)
+            self.act_marks.setChecked(on)
+            self.act_marks.blockSignals(False)
 
     def choose_interface_size(self, percent: int) -> None:
         """View ▸ Interface size: saved on this computer, used from the next start; offers
@@ -3458,13 +3478,18 @@ class MainWindow(QMainWindow):
             self._save(dlg.remember)
         if self._preview is not None:
             self._preview.release()
-        result = run_compile(self, self.project, dlg.options())
-        if result is None:
-            return
-        self.statusBar().showMessage(f"SI compiled: {result.pdf}", 6000)
-        if dlg.open_pdf.isChecked():
-            open_file(result.pdf)
-        show_warnings(self, result, "SI compiled")
+        kind = dlg.output_format()   # PDF, Word or both (SPEC §13z)
+        for run in ((run_compile,) if kind == "pdf" else (run_word_compile,) if kind == "docx"
+                    else (run_compile, run_word_compile)):
+            if self.project is None or self.project.read_only:
+                return
+            result = run(self, self.project, dlg.options())
+            if result is None:
+                return
+            self.statusBar().showMessage(f"SI compiled: {result.pdf}", 6000)
+            if dlg.open_pdf.isChecked():
+                open_file(result.pdf)
+            show_warnings(self, result, "SI compiled")
 
     def preview_current(self) -> None:
         if self.project is None or self.project.read_only:

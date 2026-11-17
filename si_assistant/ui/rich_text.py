@@ -27,11 +27,12 @@ from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QMimeData, QPointF, QRectF, QSizeF, Qt, QTimer, QUrl, Signal
+import shiboken6
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QFont, QFontMetricsF,
                            QGuiApplication, QIcon, QImage, QImageReader, QKeySequence,
                            QPainter, QPalette, QPen, QPixmap, QPyTextObject, QTextBlockFormat,
                            QTextCharFormat, QTextCursor, QTextDocument, QTextFormat,
-                           QTextImageFormat)
+                           QTextImageFormat, QTextOption)
 from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMenu, QMessageBox,
                                QPushButton, QTextEdit, QToolBar, QToolButton, QVBoxLayout,
@@ -730,10 +731,25 @@ class RichTextEdit(QTextEdit):
         self.document().documentLayout().registerHandler(LINK_OBJECT, self._chip)
         self.currentCharFormatChanged.connect(self._leave_link_format)
         self._fixing_format = False
+        # The Chemical formula toggle subscripts a formula when a key ends the word after
+        # it. True while the last key typed was part of a word (no space or punctuation
+        # after it yet): leaving the box then ends the word (finish_word).
+        self._word_open = False
         self.document().blockCountChanged.connect(self._blocks_changed)
         # Red (spelling) and blue (chemistry formatting) underlines, SPEC §13k.1. They only
         # change how the text looks, never the stored markup.
         self.checks = text_checks.CheckHighlighter(self.document())
+
+    def show_marks(self, on: bool) -> None:
+        """Show (or hide) the formatting marks: ¶ at paragraph ends, ↵ at line breaks,
+        · for spaces, → for tabs (Qt draws them; the text itself is unchanged)."""
+        doc = self.document()
+        option = doc.defaultTextOption()
+        flags = option.flags()
+        marks = (QTextOption.Flag.ShowTabsAndSpaces
+                 | QTextOption.Flag.ShowLineAndParagraphSeparators)
+        option.setFlags(flags | marks if on else flags & ~marks)
+        doc.setDefaultTextOption(option)
 
     @property
     def base_size(self) -> float:
@@ -756,6 +772,7 @@ class RichTextEdit(QTextEdit):
     def set_markup(self, text: str) -> None:
         doc = self.document()
         doc.setUndoRedoEnabled(False)
+        self._word_open = False
         self.chip_labels = {}   # (the chips made now have the current labels)
         self.checks.setDocument(None)   # underline once at the end, not after every run
         doc.clear()
@@ -911,6 +928,37 @@ class RichTextEdit(QTextEdit):
             self._normalise_alignment()   # (Enter under a caption: a line of plain text)
         if word_end is not None:
             text_checks.subscript_formula(self.document(), word_end)
+        text = event.text()
+        self._word_open = (len(text) == 1 and text.isprintable()
+                           and text not in text_checks.WORD_ENDS and not self.isReadOnly()
+                           and not event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+
+    def finish_word(self) -> bool:
+        """End the word just typed as a space would (the Chemical formula toggle, SPEC
+        §13k.1b): when the box is left with Enter or Tab in a table, a click elsewhere or
+        OK, "K2CO3" typed last is subscripted too. True if anything changed."""
+        if not self._word_open:
+            return False
+        self._word_open = False
+        cursor = self.textCursor()
+        if (self.isReadOnly() or cursor.hasSelection() or not text_checks.checks().formula_on):
+            return False
+        return text_checks.subscript_formula(self.document(), cursor.position())
+
+    def forget_word(self) -> None:
+        """The text was changed around the word (e.g. its table cell moved): leave it."""
+        self._word_open = False
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        self._word_open = False   # (the cursor moves away from the word)
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        # Not for a menu or another window coming up (the user comes back to the word).
+        if event.reason() in (Qt.FocusReason.MouseFocusReason, Qt.FocusReason.TabFocusReason,
+                              Qt.FocusReason.BacktabFocusReason):
+            self.finish_word()
+        super().focusOutEvent(event)
 
     def _formula_word_end(self, event) -> int | None:
         """The Chemical formula toggle (SPEC §13k.1b): when this key ends a word (space,
@@ -1597,6 +1645,21 @@ class RichTextEditor(QWidget):
         self.formula_act.toggled.connect(hub.set_formula_on)
         hub.formula_changed.connect(self._formula_switched)
         self.toolbar.addAction(self.formula_act)
+        # Show formatting marks (¶): shared by every text box, remembered on this computer.
+        self.marks_act = QAction("¶", self)
+        self.marks_act.setCheckable(True)
+        self.marks_act.setChecked(hub.marks_on)
+        self.marks_act.setToolTip(
+            "Show formatting marks: ¶ at the end of each paragraph, ↵ at line breaks, "
+            "· for spaces and → for tabs (Ctrl+Shift+8). Only shown here, never printed. "
+            "Applies to every text box on this computer.")
+        self.marks_act.setShortcut(QKeySequence("Ctrl+Shift+8"))
+        self.marks_act.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self.marks_act.toggled.connect(hub.set_marks_on)
+        self.addAction(self.marks_act)
+        hub.marks_changed.connect(self._marks_switched)
+        self.edit.show_marks(hub.marks_on)
+        self.toolbar.addAction(self.marks_act)
         self._symbols_sep = self.toolbar.addSeparator()   # (Figure… and Table… go before it)
 
         sym_button = QToolButton(self)
@@ -1718,6 +1781,16 @@ class RichTextEditor(QWidget):
                     self.sub_act, *self.align_acts.values()):
             act.setEnabled(not read_only)
         self._sync_buttons()
+
+    def _marks_switched(self, on: bool) -> None:
+        """The ¶ toggle was switched (here, in another text box or the View menu)."""
+        if not shiboken6.isValid(self):
+            return
+        if self.marks_act.isChecked() != on:
+            self.marks_act.blockSignals(True)
+            self.marks_act.setChecked(on)
+            self.marks_act.blockSignals(False)
+        self.edit.show_marks(on)
 
     def _formula_switched(self, on: bool) -> None:
         """Another text box switched the Chemical formula toggle: show it here too."""

@@ -6,6 +6,53 @@ program's update check shows.)
 
 ## [Unreleased]
 
+- **Word export.** Compile SI ▸ **Save as** makes the SI as a **Word document**
+  (build/SI.docx), or as both a PDF and a Word document. The Word file has the same
+  content as the PDF: text, headings (Word's Heading styles), compound data, tables (Word
+  tables with merged cells and rules) and references are editable; structures, schemes and
+  spectra pages are pictures drawn exactly as in the PDF. Page numbers S1, S2…, the header
+  and footer, and the Text and tables settings are kept. Word fills in the table of
+  contents' page numbers when it opens the file.
+- **Page flow.** Headings no longer stay behind at the bottom of a page with only a line of
+  what follows: **Keep headings with** (2 lines by default) moves them on. A short bold or
+  italic line typed as a sub-heading is kept with what follows too. New settings in the
+  Compile window and Project settings ▸ Page: how hard to avoid single lines at page edges,
+  keeping each compound on one page, and whether a compound's data start a new paragraph,
+  a new line with no extra space, or run on after the procedure. Each section and compound
+  has a **Page breaks** button: start on a new page, keep together, or allow splitting.
+- **"et al." in the page header.** Project settings ▸ Page ▸ **{authors} shows**: all
+  names (as before) or **First author et al.**, e.g. "O'Hare et al." ("O'Hare and Smith"
+  for two authors).
+- **HRMS ion labels for salts.** Project settings ▸ Output ▸ **HRMS ion for salts** can
+  print a salt's ion as **[M−Br]⁺** (M = the whole salt) instead of [M]⁺ (M = the cation).
+  The counter-ion is recognised from the structure ([M−OTf]⁺, [M−BF₄]⁺, [M−2Br]²⁺,
+  [M−Na]⁻…); the m/z is the same either way. Each compound's HRMS field also has a
+  **Printed as** box for a label of your own. Atom counts in the printed ion are now
+  subscripted ([M+NH₄]⁺).
+- **Table and text formatting.** The table editor sets the **text size of selected
+  cells**, **column widths** (or "Fit columns to their text"), **Shrink to fit the page
+  width** for wide tables, and the table's **caption and footnote sizes**. Project settings
+  ▸ **Text and tables** sets the defaults for the whole SI: line spacing, space before and
+  after paragraphs, caption size, and the size of table cells, header rows (optionally
+  bold) and footnotes, with an option to apply them to every caption or table. A figure's
+  caption size is on its right-click menu; a scheme's in its Layout…. Projects that don't
+  use these print exactly as before.
+- **Show formatting marks.** A **¶** button in every text box (and View ▸ Show
+  formatting marks) shows paragraph marks, line breaks, spaces and tabs. Off by default.
+- **Structure on spectra: above, beside or in blank space** (issue #1). Spectra section ▸
+  Position: the structure and ID can now go **above** or **beside** each spectrum (the
+  spectrum is made a little smaller, so nothing is covered), or **in blank space (auto)**:
+  placed over the spectrum only where the paper is white, nearest the chosen corner, and
+  optionally made smaller to fit, down to a size you choose. Each spectrum can be set
+  differently on its compound's spectra page, which shows where the box will print.
+- **Two spectra per page** for new projects (issue #1). Existing projects keep their setting.
+- **Formulas in table cells** (issue #2): with H₂ on, "K2CO3" typed alone in a cell is now
+  subscripted when you press Enter or Tab or click another cell (before, only a space or
+  punctuation after it did). Copying table cells keeps their sub- and superscripts, bold
+  and italics.
+- **Figures without a number or caption** (issue #3): right-click a figure in a custom
+  section ▸ **Print without number and caption** prints just the picture; the other figures
+  are numbered as if it were not there.
 - **Heading numbers.** Project settings ▸ Output ▸ **Heading numbers**: as the journal
   style does, an **outline** (sections 1, 2, 3; the next level A, B, C; then a, b, c),
   1, 1.1, 1.1.1, or none, in any style. The outline and 1.1.1 also number the headings

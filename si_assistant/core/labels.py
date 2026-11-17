@@ -153,6 +153,8 @@ class Labels:
     items: list[LabelItem] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        # Figures printed without a number or caption (issue #3): not numbered, so not here.
+        self.unnumbered: set[str] = set()
         self.by_id: dict[str, LabelItem] = {}
         self.by_place: dict[tuple[str, int], LabelItem] = {}
         for item in self.items:
@@ -239,11 +241,12 @@ def compute(project, live: dict[str, str] | None = None) -> Labels:
     uses an editor's current (unsaved) text instead of the saved one."""
     from . import scheme_editor
     from .project import GENERAL_OWNER, SchemePage, TextOwner
-    from .project import FRONT_DIR, FRONT_TEXT_FILES, TEXT_CONTENT_FILE
+    from .project import FRONT_DIR, FRONT_TEXT_FILES, TEXT_CONTENT_FILE, figure_uncaptioned
     live = live or {}
     rules = label_rules(project.settings)
     counters = {k: 0 for k in KINDS}
     items: list[LabelItem] = []
+    unnumbered: set[str] = set()
     report = None
 
     def add(kind, item_id, owner, index, custom, where, caption, place, caption_markup=""):
@@ -264,6 +267,8 @@ def compute(project, live: dict[str, str] | None = None) -> Labels:
                 custom = _table_label(project.table_path(owner, item_id))
                 add("table", item_id, owner.key, index, custom, owner.name, _plain(caption),
                     place, caption)
+            elif kind == "figure" and figure_uncaptioned(figures.get(item_id)):
+                unnumbered.add(item_id)   # (printed without a number: the others don't skip)
             else:   # a figure, or an older picture paragraph (no ID yet)
                 custom = figures.get(item_id, {}).get("label", "") if kind == "figure" else ""
                 add("figure", item_id if kind == "figure" else "", owner.key, index, custom,
@@ -324,4 +329,6 @@ def compute(project, live: dict[str, str] | None = None) -> Labels:
                                                                    else ""))
                     for x in getattr(project, "anchored", {}).get(c.id, []):
                         xray(x, f"{section.name} ▸ {shown} ▸ {x.name}")
-    return Labels(items)
+    labels = Labels(items)
+    labels.unnumbered = unnumbered
+    return labels

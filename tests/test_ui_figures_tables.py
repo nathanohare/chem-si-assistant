@@ -142,7 +142,8 @@ def test_remove_figure_goes_to_trash(setup, monkeypatch):
                         lambda *a, **k: QMessageBox.StandardButton.Yes)
     menu = text_objects.object_menu(edit, "figure", f1)
     assert [a.text() for a in menu.actions() if a.text()] == [
-        "Edit label…", "Printed size…", "Replace picture with a file…",
+        "Edit label…", "Printed size…", "Caption size…", "Print without number and caption",
+        "Replace picture with a file…",
         "Replace picture with the copied picture", "Remove figure (picture to the Trash)"]
     text_objects.remove_object(edit, "figure", f1)
     assert "!figure" not in edit.markup()

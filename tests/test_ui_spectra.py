@@ -25,7 +25,8 @@ def test_the_page_saves_the_defaults(sample):
     panel = SpectraSectionPanel(p, parts["spectra"])
     saved = []
     panel.saved.connect(saved.append)
-    assert panel.values() == S.DEFAULTS                  # the defaults as stored
+    # (the defaults as stored: a new project prints two spectra on a page)
+    assert panel.values() == {**S.DEFAULTS, "per_page": S.NEW_PROJECT_PER_PAGE}
     assert not panel.id_size.isEnabled() and not panel.struct_colour.isEnabled()
     panel.per_page.setCurrentIndex(panel.per_page.findData(4))
     panel.orientation.setCurrentIndex(panel.orientation.findData("landscape"))
@@ -104,13 +105,13 @@ def test_the_main_window_adds_and_protects_the_section(qapp, tmp_path, monkeypat
                         lambda *a: QSettings(str(tmp_path / "prefs.ini"), QSettings.Format.IniFormat))
     p = Project.create(tmp_path, "Old")            # an older project: no Spectra section
     data = p.add_section("data", "Products")
-    p.settings["spectra_per_page"] = 2
+    p.settings["spectra_per_page"] = 4
     p.save_settings()
     win = mw.MainWindow()
     win.prefs.user_name = "Tester"
     assert win.open_project(p.folder)
     spectra = win.project.spectra_section
-    assert spectra is not None and win.project.spectra_defaults()["per_page"] == 2
+    assert spectra is not None and win.project.spectra_defaults()["per_page"] == 4
     assert win._current() == ("section", data.id)        # still opens on the first section
     item = win._find_item("section", spectra.id)
     assert item is not None and "not deleted" in item.toolTip(0)

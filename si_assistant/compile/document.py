@@ -28,7 +28,7 @@ from datetime import date
 from pathlib import Path
 
 from .. import resources
-from ..core import chem, headings
+from ..core import chem, formatting, headings
 from ..core import drawing_scale
 from ..core import fields as F
 from ..core import front
@@ -36,16 +36,18 @@ from ..core.ids import is_device_name
 from ..core import labels as label_rules
 from ..core import ms_reports
 from ..core import page as page_setup
+from ..core import page_flow
 from ..core import scheme_editor
 from ..core import spectra as spectra_mod
 from ..core.markup import Paragraph, Run, mention_kind, parse
 from ..core.project import (BUILD_DIR, GENERAL_OWNER, SPECTRA_SECTION, Compound, Project,
-                            SchemePage, Section, TextOwner, figure_width_cm)
+                            SchemePage, Section, TextOwner, figure_uncaptioned,
+                            figure_width_cm)
 from ..core.tables import Table
 from ..core.references import to_hayagriva
 from .blocks import CompoundBlock, compound_block, gp_sentence
 from .reaction_scheme import editor_scheme
-from .text import (aligned_object, format_chemistry, format_nmr, leave_alone,
+from .text import (BROKEN_MENTION, aligned_object, format_chemistry, format_nmr, leave_alone,
                    paragraphs_to_typst, resolve_links, runs_to_typst, typst_label, typst_string)
 
 STYLES_DIR = resources.resource("styles")
@@ -529,7 +531,7 @@ class Builder:
         # Worked out once in this build (a Builder makes one build, so nothing goes stale):
         # a compound's structure code, drawn for its block and again on each spectrum, and
         # pictures converted to PNG.
-        self._structure_codes: dict[tuple, str | None] = {}
+        self._structure_codes: dict[tuple, tuple[str, float, float] | None] = {}
         self._generic_noted: set[str] = set()   # (compounds whose generic atom is noted)
         # (structure.mol unreadable: the note said for each compound, and whether it says
         # the drawing was left out too)
@@ -543,6 +545,10 @@ class Builder:
         # Auto-crop (SPEC §13k.12.8): where each spectrum page's content is, measured by
         # the UI layer (it needs Qt) and remembered in build/crop_cache.json.
         self.crops = spectra_mod.CropCache(project)
+        # Auto placement of the structure on a spectrum (issue #1): where each spectrum
+        # page has ink, measured by the UI layer (Qt) and kept in build/ink_cache.json.
+        self.inks = spectra_mod.InkCache(project)
+        self.auto_unplaced: list[str] = []   # spectra with no blank space for the box
         self.spectra_compounds: list[Compound] = []   # compounds the Spectra section prints
         self.ref_ids = {r["id"] for r in project.references}
         self.cited = False   # any citation printed → add the References section
@@ -560,12 +566,19 @@ class Builder:
         self.link_back = self.nmr_links and bool(links.get("link_back"))
         self.link_style = str(links.get("link_style", "plain"))
         self.placed_labels: set[str] = set()   # Typst labels put in (each only once)
+        # How text flows over pages (headings kept with what follows, compounds kept
+        # together…: core/page_flow.py, SPEC §13k.2b).
+        self.flow = page_flow.flow_settings(project.settings)
+        self._unnumbered_mentioned = 0   # mentions of figures printed without a number
 
     # ------------------------------------------------------------------ links
 
     def mention_text(self, item_id: str) -> str | None:
         """A compound's current ID, or a figure's, table's or scheme's label."""
         if mention_kind(item_id) != "compound":
+            if item_id in self.labels.unnumbered:
+                self._unnumbered_mentioned += 1
+                return BROKEN_MENTION
             return self.labels.label(item_id)
         try:
             self.project.compound(item_id)
@@ -576,7 +589,12 @@ class Builder:
     def links(self, runs: list[Run], where: str) -> list[Run]:
         """Mentions → current IDs, citations checked (SPEC §7.5, §9.5)."""
         problems: list[str] = []
+        self._unnumbered_mentioned = 0
         out = resolve_links(runs, self.mention_text, self.ref_ids, problems)
+        if self._unnumbered_mentioned:
+            problems.append("A mention points to a figure printed without a number or "
+                            "caption (printed as “??”): give the figure its number back "
+                            "(right-click it) or take the mention out.")
         for p in dict.fromkeys(problems):
             self.warnings.append(f"{where}: {p}")
         if any(r.ref for r in out):
@@ -749,6 +767,12 @@ class Builder:
         natural size (a pasted vector picture: at the project's bond length) but no bigger
         than `max_in`, then times `scale`. Worked out once per size in a build (it is shown
         with the compound and again on each of its spectra)."""
+        found = self.structure_image_sized(compound, max_in, scale)
+        return found[0] if found else None
+
+    def structure_image_sized(self, compound: Compound, max_in, scale: float = 1.0
+                              ) -> tuple[str, float, float] | None:
+        """structure_image with its printed size: (code, width_in, height_in) or None."""
         key = (compound.id, tuple(max_in), float(scale))
         if key not in self._structure_codes:
             self._structure_codes[key] = self._structure_image(compound, max_in, scale)
@@ -802,7 +826,8 @@ class Builder:
                 "calculated m/z).")
         return atoms
 
-    def _structure_image(self, compound: Compound, max_in, scale: float) -> str | None:
+    def _structure_image(self, compound: Compound, max_in, scale: float
+                         ) -> tuple[str, float, float] | None:
         self._note_generic(compound)   # (also when its pasted picture is printed)
         picture = self.project.structure_image_path(compound)
         if picture is not None and picture.exists():
@@ -811,13 +836,13 @@ class Builder:
         if self.options.structures == "pictures" and picture is not None and picture.exists():
             img = self.image(picture, max_in, **sized)
             if img:
-                return img[0]
+                return img
         if not self.structure_readable(compound):
             # (said in the notes; its picture, if it has one, is printed instead)
             if picture is not None and picture.exists():
                 img = self.image(picture, max_in, **sized)
                 if img:
-                    return img[0]
+                    return img
             self._note_unreadable(compound, drawing_left_out=True)
             return None
         try:
@@ -829,7 +854,7 @@ class Builder:
             if picture is not None and picture.exists():  # a picture but no structure
                 img = self.image(picture, max_in, **sized)
                 if img:
-                    return img[0]
+                    return img
             if not self.project.generic_structure_atoms(compound):
                 return None
             # A generic atom (R, X, e.g. a general structure): drawn as it is, as on the
@@ -846,7 +871,7 @@ class Builder:
         svg.write_text(text, encoding="utf-8")
         self.svg_sizes[svg] = size
         img = self.image(svg, max_in, scale=scale)
-        return img[0] if img else None
+        return img or None
 
     # ------------------------------------------------------------------ pieces
 
@@ -949,7 +974,8 @@ class Builder:
             if p is None or p.is_object:
                 if run_of_text:
                     out.append(paragraphs_to_typst(run_of_text, heading_offset, outlined_levels,
-                                                   numbered_headings))
+                                                   numbered_headings,
+                                                   keep_lines=self.flow.emphasis_lines))
                     run_of_text = []
                 if p is None:
                     continue
@@ -960,10 +986,12 @@ class Builder:
                     out.append(aligned_object(self.table(owner, p.table, label, p.runs, where),
                                               p.stored_align))
                     continue
-                path, width_cm = None, None
+                path, width_cm, bare = None, None, False
                 if p.figure and owner is not None:
                     path = self.project.figure_path(owner, p.figure)
-                    width_cm = figure_width_cm(self.project.figures(owner).get(p.figure, {}))
+                    entry = self.project.figures(owner).get(p.figure, {})
+                    width_cm = figure_width_cm(entry)
+                    bare = figure_uncaptioned(entry)
                     if path is None:
                         self.warnings.append(f"{where}: a figure's picture is no longer in the "
                                              "project; left out.")
@@ -976,8 +1004,14 @@ class Builder:
                                             9.0), natural=False)
                 else:
                     img = self.image(path, (TEXT_WIDTH_IN, 7.0))
-                if img:
-                    out.append(aligned_object(self.inline_figure(img[0], p.runs, label),
+                size = (self.project.figures(owner).get(p.figure, {}).get("caption_size")
+                        if p.figure and owner is not None else None)
+                if img and bare:   # just the picture: no number, no caption (issue #3)
+                    where_to = p.stored_align if p.stored_align in ("left", "right") else "center"
+                    out.append(f"#block(width: 100%, breakable: false, "
+                               f"align({where_to}, {img[0]}))")
+                elif img:
+                    out.append(aligned_object(self.inline_figure(img[0], p.runs, label, size),
                                               p.stored_align))
             else:
                 run_of_text.append(p)
@@ -988,11 +1022,14 @@ class Builder:
         body = runs_to_typst(caption)
         return f"[{body}]" if body.strip() else "none"
 
-    def inline_figure(self, code: str, caption: list[Run], label: str = "") -> str:
-        """A figure: a picture in a text, or a file shown inline with a compound."""
+    def inline_figure(self, code: str, caption: list[Run], label: str = "",
+                      caption_size: float | None = None) -> str:
+        """A figure: a picture in a text, or a file shown inline with a compound.
+        `caption_size`: its own caption size in pt (None = the document's)."""
         self.kinds["si-figure"] += 1
-        return (f"#si-figure({code}, [{runs_to_typst([Run(label or 'Figure')])}], "
-                f"{self.caption_code(caption)})")
+        return formatting.caption_size_code(
+            f"#si-figure({code}, [{runs_to_typst([Run(label or 'Figure')])}], "
+            f"{self.caption_code(caption)})", caption_size)
 
     def cell_text(self, text: str, where: str) -> str:
         """A table cell or footnote: its paragraphs on separate lines."""
@@ -1021,15 +1058,21 @@ class Builder:
         # a page or the table editor's "may run over a page break" is ticked (`breakable`); then
         # it continues on the next page with its header rows repeated.
         split = ", split: true" if table.breakable else ""
-        return (f"#si-table({self.table_code(table, where, folder)}, "
+        code = (f"#si-table({self.table_code(table, where, folder)}, "
                 f"{self.notes_code(table, where)}, "
                 f"[{runs_to_typst([Run(label or 'Table')])}], {self.caption_code(caption)}"
                 f"{split})")
+        # A caption size of its own (table editor), else the document's (set in document()).
+        return formatting.caption_size_code(code, table.caption_size)
 
     def notes_code(self, table: Table, where: str) -> str:
         notes = [self.cell_text(n, where) for n in table.footnotes]
         notes = [n for n in notes if n]
-        return "[" + "#linebreak()".join(notes) + "]" if notes else "none"
+        if not notes:
+            return "none"
+        size = table.notes_size if table.notes_size is not None \
+            else formatting.table_defaults(self.project.settings)["notes_size"]
+        return "[" + formatting.text_size_code("#linebreak()".join(notes), size) + "]"
 
     def cell_picture(self, cell, folder: Path | None, where: str) -> str:
         """A table cell's picture (core/tables.py) as Typst image(...), at its own size (or
@@ -1064,7 +1107,9 @@ class Builder:
                 cell.rowspan = min(cell.rowspan, header - r)
         t.normalize()
 
-        def cell_code(cell) -> str:
+        defaults = formatting.table_defaults(self.project.settings)
+
+        def cell_code(cell, in_header: bool = False) -> str:
             args = []
             if cell.colspan > 1:
                 args.append(f"colspan: {cell.colspan}")
@@ -1076,18 +1121,35 @@ class Builder:
             picture = self.cell_picture(cell, folder, where)
             if picture:   # the picture above the text (e.g. a structure with its name)
                 text = f"#{picture}" + (f"#linebreak(){text}" if text else "")
+            # Its own size (selected cells in the table editor), else the header rows' or
+            # the cells' default (Project settings ▸ Text and tables).
+            size = cell.size if cell.size is not None else (
+                defaults["header_size"] if in_header else None)
+            text = formatting.text_size_code(text, size, in_header and defaults["header_bold"])
             body = f"[{text}]"
             return f"table.cell({', '.join(args)}){body}" if args else body
 
-        head = [cell_code(cell) for r, _c, cell in t.cells() if r < header]
+        head = [cell_code(cell, True) for r, _c, cell in t.cells() if r < header]
         body = [cell_code(cell) for r, _c, cell in t.cells() if r >= header]
         aligns = ", ".join(f"{a} + horizon" for a in t.columns)
-        parts = [f"columns: {t.n_cols}", f"align: ({aligns},)", "stroke: none",
+        if any(w is not None for w in t.widths):   # widths typed in the table editor (cm)
+            columns = "(" + ", ".join("auto" if w is None else f"{w:g}cm"
+                                      for w in t.widths) + ",)"
+        else:
+            columns = str(t.n_cols)
+        parts = [f"columns: {columns}", f"align: ({aligns},)", "stroke: none",
                  "table.hline(stroke: 0.8pt)"]
         if head:
             parts += ["table.header(" + ", ".join(head) + ")", "table.hline(stroke: 0.5pt)"]
         parts += body + ["table.hline(stroke: 0.8pt)"]
-        return "table(" + ", ".join(parts) + ")"
+        code = "table(" + ", ".join(parts) + ")"
+        if defaults["size"] is not None:   # the cells' default size (header rows too)
+            code = f"{{ set text(size: {defaults['size']:g}pt); {code} }}"
+        if t.fit_width:   # shrunk (text and all) to the text width when wider
+            code = ("layout(room => { let t = " + code + "; let w = measure(t).width; "
+                    "if w > room.width { scale(room.width / w * 100%, reflow: true, t) } "
+                    "else { t } })")
+        return code
 
     def text_section(self, section: Section, level: int = 1) -> str:
         """A custom section: its heading at `level` (its depth in the tree), then its text,
@@ -1130,7 +1192,8 @@ class Builder:
                 out.append("#pagebreak(weak: true)")
             out.append(f"#align(center, {code})")
         if caption:
-            out.append(f"#align(center, text(size: 10pt)[{runs_to_typst([Run(caption)])}])")
+            size = formatting.formatting(self.project.settings)["caption_size"] or 10
+            out.append(f"#align(center, text(size: {size:g}pt)[{runs_to_typst([Run(caption)])}])")
         return "\n\n".join(out)
 
     def page_aspect(self, path: Path, page: int | None) -> float | None:
@@ -1197,6 +1260,24 @@ class Builder:
             img = self.structure_image(compound, STRUCTURE_MAX)
             if img:
                 out.append(f"#si-structure({img})")
+        where = self.compound_notes(compound, block, display_id)
+        out.append(paragraphs_to_typst(self.link_paragraphs(block.paragraphs, where),
+                                       heading_offset=level, outlined_levels=0,
+                                       keep_lines=self.flow.emphasis_lines))
+        for index, fig in enumerate(block.figures):
+            img = self.image(fig.path, (TEXT_WIDTH_IN, 4.0))
+            item = self.labels.at(compound.id, index)
+            if img:
+                caption = [Run(fig.caption)]
+                if self.options.format_text:
+                    caption = format_chemistry(caption)
+                out.append(self.inline_figure(img[0], caption, item.label if item else ""))
+        return self.with_page_flow("\n\n".join(x for x in out if x), compound.data,
+                                   self.flow.keep_compounds)
+
+    def compound_notes(self, compound: Compound, block: CompoundBlock, display_id: str) -> str:
+        """The compile notes about a compound's block (its general procedure sentence, a
+        missing ID); returns how the notes name it. Also used by the Word export."""
         where = f"{display_id} ({compound.name})" if compound.name else display_id
         if not block.custom_text:
             problems: list[str] = []
@@ -1209,19 +1290,24 @@ class Builder:
                     and self.project.compound_gp(compound) is None):
                 self.warnings.append(f"{where}: its general procedure no longer exists; the "
                                      "“Prepared according to…” sentence was left out.")
-        out.append(paragraphs_to_typst(self.link_paragraphs(block.paragraphs, where),
-                                       heading_offset=level, outlined_levels=0))
-        for index, fig in enumerate(block.figures):
-            img = self.image(fig.path, (TEXT_WIDTH_IN, 4.0))
-            item = self.labels.at(compound.id, index)
-            if img:
-                caption = [Run(fig.caption)]
-                if self.options.format_text:
-                    caption = format_chemistry(caption)
-                out.append(self.inline_figure(img[0], caption, item.label if item else ""))
         if display_id == "ID?":
             self.warnings.append(f"“{compound.name or 'A compound'}” has no ID (printed as “ID?”).")
-        return "\n\n".join(x for x in out if x)
+        return where
+
+    @staticmethod
+    def with_page_flow(code: str, data: dict, keep_default: bool) -> str:
+        """A compound's or section's own page flow (core/page_flow.py): on a new page
+        and/or kept on one page when it fits."""
+        if not code:
+            return code
+        # (something that starts a page of its own inside, e.g. a sub-section on a new
+        # page or a many-page attachment, runs over pages anyway: Typst allows no page
+        # break inside a kept-together block)
+        if page_flow.keeps_together(data, keep_default) and "#pagebreak" not in code:
+            code = f"#si-together[\n{code}\n]"
+        if page_flow.item_flow(data)["new_page"]:
+            code = PAGE_BREAK + "\n\n" + code
+        return code
 
     def scheme(self, scheme: SchemePage, level: int = 2) -> str:
         # Made with the scheme editor (SPEC §13n.4): laid out by the style.
@@ -1356,7 +1442,14 @@ class Builder:
             out.append(self.section_block(child, level + 1, compounds, skip, lead))
             lead = ""
         out.append(lead)   # (only when there was no sub-section to take it)
-        return "\n\n".join(x for x in out if x)
+        code = "\n\n".join(x for x in out if x)
+        if section.type == SPECTRA_SECTION:   # (always starts a page of its own)
+            return code
+        data = section.data
+        if any(s.type == SPECTRA_SECTION for s in self.project.subtree(section)):
+            # (the spectra pages are never squeezed onto one page with the rest)
+            data = {page_flow.KEY: {**page_flow.item_flow(data), "keep": "split"}}
+        return self.with_page_flow(code, data, False)
 
     # ------------------------------------------------------------------ spectra (SPEC §13k.12)
 
@@ -1563,7 +1656,8 @@ class Builder:
         if crop:
             args.append("crop: (" + ", ".join(f"{v:.4f}" for v in crop) + ")")
         if eff["struct_box"]:   # (it can be left off a spectrum: "Structure + ID")
-            args += self.structure_box_args(compound, sp.item, eff)
+            args += self.structure_box_args(compound, sp.item,
+                                            self.placed(sp, eff, aspect, crop))
         if eff["spectrum_frame"]:
             args.append(f"frame: {eff['spectrum_frame_width']:g}pt + "
                         f"rgb({typst_string(eff['spectrum_frame_color'])})")
@@ -1574,6 +1668,43 @@ class Builder:
         if nucleus and self.place_label(self.spectrum_label(compound, nucleus)):
             code = f"[#metadata(none) <{self.spectrum_label(compound, nucleus)}>#{code}]"
         return code
+
+    def placed(self, sp: spectra_mod.Spectrum, eff: dict, aspect: float | None,
+               crop) -> dict:
+        """`eff` with the structure + ID box's place worked out: "auto" becomes a position
+        on blank paper (and perhaps a smaller structure), or "above" if there is none. A
+        box dragged by hand stays where it was put."""
+        if eff["struct_place"] != "auto" or ("x" in eff and "y" in eff):
+            return eff
+        style = str(self.project.settings.get("journal_style") or "ACS")
+        slot = spectra_mod.slot_size_in(style, eff["per_page"], eff["orientation"])
+        shown = spectra_mod.shown_size_in(slot, aspect, crop, header=eff["header_line"])
+        # (the table of contents preview only counts pages: no new measuring for it)
+        counting = self.options.only is not None and self.options.only[0] == "front"
+        ink = self.inks.ink(sp.path, sp.page, measure=not counting)
+        spot = None
+        if ink is not None:
+            id_text = self.report.display_id(sp.compound.id)
+            id_pt = eff["id_size"] or spectra_mod.STYLE_TEXT_PT.get(style, 11.0)
+            caption = (spectra_mod.caption_text(sp.compound, sp.item)
+                       if eff["caption"] else "")
+
+            def box_at(scale: float) -> tuple[float, float]:
+                found = self.structure_image_sized(sp.compound, spectra_mod.STRUCTURE_BOX_IN,
+                                                   scale=scale)
+                return spectra_mod.box_size_in(found[1:] if found else None, id_text, id_pt,
+                                               caption, eff["caption_size"])
+
+            spot = spectra_mod.auto_place(spectra_mod.crop_ink(ink, crop), shown, box_at,
+                                          eff["struct_scale"], eff["corner"],
+                                          eff["auto_shrink"], eff["auto_min_scale"])
+        if spot is None:
+            if not counting:
+                self.auto_unplaced.append(
+                    f"{self.report.display_id(sp.compound.id)} ({sp.item.get('file', '')}"
+                    f"{f', page {sp.page}' if sp.page else ''})")
+            return {**eff, "struct_place": "above"}
+        return {**eff, "x": spot[0], "y": spot[1], "struct_scale": spot[2]}
 
     def structure_box_args(self, compound: Compound, item: dict, eff: dict) -> list[str]:
         """The si-spectrum arguments for the structure + ID box on a spectrum."""
@@ -1588,8 +1719,10 @@ class Builder:
             caption = f"[{runs_to_typst(runs)}]"
         args = [f"structure: {structure}", f"id: [{display_id}]", f"caption: {caption}",
                 f"corner: {CORNERS[eff['corner']]}"]
-        if "x" in eff and "y" in eff:   # dragged to a place of its own
+        if "x" in eff and "y" in eff:   # dragged to a place of its own (or placed: auto)
             args.append(f"pos: ({eff['x']:.4f}, {eff['y']:.4f})")
+        elif eff["struct_place"] in spectra_mod.OUTSIDE_PLACES:
+            args.append(f"spot: {typst_string(eff['struct_place'])}")
         if eff["struct_frame"]:
             args.append(f"box-stroke: {eff['struct_frame_width']:g}pt + "
                         f"rgb({typst_string(eff['struct_frame_color'])})")
@@ -1608,6 +1741,20 @@ class Builder:
         settings (the Spectra section's defaults, then its own) give how many share a page
         and the page's orientation; a spectrum that needs another layout starts a new
         page. `heading` (Typst) goes at the top of the first page. "" if there are none."""
+        out = []
+        for i, (orientation, per_page, slots) in enumerate(self.spectra_page_list(compounds,
+                                                                                  limit)):
+            landscape = "true" if orientation == "landscape" else "false"
+            top = heading + "\n" if heading and i == 0 else ""
+            out.append(f"#page(flipped: {landscape})[\n{top}"
+                       f"#si-spectra-page({per_page}, {landscape}, ({', '.join(slots)},))\n]")
+        return "\n\n".join(out)
+
+    def spectra_page_list(self, compounds: list[Compound],
+                          limit: int = 0) -> list[tuple[str, int, list[str]]]:
+        """The spectra pages of `compounds` (spectra_pages): (orientation, spectra per page,
+        each spectrum's si-spectrum code) for each page. Also used by the Word export
+        (compile/word.py), which prints each page as a picture."""
         defaults = self.project.spectra_defaults()
         entries: list[spectra_mod.Spectrum] = []
         problems: list[str] = []
@@ -1636,13 +1783,7 @@ class Builder:
                     or len(pages[-1][2]) >= per_page):
                 pages.append((orientation, per_page, []))
             pages[-1][2].append(code)
-        out = []
-        for i, (orientation, per_page, slots) in enumerate(pages):
-            landscape = "true" if orientation == "landscape" else "false"
-            top = heading + "\n" if heading and i == 0 else ""
-            out.append(f"#page(flipped: {landscape})[\n{top}"
-                       f"#si-spectra-page({per_page}, {landscape}, ({', '.join(slots)},))\n]")
-        return "\n\n".join(out)
+        return pages
 
     def spectra_of_preview(self, compounds: list[Compound]) -> str:
         """The spectra shown after a compound, scheme or section in the toolbar Preview."""
@@ -1697,7 +1838,10 @@ class Builder:
         parts = ['#import "style.typ": *',
                  f"#show: si-doc.with(title: {typst_string(str(p.settings.get('title') or ''))}, "
                  f"{self.page_args()})",
-                 headings.typst_set_rule(p.settings)]   # (Project settings ▸ Heading numbers)
+                 headings.typst_set_rule(p.settings),   # (Project settings ▸ Heading numbers)
+                 # (Project settings ▸ Text and tables: line and paragraph spacing, captions)
+                 formatting.typst_rules(p.settings),
+                 page_flow.typst_definitions(self.flow)]   # (Page flow, SPEC §13k.2b)
         if self.nmr_links:
             parts.append(link_definition(self.link_style))
         if self.options.only is None:
@@ -1824,18 +1968,31 @@ def page_marker(label: str) -> str:
 
 
 
+def note_auto_unplaced(b: Builder) -> None:
+    """The note for spectra whose "auto" structure found no blank space (issue #1)."""
+    if b.auto_unplaced:
+        shown = ", ".join(b.auto_unplaced[:8]) + (", …" if len(b.auto_unplaced) > 8 else "")
+        b.warnings.append(
+            f"Structure position “auto”: no blank space was big enough for the structure and "
+            f"ID on {len(b.auto_unplaced)} spectrum page(s), so they were put above the "
+            f"spectrum instead: {shown}. Tick “Shrink to fit”, choose a smaller structure "
+            "size, or place them by hand on the compound's spectra page.")
+
+
 def build(project: Project, options: CompileOptions, image_info, converter=None,
           name: str = "SI", folder: Path | None = None, root: Path | None = None,
-          crop=None) -> BuildResult:
+          crop=None, ink=None) -> BuildResult:
     """Write build/<name>.typ (+ style.typ, assets/ for SI.typ or assets-<name>/ for other
     names), or into `folder` with Typst root `root` (see Builder). Returns the path, any
     warnings and whether it is empty.
     `crop(path, page) -> (left, top, right, bottom) | None` finds a spectrum page's
     content for auto-crop (supplied by the UI layer, which has Qt; without it spectra are
-    not cropped)."""
+    not cropped). `ink(path, page)` -> its ink map (core/spectra.ink_map_of), for the
+    structure's auto placement (without it, "auto" puts the structure above the spectrum)."""
     b = Builder(project, options, image_info, folder, root, name=name)
     b.converter = converter
     b.crops.detect = crop
+    b.inks.detect = ink
     b.build.mkdir(parents=True, exist_ok=True)
     if b.assets.exists():
         shutil.rmtree(b.assets, ignore_errors=True)
@@ -1850,6 +2007,8 @@ def build(project: Project, options: CompileOptions, image_info, converter=None,
     with leave_alone(project.dictionary_words()):   # words to print as written (§13k.1ai)
         source = b.document()
     b.crops.save()
+    b.inks.save()
+    note_auto_unplaced(b)
     typ = b.build / f"{name}.typ"
     typ.write_text(source, encoding="utf-8")
     return BuildResult(typ, b.warnings, b.empty, b.last_page_label)

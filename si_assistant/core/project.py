@@ -40,6 +40,7 @@ from . import lock as lockmod
 from . import ms_reports
 from . import references as refs
 from . import spectra as spectra_mod
+from . import formatting
 from . import undo
 from .compound_ids import IdReport, SectionIds, check_ids
 from . import fileio
@@ -420,6 +421,9 @@ class Project:
         fileio.make_dirs(folder)
         (folder / SECTIONS_DIR).mkdir(exist_ok=True)
         settings = default_settings(name)
+        # New projects print two spectra on a page (issue #1); older projects keep their
+        # one. Carried into the Spectra section when it is added (ensure_spectra_section).
+        settings["spectra_per_page"] = spectra_mod.NEW_PROJECT_PER_PAGE
         atomic_write_json(folder / PROJECT_FILE, {
             "format_version": FORMAT_VERSION, SAVED_BY_KEY: _program_version(), **settings,
             "section_tree": [],
@@ -3604,6 +3608,83 @@ class Project:
             entry["width"] = round(float(width_cm), 2)
         self._set_figure_entry(owner, figure_id, entry)
 
+    def set_figure_captioned(self, owner: TextOwner, figure_id: str, captioned: bool) -> None:
+        """Print a figure with its number and caption (the usual), or without either: just
+        the picture, not counted when the figures are numbered (issue #3)."""
+        entry = self.figures(owner).get(figure_id)
+        if entry is None:
+            raise ProjectError("This figure's picture is no longer in the project.")
+        if captioned:
+            entry.pop(UNCAPTIONED_KEY, None)
+        else:
+            entry[UNCAPTIONED_KEY] = True
+        self._set_figure_entry(owner, figure_id, entry)
+
+    def set_figure_caption_size(self, owner: TextOwner, figure_id: str,
+                                size_pt: float | None) -> None:
+        """Print this figure's caption at `size_pt` (None = the document's caption size,
+        Project settings ▸ Text and tables)."""
+        entry = self.figures(owner).get(figure_id)
+        if entry is None:
+            raise ProjectError("This figure's picture is no longer in the project.")
+        size = formatting.clean_size(size_pt)
+        if size is None:
+            entry.pop("caption_size", None)
+        else:
+            entry["caption_size"] = size
+        self._set_figure_entry(owner, figure_id, entry)
+
+    def clear_caption_sizes(self) -> int:
+        """Project settings ▸ Text and tables ▸ "apply to every caption": every table,
+        figure and scheme given a caption size of its own goes back to the document's.
+        Returns how many were changed."""
+        from . import scheme_editor as se
+        changed = 0
+        for owner in self.text_owners():
+            for table_id in self.table_ids(owner):
+                table = self.read_table(owner, table_id)
+                if table is not None and table.caption_size is not None:
+                    table.caption_size = None
+                    self.write_table(owner, table)
+                    changed += 1
+            for figure_id, entry in self.figures(owner).items():
+                if "caption_size" in entry:
+                    entry.pop("caption_size")
+                    self._set_figure_entry(owner, figure_id, entry)
+                    changed += 1
+        for scheme in self.all_schemes():
+            data = scheme.data.get(se.EDITOR_KEY)
+            layout = data.get("layout") if isinstance(data, dict) else None
+            if isinstance(layout, dict) and "caption_size_pt" in layout:
+                layout.pop("caption_size_pt")
+                if not layout:
+                    data.pop("layout")
+                self.save_scheme(scheme)
+                changed += 1
+        defaults = self.settings.get(se.PROJECT_KEY)
+        if isinstance(defaults, dict):
+            defaults.pop("caption_size_pt", None)
+        return changed
+
+    def clear_table_sizes(self) -> int:
+        """Project settings ▸ Text and tables ▸ "apply to every table": text sizes set for
+        single cells and footnote sizes set for single tables are removed, so every table
+        follows the document's defaults. Returns how many tables were changed."""
+        changed = 0
+        for owner in self.text_owners():
+            for table_id in self.table_ids(owner):
+                table = self.read_table(owner, table_id)
+                if table is None:
+                    continue
+                sized = [cell for _r, _c, cell in table.cells() if cell.size is not None]
+                if sized or table.notes_size is not None:
+                    for cell in sized:
+                        cell.size = None
+                    table.notes_size = None
+                    self.write_table(owner, table)
+                    changed += 1
+        return changed
+
     def _set_figure_entry(self, owner: TextOwner, figure_id: str, entry: dict | None) -> None:
         data = self._owner_data(owner)
         figures = data.get("figures") if isinstance(data.get("figures"), dict) else {}
@@ -3664,6 +3745,8 @@ class Project:
                                self.figure_source(owner, figure_id))
         self.add_figure(owner, source, data, ext, vector, vector_ext,
                         entry.get("label", ""), figure_id, figure_width_cm(entry))
+        if figure_uncaptioned(entry):   # (a new picture keeps "no number or caption")
+            self.set_figure_captioned(owner, figure_id, False)
 
     def remove_figure(self, owner: TextOwner, figure_id: str, caption: str = "") -> TrashEntry | None:
         """Send a figure's picture (and ChemDraw original) to the Trash. The editor takes its
@@ -4044,6 +4127,16 @@ def picture_source_path(picture: Path | None) -> Path | None:
         if candidate != picture and candidate.exists():
             return candidate
     return None
+
+
+# A figure printed without its number and caption (issue #3): "uncaptioned": true in its
+# entry in the owner's JSON ("figures": {id: {...}}).
+UNCAPTIONED_KEY = "uncaptioned"
+
+
+def figure_uncaptioned(entry) -> bool:
+    """Whether a figure entry says to print the picture without a number or caption."""
+    return isinstance(entry, dict) and entry.get(UNCAPTIONED_KEY) is True
 
 
 def figure_width_cm(entry: dict) -> float | None:

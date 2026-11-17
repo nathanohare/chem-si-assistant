@@ -22,6 +22,7 @@ size times "structure size in conditions".
 from __future__ import annotations
 
 from ..core import scheme_editor as se
+from ..core import formatting
 from ..core.markup import Run, parse
 from .text import format_chemistry, runs_to_typst, typst_string
 
@@ -211,7 +212,20 @@ class SchemeWriter:
             parts.append(code)
         return ", ".join(parts)
 
-    def code(self) -> str:
+    def caption(self) -> tuple[str, list[Run]] | None:
+        """The scheme's label and caption ("Scheme S1", its name) when its "Label and
+        caption" is on, else None."""
+        if not self.layout["show_label"]:
+            return None
+        b = self.b
+        caption = [Run(self.scheme.name)]
+        if b.options.format_text:
+            caption = format_chemistry(caption)
+        return b.labels.label(self.scheme.id) or "Scheme", caption
+
+    def code(self, labelled: bool = True) -> str:
+        """The scheme's Typst code. `labelled` False leaves its label and caption out (the
+        Word export writes them as text under the picture: see caption())."""
         for message in se.warnings(self.project, self.scheme):
             self.b.warnings.append(message)
         items = self.items()
@@ -219,7 +233,7 @@ class SchemeWriter:
             return ""
         lay = self.layout
         b = self.b
-        if lay["show_label"]:
+        if lay["show_label"] and labelled:
             b.kinds["scheme"] += 1
             label = b.labels.label(self.scheme.id) or "Scheme"
             caption = [Run(self.scheme.name)]
@@ -242,8 +256,12 @@ class SchemeWriter:
                 # (the conditions' printed size comes back from Typst under this key:
                 # compile/run.py warns when shrinking made it too small)
                 f"key: {typst_string(self.scheme.name)}"]
-        return ("#si-reaction-scheme((\n  " + ",\n  ".join(items) + ",\n), "
+        code = ("#si-reaction-scheme((\n  " + ",\n  ".join(items) + ",\n), "
                 + ", ".join(args) + ")")
+        # Its own caption size (its Layout…), else the document's (Project settings ▸ Text
+        # and tables).
+        size = float(lay.get("caption_size_pt") or 0)
+        return formatting.caption_size_code(code, size if size > 0 else None)
 
 
 def editor_scheme(builder, scheme) -> str:
