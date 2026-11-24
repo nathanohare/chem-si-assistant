@@ -1,5 +1,13 @@
 # Chem SI Assistant
 
+> **Chem SI Assistant is no longer developed: it has been replaced by
+> [Chemweave](https://github.com/nathanohare/Chemweave)**, whose SI Project tab does everything
+> this program did, alongside a full chemistry drawing program, documents, slides and
+> spreadsheets. Chemweave saves an SI project as one `.chemsi` file. To move a project made
+> here, open its folder in Chemweave (File ▸ Open ▸ SI Project Folder) and save it: Chemweave
+> makes the `.chemsi` file and leaves the folder as it was. This repository stays up for
+> reference; its releases still work but get no further fixes.
+
 A desktop program for building the Supporting Information of a synthetic chemistry paper.
 See `SPEC.md` for the full design.
 
